@@ -89,8 +89,9 @@ bool atecc608_probe(atecc608_t *dev, i2c_inst_t *bus);
 // RANDOM (0x1B): 32 bytes of random data. A good "is the chip alive" test.
 int atecc608_random(atecc608_t *dev, uint8_t out[32]);
 
-// INFO (0x30), revision mode: 4 response bytes. For an ATECC608B this is
-// 00 00 60 03 (the last byte is the silicon revision).
+// INFO (0x30), revision mode: 4 response bytes [0x00, identifier, part,
+// revision]. Part 0x60 is the ATECC608 family; revision > 0x02 is the
+// "B" variant (cryptoauthlib's decoding).
 int atecc608_info(atecc608_t *dev, uint8_t out[4]);
 
 // READ (0x02): 32-byte config zone block 0. The factory serial number is

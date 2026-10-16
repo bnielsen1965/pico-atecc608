@@ -31,12 +31,55 @@
 
 static atecc608_t atecc;
 
+// Recover a stuck I2C bus: if the ATECC (or a previous firmware that died
+// mid-transaction) is holding SDA low, the I2C controller's blocking calls
+// spin forever. Release SDA, clock up to 9 SCL pulses so any slave finishes
+// its byte, issue a STOP, then hand the pins back to the I2C peripheral.
+// Skipped entirely when SDA is already high (idle bus).
+static void i2c_bus_recover(void) {
+    if (gpio_get(I2C_SDA_PIN)) {
+        return;  // bus idle, nothing to recover
+    }
+
+    I2C_BUS->hw->enable = 0;
+
+    for (size_t i = 0; i < 2; i++) {
+        uint pin = i == 0 ? I2C_SDA_PIN : I2C_SCL_PIN;
+        gpio_set_function(pin, GPIO_FUNC_SIO);
+        gpio_pull_up(pin);
+        gpio_put(pin, 1);
+        gpio_set_dir(pin, GPIO_OUT);
+    }
+
+    for (int i = 0; i < 9; i++) {
+        gpio_put(I2C_SCL_PIN, 0);
+        sleep_us(10);
+        gpio_put(I2C_SCL_PIN, 1);
+        sleep_us(10);
+        if (gpio_get(I2C_SDA_PIN)) {
+            break;  // SDA released, slave is no longer holding the bus
+        }
+    }
+
+    // STOP condition: SDA low -> high while SCL is high.
+    gpio_put(I2C_SCL_PIN, 1);
+    gpio_put(I2C_SDA_PIN, 0);
+    sleep_us(10);
+    gpio_put(I2C_SDA_PIN, 1);
+    sleep_us(10);
+
+    gpio_set_function(I2C_SDA_PIN, GPIO_FUNC_I2C);
+    gpio_set_function(I2C_SCL_PIN, GPIO_FUNC_I2C);
+    I2C_BUS->hw->enable = 1;
+}
+
 static void commandHelp(char *cmdLine) {
     (void)cmdLine;
     printf("pico-atecc608: Pico 2 + ATECC608B over I2C0 (GP20/GP21)\n");
     printf("help    - display this message\n");
     printf("bootrom - reset into BOOTSEL mode (USB bootloader)\n");
     printf("probe   - scan I2C0 for the ATECC608 (0x60/0x61)\n");
+    printf("diag    - I2C bus diagnostics (levels, wake handshake bytes)\n");
     printf("random  - RANDOM command (32 random bytes from the chip)\n");
     printf("info    - INFO command (silicon revision)\n");
     printf("serial  - READ config block 0 (factory serial number)\n");
@@ -52,6 +95,7 @@ static void commandBootrom(char *cmdLine) {
 
 static void commandProbe(char *cmdLine) {
     (void)cmdLine;
+    i2c_bus_recover();
     if (atecc608_probe(&atecc, I2C_BUS)) {
         printf("ATECC608 found at I2C address 0x%02X (wake handshake ok)\n", atecc.addr);
     } else {
@@ -94,13 +138,16 @@ static void commandInfo(char *cmdLine) {
         printf("INFO failed: %s\n", atecc608_result_str(rc));
         return;
     }
-    printf("ATECC608 @ 0x%02X revision: %02X %02X %02X %02X",
-           atecc.addr, info[0], info[1], info[2], info[3]);
-    // ATECC608B silicon answers 00 00 60 03 (02 on ATECC608A).
-    if (info[0] == 0x00 && info[1] == 0x00 && info[2] == 0x60) {
-        printf("  (%s, revision %u)", info[3] == 0x03 ? "ATECC608B" : "ATECC608A", info[3]);
+    // Decode per cryptoauthlib: info[2] is the part id, info[3] the silicon
+    // revision. Part 0x60 with revision > 2 is an ATECC608B.
+    const char *model = "unknown";
+    if (info[2] == 0x60) {
+        model = (info[3] > 0x02) ? "ATECC608B" : "ATECC608A";
+    } else if (info[2] == 0x50) {
+        model = "ATECC508A";
     }
-    printf("\n");
+    printf("ATECC @ 0x%02X info: %02X %02X %02X %02X  (%s, revision %u)\n",
+           atecc.addr, info[0], info[1], info[2], info[3], model, info[3]);
 }
 
 static void commandSerial(char *cmdLine) {
@@ -130,6 +177,34 @@ static void commandSerial(char *cmdLine) {
     atecc608_print_hex(serial, sizeof(serial));
 }
 
+// Bus diagnostics: pin levels and the raw bytes of the wake handshake at
+// both addresses. Note that the wake read only returns the 04 11 33 43
+// packet when the chip was ASLEEP; a chip that is still awake NACKs the
+// read, so rc=-1 shortly after a command is normal. rc=-2 (timeout) would
+// indicate a stuck bus instead.
+static void commandDiag(char *cmdLine) {
+    (void)cmdLine;
+    uint8_t r[4];
+    int rc;
+
+    printf("bus levels: SDA=%u SCL=%u\n",
+           gpio_get(I2C_SDA_PIN), gpio_get(I2C_SCL_PIN));
+
+    rc = i2c_write_timeout_us(I2C_BUS, 0x00, (const uint8_t[]){ 0x00 }, 1, false, 10000);
+    printf("general call: rc=%d (%s)\n", rc,
+           rc == -1 ? "NACK (expected)" : (rc == 1 ? "ack" : "bus fault"));
+    sleep_us(1500);
+
+    for (uint8_t addr = ATECC608_ADDR_ADR_LOW; addr <= ATECC608_ADDR_ADR_HIGH; addr++) {
+        rc = i2c_read_timeout_us(I2C_BUS, addr, r, sizeof(r), false, 10000);
+        printf("wake read @0x%02X: rc=%d", addr, rc);
+        if (rc == (int)sizeof(r)) {
+            printf(" %02X %02X %02X %02X", r[0], r[1], r[2], r[3]);
+        }
+        printf("\n");
+    }
+}
+
 static void commandUnknown(char *cmdLine) {
     printf("Unknown command. Try 'help'.\n");
 }
@@ -140,6 +215,7 @@ static struct command_t commands[] = {
     {"help", commandHelp},
     {"bootrom", commandBootrom},
     {"probe", commandProbe},
+    {"diag", commandDiag},
     {"random", commandRandom},
     {"info", commandInfo},
     {"serial", commandSerial},
@@ -157,6 +233,7 @@ int main(void) {
 
     initPicoStdio();
     printf("pico-atecc608 ready.\n");
+    i2c_bus_recover();
     if (atecc608_probe(&atecc, I2C_BUS)) {
         printf("ATECC608 found at I2C address 0x%02X\n", atecc.addr);
     } else {

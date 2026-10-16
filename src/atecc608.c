@@ -11,6 +11,10 @@
 #define ATECC608_POLL_INTERVAL_US 2000
 #define ATECC608_POLL_ATTEMPTS    150  // 150 * 2 ms = 300 ms budget
 
+// Per-transaction I2C timeout. The SDK's plain blocking calls spin forever
+// on a stuck bus (SDA held low), which would hang the boot-time probe.
+#define ATECC608_I2C_TIMEOUT_US   10000
+
 // Wake response: count, status 0x11 (woken up), CRC.
 static const uint8_t wake_response[4] = { 0x04, 0x11, 0x33, 0x43 };
 
@@ -43,11 +47,13 @@ bool atecc608_wake(atecc608_t *dev) {
     // General call: START, address 0x00 (write), STOP. The device NACKs;
     // the SDA dip is the wake pulse. (The SDK rejects zero-length writes,
     // so we send one dummy byte; the NACK happens before it is clocked.)
-    (void)i2c_write_blocking(dev->bus, 0x00, (const uint8_t[]){ 0x00 }, 1, false);
+    (void)i2c_write_timeout_us(dev->bus, 0x00, (const uint8_t[]){ 0x00 }, 1, false,
+                               ATECC608_I2C_TIMEOUT_US);
     sleep_us(1500);
 
     uint8_t response[4];
-    int rc = i2c_read_blocking(dev->bus, dev->addr, response, sizeof(response), false);
+    int rc = i2c_read_timeout_us(dev->bus, dev->addr, response, sizeof(response), false,
+                                 ATECC608_I2C_TIMEOUT_US);
 
     i2c_set_baudrate(dev->bus, ATECC608_NORMAL_BAUD_HZ);
 
@@ -100,7 +106,13 @@ static int transact(atecc608_t *dev, uint8_t opcode, uint8_t param1, uint16_t pa
             return ATECC608_ERR_NACK;
         }
 
-        if (i2c_write_blocking(dev->bus, dev->addr, tx, sizeof(tx), false) != (int)sizeof(tx)) {
+        if (i2c_write_timeout_us(dev->bus, dev->addr, tx, sizeof(tx), false,
+                                 ATECC608_I2C_TIMEOUT_US) != (int)sizeof(tx)) {
+            // No ACK: the chip went back to sleep (or is absent). A sleeping
+            // ATECC NACKs its own address, so re-wake and try once more.
+            if (pass == 0) {
+                continue;
+            }
             dev->chip_status = 0;
             return ATECC608_ERR_NACK;
         }
@@ -113,21 +125,27 @@ static int transact(atecc608_t *dev, uint8_t opcode, uint8_t param1, uint16_t pa
                 sleep_us(ATECC608_POLL_INTERVAL_US);
             }
             uint8_t token = ATECC608_TOKEN_READ;
-            if (i2c_write_blocking(dev->bus, dev->addr, &token, 1, false) != 1) {
+            if (i2c_write_timeout_us(dev->bus, dev->addr, &token, 1, false,
+                                     ATECC608_I2C_TIMEOUT_US) != 1) {
                 continue;  // device busy, try again
             }
 
             uint8_t count;
-            if (i2c_read_blocking(dev->bus, dev->addr, &count, 1, false) != 1) {
+            if (i2c_read_timeout_us(dev->bus, dev->addr, &count, 1, false,
+                                    ATECC608_I2C_TIMEOUT_US) != 1) {
                 continue;  // device busy, try again
             }
+            // The CRC below covers the count byte through the data, so
+            // store it at resp[0] before reading the rest of the response.
+            resp[0] = count;
 
             // count covers the whole response: count byte + data + 2 CRC.
             if (count < 4 || count - 1 > resp_size) {
                 dev->chip_status = 0;
                 return ATECC608_ERR_PROTO;
             }
-            if (i2c_read_blocking(dev->bus, dev->addr, resp + 1, count - 1, false) != (int)(count - 1)) {
+            if (i2c_read_timeout_us(dev->bus, dev->addr, resp + 1, count - 1, false,
+                                    ATECC608_I2C_TIMEOUT_US) != (int)(count - 1)) {
                 continue;  // truncated read, try again
             }
 
@@ -140,7 +158,8 @@ static int transact(atecc608_t *dev, uint8_t opcode, uint8_t param1, uint16_t pa
             }
 
             // Put the device back to idle (0x02 I/O token).
-            (void)i2c_write_blocking(dev->bus, dev->addr, (uint8_t[]){ ATECC608_TOKEN_IDLE }, 1, false);
+            (void)i2c_write_timeout_us(dev->bus, dev->addr, (uint8_t[]){ ATECC608_TOKEN_IDLE }, 1,
+                                       false, ATECC608_I2C_TIMEOUT_US);
 
             // A 4-byte response carries a chip error status, not data.
             if (count == 4) {
