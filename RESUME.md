@@ -138,6 +138,17 @@ redefined` (from cryptoauthlib's own headers, harmless).
   wait for `/run/media/burnin/RP2350`, copy the uf2. Pico 2 runtime PID is
   `2e8a:0009`; BOOTSEL PID is `2e8a:000f` (NOT 0009).
 
+## HARD RULE (user, 2026-10-18): no chip writes without an explicit go-ahead
+The user has a limited number of spare ATECC608 chips and does NOT want the
+connected chip put into an unintended state. Until the user explicitly
+approves a specific write:
+- Hardware validation is **read-only** (probe / info / serial / lock status /
+  random). Write APIs may be *implemented* as code, never *exercised* on the
+  chip.
+- When a step genuinely requires writing to the chip (Phase 4 provisioning
+  first), **STOP and review with the user first**: what is written, to which
+  bytes, and whether it is reversible.
+
 ## Next steps (Phase 3 — core API)
 1. `include/atecc608/atecc608.h` — public surface (move/rename from
    `src/atecc608.h`): lifecycle (`init`/`deinit`), `probe`, `info`,

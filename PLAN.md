@@ -193,6 +193,11 @@ A single config struct drives init; everything else is a small, stable set.
 
 ## Ground rules (provisioning safeguards)
 
+0. **No writes to a physical chip without an explicit user go-ahead**
+   (2026-10-18): the connected chip is irreplaceable in practice (limited
+   spares). Hardware validation stays read-only; write APIs are implemented
+   but never exercised on hardware until a specific write is reviewed and
+   approved with the user.
 1. **Nothing irreversible without read-back verification.** Write config →
    read it back → byte-compare → only then may a lock be issued.
 2. **Write and lock are separate commands.** A power loss in between leaves a
