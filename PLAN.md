@@ -143,16 +143,31 @@ A single config struct drives init; everything else is a small, stable set.
     `build/app/`); no cryptoauthlib source in the repo (`build/` is gitignored).
     *The demo's hardware run (probe/random/info/serial) is build-verified here;
     confirm on the board.*
-- **Phase 2 — RP2350 I2C HAL.** Implement the `atca_hal` I2C interface
-  (`hal_i2c_init/post_init/send/receive/control/release` + `hal_delay_ms/us`)
-  on the existing driver's raw-I2C primitives (wake 100 kHz, 400 kHz traffic,
-  timeouts, sleep re-wake, bus recovery); fold `src/atecc608.c` into it.
-  `atecc608_init(cfg)` wires the `ATCAIfaceCfg` (devtype **ATECC608**, address,
-  `wake_delay` µs, baud). Decide the wake: proper I2C general-call (0-byte) vs.
-  the current 1-byte dummy (SDK rejects zero-length writes).
-  - **Done when:** read-only ops through cryptoauthlib (`atcab_info`,
-    `atcab_read_config_zone` block 0, `atcab_is_locked`, `atcab_random`) succeed
-    and match the standalone driver.
+- **Phase 2 — RP2350 I2C HAL — DONE (2026-10-18).** Implemented the
+  `atca_hal` I2C interface (`hal_i2c_init/post_init/send/receive/control/
+  release` + `hal_delay_ms/us`) in `src/hal_rp2350.c` (compiled into
+  `cryptoauth_core`; ctx travels via `ATCAIfaceCfg.cfg_data`); folded the
+  standalone driver's raw-I2C primitives into it and retired `src/atecc608.c`
+  as a driver (now just the init/deinit surface over `atcab_init/release`).
+  `atecc608_init(cfg)` wires the `ATCAIfaceCfg` (devtype **ATECC608**, 8-bit
+  address `addr << 1`, `wake_delay` 1500 µs, `rx_retries` 20, 400 kHz).
+  - **Wake decision (settled):** full handshake inside
+    `hal_i2c_control(ATCA_HAL_CONTROL_WAKE)` — 100 kHz, 1-byte dummy
+    general-call write (never clocked: the chip NACKs 0x00 and the controller
+    aborts before the data byte, so the wire trace equals a true 0-byte
+    general call), `wake_delay` settle, read 4 bytes, restore baud,
+    `hal_check_wake`. `ATCA_HAL_CHANGE_BAUD` → `ATCA_UNIMPLEMENTED`, which
+    verified routes `calib_wakeup_i2c` entirely through `CONTROL_WAKE` with
+    **no library retry** — so the wake owns its retries: fast read retries,
+    then 3 complete re-handshakes on failure (empirically required; without
+    it, ~1 in 5 command sequences failed with a NACKed send).
+  - **Error semantics match the reference HALs** (ESP32/Harmony):
+    `ATCA_COMM_FAIL` on any I2C NACK/timeout.
+  - **Done when (verified on hardware, 3 rounds, all green):** `atcab_wakeup`
+    ok; `atcab_info` → `00 00 60 05`; `atcab_read_config_zone` block 0 +
+    serial `01 23 06 40 AE B6 B9 B7 EE`; `atcab_is_locked` → both zones
+    unlocked; `atcab_random` → `FF FF 00 00…` — all matching the Phase-1
+    standalone driver exactly.
 - **Phase 3 — Core API.** `init/deinit`, `probe`, `info`, `serial`, `random`,
   `last_error`, zone read/write, `read_slot`/`write_slot`/`read_pubkey`,
   `is_locked` — thin correct wrappers over `atcab_*`.
@@ -271,22 +286,27 @@ the Lock command owns bytes 86–87.
 - Transport-level per-payload protection would be a custom, HAL-level
   implementation — **out of scope** unless a consumer specifically needs it.
 
-## Current state (verified on hardware, 2026-10-16)
+## Current state (verified on hardware, 2026-10-18)
 
 - Chip: **ATECC608C**, I2C **0x60**, unprovisioned, config zone **unlocked**.
   Serial `01 23 06 40 AE B6 B9 B7 EE`. INFO `00 00 60 05` (part 0x60, rev 5).
 - RNG streams `FF FF 00 00 ...` pre-provisioning (normal for a fresh chip).
-- Firmware: a **self-contained I2C driver** (`src/atecc608.c`) —
-  wake/probe/diag + RANDOM/INFO/READ; a **console app** (`src/main.c`) with
-  `help/bootrom/probe/diag/random/info/serial`. All responses CRC-validated;
-  sleep re-wake and guarded bus recovery work. No cryptoauthlib dependency yet.
-- cryptoauthlib **v3.8.0** available locally at `../cryptoauthlib` as a
-  development reference only.
+- Firmware: the **cryptoauthlib v3.8.0 path is live** — `src/hal_rp2350.c`
+  (RP2350 I2C HAL, wake handshake incl. full-handshake fallback retries,
+  stuck-bus recovery, 10 ms timeouts) + `src/atecc608.c` (init/deinit over
+  `atcab_init`/`atcab_release`). The old standalone driver is retired. The
+  console (`app/main.c`) exercises `atcab_wakeup/info/read_config_zone/
+  is_locked/random` plus raw-I2C `diag` and `bootrom`; all read-only ops
+  match the Phase-1 standalone outputs exactly (Phase 2 exit criteria).
+- cryptoauthlib **v3.8.0** fetched at build time; the clone at
+  `../cryptoauthlib` is a development reference only.
 
 ## Open items (resolve during implementation — not re-opens)
 
-- **Phase 2:** HAL wake via a proper I2C general-call (0-byte) vs. the 1-byte
-  dummy workaround.
+- ~~**Phase 2:** HAL wake via a proper I2C general-call (0-byte) vs. the
+  1-byte dummy workaround.~~ — **Resolved 2026-10-18:** full handshake in
+  `hal_i2c_control(WAKE)`; the 1-byte dummy write is wire-identical to a 0-byte
+  general call (chip NACKs 0x00 before any data byte is clocked). See Phase 2.
 - **Phase 4:** exact READKEY/WRITE_KEY (4-bit), KEY_TYPE (3-bit), and the
   counter "special format" encodings — decode against the **manual's field
   tables**, not from memory. ECC private-key slots use a *distinct* SlotConfig

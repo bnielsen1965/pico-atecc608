@@ -74,13 +74,15 @@ set(ATCA_ATECC108A_SUPPORT ON)
 set(ATCA_ATSHA206A_SUPPORT ON)   # legacy, pulls in app/api_206a
 set(ATCA_CA_SUPPORT        ON)
 set(ATCA_CHECK_PARAMS_EN   ON)
+# Phase 2: the module supplies the RP2350 I2C HAL (src/hal_rp2350.c), and
+# the atcab_* basic API layer is compiled for the demo console.
+set(ATCA_HAL_I2C           ON)
+set(ATCA_USE_ATCAB_FUNCTIONS ON)
 # newlib (the Pico C library) provides these. (strcasestr is a GNU extension
 # newlib does not declare, so we leave ATCA_PLATFORM_STRCASESTR undefined and
 # let cryptoauthlib use its own lib_strcasestr fallback in atca_helpers.c.)
 set(ATCA_PLATFORM_MALLOC malloc)
 set(ATCA_PLATFORM_FREE   free)
-# ATCA_HAL_I2C is intentionally NOT defined here; the module supplies the I2C
-# HAL in Phase 2 and turns this on at that point.
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/cryptoauth_core)
 configure_file(
     ${CAL}/atca_config.h.in
@@ -98,6 +100,10 @@ file(GLOB            CA_HOST_SRC     ${CAL}/host/*.c)
 set(CA_HAL_SRC             ${CAL}/hal/atca_hal.c)
 set(CA_API206_SRC          ${cryptoauthlib_SOURCE_DIR}/app/api_206a/api_206a.c)
 
+# Our RP2350 I2C HAL is compiled INTO this target rather than into the
+# atecc608 library: atca_hal.c in this archive references the hal_i2c_*
+# symbols, and a static archive cannot satisfy references from an archive
+# listed earlier on the link line (single-pass resolution).
 add_library(cryptoauth_core STATIC
     ${CA_TOP_SRC}
     ${CA_ATCACERT_SRC}
@@ -106,8 +112,17 @@ add_library(cryptoauth_core STATIC
     ${CA_HOST_SRC}
     ${CA_HAL_SRC}
     ${CA_API206_SRC}
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/hal_rp2350.c
 )
-set_target_properties(cryptoauth_core PROPERTIES C_STANDARD 99)
+# NOTE: no C_STANDARD override — the project default is C11, which the
+# pico-sdk headers (hardware/i2c.h, pulled in by our HAL source) require
+# for static_assert. cryptoauthlib itself compiles fine under C11.
+# The HAL needs the pico-sdk (hardware_i2c, stdlib); PUBLIC so consuming
+# targets inherit the include paths and the final link.
+target_link_libraries(cryptoauth_core PUBLIC
+    pico_stdlib
+    hardware_i2c
+)
 target_include_directories(cryptoauth_core PUBLIC
     ${CMAKE_CURRENT_BINARY_DIR}/cryptoauth_core
     ${CAL}
@@ -123,8 +138,9 @@ target_include_directories(cryptoauth_core PUBLIC
 # ============================================================================
 # module library
 # ============================================================================
-# Phase 1: the module is still just the in-repo driver. It grows in later
-# phases (HAL in Phase 2, public API in Phase 3, config builder in Phase 4).
+# Phase 2: the module is the init layer (src/atecc608.c) over cryptoauthlib;
+# the RP2350 I2C HAL lives in the cryptoauth_core target (see above). It
+# grows in later phases (public API in Phase 3, config builder in Phase 4).
 add_library(atecc608 STATIC
     src/atecc608.c
 )
@@ -132,8 +148,7 @@ target_include_directories(atecc608 PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 target_link_libraries(atecc608 PUBLIC
-    hardware_i2c
-    pico_stdlib
+    cryptoauth_core   # brings pico_stdlib + hardware_i2c transitively
 )
 
 # Single, namespaced target for consuming projects to link against.

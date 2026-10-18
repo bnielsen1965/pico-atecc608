@@ -1,7 +1,8 @@
 # Demo / diagnostic console app.
 #
-# Today it drives the in-module driver directly (the public `atecc608_*` API is
-# introduced in Phase 3). By Phase 6 it exercises the module's public API.
+# Phase 2: drives read-only operations through cryptoauthlib (atcab_*)
+# initialized via the module's atecc608_init(). By Phase 6 it exercises the
+# module's public atecc608_* API.
 add_executable(pico-atecc608
     main.c
 )
