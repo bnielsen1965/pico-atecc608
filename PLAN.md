@@ -168,11 +168,33 @@ A single config struct drives init; everything else is a small, stable set.
     serial `01 23 06 40 AE B6 B9 B7 EE`; `atcab_is_locked` → both zones
     unlocked; `atcab_random` → `FF FF 00 00…` — all matching the Phase-1
     standalone driver exactly.
-- **Phase 3 — Core API.** `init/deinit`, `probe`, `info`, `serial`, `random`,
-  `last_error`, zone read/write, `read_slot`/`write_slot`/`read_pubkey`,
-  `is_locked` — thin correct wrappers over `atcab_*`.
-  - **Done when:** on hardware, API results match the standalone driver; host
-    build is warning-clean.
+- **Phase 3 — Core API — DONE (2026-10-18).** Public header moved to
+  `include/atecc608/atecc608.h` (module layout); `src/atecc608.h` removed,
+  `src/hal_rp2350.*` stays module-internal. The curated surface:
+  `init/deinit`, `probe` (atcab_wakeup), `info` (`atecc608_info_t{part,
+  revision}` from INFO bytes 2/3), `serial` (atcab_read_serial_number, 9 B),
+  `random(n)` (chip RANDOM is fixed 32 B — larger requests are chunked,
+  smaller discard the final tail), `read_config_zone`/`write_config_zone`,
+  `read_slot`/`write_slot` (v3.8.0 has **no** `atcab_read_slot`/
+  `atcab_write_slot` — slots go through `atcab_read_bytes_zone`/
+  `atcab_write_bytes_zone` with `ATCA_ZONE_DATA`, offset 0, len 32),
+  `read_pubkey` (64 B), `is_locked`.
+  - **Error model:** every function returns a curated `atecc608_status_t`
+    (OK + 8 error classes); the mapping from `ATCA_STATUS` is total and
+    lossless — the raw code of the last failure is always retrievable via
+    `atecc608_last_error()`.
+  - **`atecc608_zone_t` values deliberately equal the `LOCK_ZONE_*` ids**
+    (0x00 config / 0x01 data) and are mapped explicitly to them — not cast,
+    and not confused with the `ATCA_ZONE_*` command ids (data zone 0x02).
+  - The demo console was rewired to the module API now (pulled forward from
+    Phase 6) so the API is exercised on hardware; Phase 6 keeps the config
+    read-back demo.
+  - **Done when (verified):** on hardware, 3 rounds × (probe/info/serial/
+    lock/random) + diag — all results match the Phase-1 standalone driver
+    exactly (serial `01 23 06 40 AE B6 B9 B7 EE`, part 0x60 rev 5, both
+    zones unlocked, `FF FF 00 00…` RNG). Build is warning-clean for our
+    sources (the only warning is the known cosmetic `ATCA_TA_SUPPORT
+    redefined` inside cryptoauthlib's own headers).
 - **Phase 4 — Provisioning utilities + config builder.** A field-level
   config-builder (from `calib_device.h`) → 128-byte array + `config_verify`;
   guarded provisioning API (read/write with read-back verify, lock_config/lock_
@@ -184,8 +206,9 @@ A single config struct drives init; everything else is a small, stable set.
   `genkey` / `read_pubkey` wrappers, added as consumers need them.
   - **Done when:** at least a KDF round-trip is validated on hardware.
 - **Phase 6 — Sample / diagnostic app.** The `app/` console exercises the
-  library API (probe/info/serial/random + a config read-back demo) — it uses the
-  module, not the raw driver. It is a demo, **not** a provisioning tool.
+  library API (probe/info/serial/random were wired in Phase 3; add a config
+  read-back demo) — it uses the module, not the raw driver. It is a demo,
+  **not** a provisioning tool.
   - **Done when:** the demo builds against the lib and runs on hardware.
 - **Phase 7 — On-hardware validation + regression + bring-up checklist.**
   Full on-hardware suite; a documented, reusable bring-up checklist.
@@ -298,11 +321,12 @@ the Lock command owns bytes 86–87.
 - RNG streams `FF FF 00 00 ...` pre-provisioning (normal for a fresh chip).
 - Firmware: the **cryptoauthlib v3.8.0 path is live** — `src/hal_rp2350.c`
   (RP2350 I2C HAL, wake handshake incl. full-handshake fallback retries,
-  stuck-bus recovery, 10 ms timeouts) + `src/atecc608.c` (init/deinit over
-  `atcab_init`/`atcab_release`). The old standalone driver is retired. The
-  console (`app/main.c`) exercises `atcab_wakeup/info/read_config_zone/
-  is_locked/random` plus raw-I2C `diag` and `bootrom`; all read-only ops
-  match the Phase-1 standalone outputs exactly (Phase 2 exit criteria).
+  stuck-bus recovery, 10 ms timeouts) + `src/atecc608.c` (the curated
+  `atecc608_*` core API over `atcab_*`, public header in
+  `include/atecc608/atecc608.h`). The old standalone driver is retired. The
+  console (`app/main.c`) exercises the module API (`atecc608_probe/info/
+  serial/is_locked/random`) plus raw-I2C `diag` and `bootrom`; 3 validation
+  rounds match the Phase-1 standalone outputs exactly (Phase 3 exit criteria).
 - cryptoauthlib **v3.8.0** fetched at build time; the clone at
   `../cryptoauthlib` is a development reference only.
 
@@ -321,5 +345,7 @@ the Lock command owns bytes 86–87.
 
 ## Implementation-time details
 
-- The console's `info` model label currently reads "ATECC608B, revision 5"
-  (from the pre-"C" decoding) — update to 608C when the API is in place.
+- ~~Console `info` model label ("ATECC608B") — update to 608C when the API
+  is in place.~~ — **Resolved 2026-10-18 (Phase 3):** the API reports raw
+  part/revision (`atecc608_info_t`); the demo console labels part 0x60 as
+  ATECC608C (board-specific; the chip on the board is a 608C).

@@ -7,22 +7,21 @@
 //   UART0 GP0  (TX),  GP1 (RX)    -> USB-serial console
 //   USB   flashing / optional CDC console
 //
-// Phase 2: the console runs read-only operations through cryptoauthlib
-// (atcab_*) and must match the Phase 1 standalone driver's outputs.
-// Phase 6 rewires it to the module's atecc608_* API.
+// Phase 3: the console exercises the module's curated atecc608_* API
+// (read-only operations) and must produce the same results as the Phase 1
+// standalone driver. Phase 6 adds the config read-back demo.
 //
 // Console commands (basic smoke tests only - no slots are programmed):
 //   help     - list commands
 //   bootrom  - reset into BOOTSEL mode (USB bootloader)
-//   probe    - wake handshake through cryptoauthlib (atcab_wakeup)
-//   random   - atcab_random: 32 bytes of chip-generated randomness
-//   info     - atcab_info: silicon revision
-//   serial   - atcab_read_config_zone: config block 0 (factory serial)
-//   lock     - atcab_is_locked: config/data zone lock status
+//   probe    - atecc608_probe: wake handshake
+//   random   - atecc608_random: 32 bytes of chip-generated randomness
+//   info     - atecc608_info: part id + silicon revision
+//   serial   - atecc608_serial: 9-byte factory serial
+//   lock     - atecc608_is_locked: config/data zone lock status
 //   diag     - raw I2C bus diagnostics (levels, general call, wake read)
 
 #include <stdio.h>
-#include <string.h>
 
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
@@ -30,8 +29,7 @@
 #include "hardware/gpio.h"
 #include "pico-command-line.h"
 
-#include "cryptoauthlib.h"
-#include "atecc608.h"
+#include "atecc608/atecc608.h"
 
 #define I2C_BUS     i2c0
 #define I2C_SDA_PIN 20
@@ -45,25 +43,12 @@ static atecc608_cfg_t s_cfg = {
     .baud    = ATECC608_FAST_BAUD_HZ,
 };
 
-// Short text for the ATCA_STATUS codes the read-only commands can hit.
-static const char *atca_status_str(ATCA_STATUS status)
+// Report a failed atecc608_* call: curated status text plus the raw
+// cryptoauthlib ATCA_STATUS for diagnostics.
+static void report_fail(const char *op, atecc608_status_t st)
 {
-    switch (status) {
-    case ATCA_SUCCESS:            return "ok";
-    case ATCA_WAKE_FAILED:        return "wake handshake failed (chip asleep / absent?)";
-    case ATCA_RX_FAIL:            return "I2C receive failed (NACK / timeout)";
-    case ATCA_RX_NO_RESPONSE:     return "no response from device";
-    case ATCA_COMM_FAIL:          return "I2C communication failed";
-    case ATCA_STATUS_SELFTEST_ERROR: return "chip POST self-test failure";
-    case ATCA_EXECUTION_ERROR:    return "chip could not execute the command";
-    case ATCA_GEN_FAIL:           return "general failure";
-    default:                      return "error";
-    }
-}
-
-static void report_fail(const char *op, ATCA_STATUS status)
-{
-    printf("%s failed: %s (%d)\n", op, atca_status_str(status), (int)status);
+    printf("%s failed: %s (ATCA_STATUS %d)\n", op,
+           atecc608_status_str(st), (int)atecc608_last_error());
 }
 
 static void commandHelp(char *cmdLine)
@@ -72,12 +57,12 @@ static void commandHelp(char *cmdLine)
     printf("pico-atecc608: Pico 2 + ATECC608C over I2C0 (GP20/GP21)\n");
     printf("help    - display this message\n");
     printf("bootrom - reset into BOOTSEL mode (USB bootloader)\n");
-    printf("probe   - wake handshake through cryptoauthlib (atcab_wakeup)\n");
+    printf("probe   - atecc608_probe (wake handshake)\n");
     printf("diag    - raw I2C bus diagnostics (levels, wake handshake bytes)\n");
-    printf("random  - atcab_random (32 random bytes from the chip)\n");
-    printf("info    - atcab_info (silicon revision)\n");
-    printf("serial  - atcab_read_config_zone, block 0 (factory serial)\n");
-    printf("lock    - atcab_is_locked (config / data zone)\n");
+    printf("random  - atecc608_random (32 random bytes from the chip)\n");
+    printf("info    - atecc608_info (part id + silicon revision)\n");
+    printf("serial  - atecc608_serial (9-byte factory serial)\n");
+    printf("lock    - atecc608_is_locked (config / data zone)\n");
 }
 
 static void commandBootrom(char *cmdLine)
@@ -92,21 +77,22 @@ static void commandBootrom(char *cmdLine)
 static void commandProbe(char *cmdLine)
 {
     (void)cmdLine;
-    ATCA_STATUS status = atcab_wakeup();
-    if (ATCA_SUCCESS == status) {
+    atecc608_status_t st = atecc608_probe();
+    if (ATECC608_OK == st) {
         printf("ATECC608 found at I2C address 0x%02X (wake handshake ok)\n", s_cfg.addr);
     } else {
-        printf("ATECC608 not found @ 0x%02X: %s\n", s_cfg.addr, atca_status_str(status));
+        printf("ATECC608 not found @ 0x%02X: %s (ATCA_STATUS %d)\n",
+               s_cfg.addr, atecc608_status_str(st), (int)atecc608_last_error());
     }
 }
 
 static void commandRandom(char *cmdLine)
 {
     (void)cmdLine;
-    uint8_t rand[32];
-    ATCA_STATUS status = atcab_random(rand);
-    if (ATCA_SUCCESS != status) {
-        report_fail("RANDOM", status);
+    uint8_t rand[ATECC608_RNG_CHUNK_LEN];
+    atecc608_status_t st = atecc608_random(rand, sizeof(rand));
+    if (ATECC608_OK != st) {
+        report_fail("RANDOM", st);
         return;
     }
     printf("32 random bytes from ATECC608 @ 0x%02X:\n", s_cfg.addr);
@@ -116,40 +102,30 @@ static void commandRandom(char *cmdLine)
 static void commandInfo(char *cmdLine)
 {
     (void)cmdLine;
-    uint8_t info[4];
-    ATCA_STATUS status = atcab_info(info);
-    if (ATCA_SUCCESS != status) {
-        report_fail("INFO", status);
+    atecc608_info_t info;
+    atecc608_status_t st = atecc608_info(&info);
+    if (ATECC608_OK != st) {
+        report_fail("INFO", st);
         return;
     }
-    // Per cryptoauthlib: info[2] is the part id, info[3] the silicon
-    // revision. Part 0x60 with revision > 2 is the 608 B/C family.
-    const char *model = "unknown";
-    if (info[2] == 0x60) {
-        model = (info[3] > 0x02) ? "ATECC608 (B/C)" : "ATECC608A";
-    } else if (info[2] == 0x50) {
-        model = "ATECC508A";
-    }
-    printf("ATECC @ 0x%02X info: %02X %02X %02X %02X  (%s, revision %u)\n",
-           s_cfg.addr, info[0], info[1], info[2], info[3], model, info[3]);
+    // Part 0x60 is the ATECC608 family; the chip on this board is a
+    // 608C. (The API reports raw part/revision; the label is
+    // board-specific.)
+    const char *model = (info.part == 0x60) ? "ATECC608C" : "ATECC (unknown part)";
+    printf("ATECC @ 0x%02X info: %s, part 0x%02X, silicon revision %u\n",
+           s_cfg.addr, model, info.part, info.revision);
 }
 
 static void commandSerial(char *cmdLine)
 {
     (void)cmdLine;
-    uint8_t config[128];
-    ATCA_STATUS status = atcab_read_config_zone(config);
-    if (ATCA_SUCCESS != status) {
-        report_fail("READ config zone", status);
+    uint8_t serial[ATECC608_SERIAL_LEN];
+    atecc608_status_t st = atecc608_serial(serial);
+    if (ATECC608_OK != st) {
+        report_fail("SERIAL", st);
         return;
     }
-    printf("Config block 0 @ 0x%02X:\n", s_cfg.addr);
-    atecc608_print_hex(config, 32);
-    // The 9-byte factory serial number lives in bytes [0:4] and [8:13].
-    uint8_t serial[9];
-    memcpy(&serial[0], &config[0], 4);
-    memcpy(&serial[4], &config[8], 5);
-    printf("Serial: ");
+    printf("Serial @ 0x%02X: ", s_cfg.addr);
     atecc608_print_hex(serial, sizeof(serial));
 }
 
@@ -158,19 +134,16 @@ static void commandLock(char *cmdLine)
     (void)cmdLine;
     bool config_locked = false;
     bool data_locked = false;
-    ATCA_STATUS status;
+    atecc608_status_t st;
 
-    status = atcab_is_locked(LOCK_ZONE_CONFIG, &config_locked);
-    if (ATCA_SUCCESS != status) {
-        report_fail("IS_LOCKED (config)", status);
+    st = atecc608_is_locked(ATECC608_ZONE_CONFIG, &config_locked);
+    if (ATECC608_OK != st) {
+        report_fail("IS_LOCKED (config)", st);
         return;
     }
-    // Note: atcab_is_locked takes the LOCK_ZONE_* zone ids (0x00 config,
-    // 0x01 data), not the ATCA_ZONE_* command zone ids (0x00 config, 0x02
-    // data) — the two enums differ for the data zone.
-    status = atcab_is_locked(LOCK_ZONE_DATA, &data_locked);
-    if (ATCA_SUCCESS != status) {
-        report_fail("IS_LOCKED (data)", status);
+    st = atecc608_is_locked(ATECC608_ZONE_DATA, &data_locked);
+    if (ATECC608_OK != st) {
+        report_fail("IS_LOCKED (data)", st);
         return;
     }
     printf("Config zone: %s\n", config_locked ? "LOCKED" : "unlocked");
@@ -227,12 +200,13 @@ static struct command_t commands[] = {
 int main(void) {
     initPicoStdio();
 
-    ATCA_STATUS status = atecc608_init(&s_cfg);
-    if (ATCA_SUCCESS == status) {
+    atecc608_status_t st = atecc608_init(&s_cfg);
+    if (ATECC608_OK == st) {
         printf("pico-atecc608 ready: ATECC608 on I2C0 GP20/GP21 @ 0x%02X, %lu Hz.\n",
                s_cfg.addr, (unsigned long)s_cfg.baud);
     } else {
-        printf("ATECC608 init failed: %s (%d)\n", atca_status_str(status), (int)status);
+        printf("ATECC608 init failed: %s (ATCA_STATUS %d)\n",
+               atecc608_status_str(st), (int)atecc608_last_error());
     }
 
     // The command processor (core1) blocks on a semaphore, so it must be

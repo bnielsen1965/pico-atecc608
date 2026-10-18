@@ -138,14 +138,20 @@ target_include_directories(cryptoauth_core PUBLIC
 # ============================================================================
 # module library
 # ============================================================================
-# Phase 2: the module is the init layer (src/atecc608.c) over cryptoauthlib;
-# the RP2350 I2C HAL lives in the cryptoauth_core target (see above). It
-# grows in later phases (public API in Phase 3, config builder in Phase 4).
+# Phase 3: the module exposes the curated atecc608_* core API (public
+# header in include/atecc608/, implementation in src/atecc608.c) over
+# cryptoauthlib; the RP2350 I2C HAL (src/hal_rp2350.*) is module-internal
+# and lives in the cryptoauth_core target (see above). It grows in later
+# phases (config builder + provisioning guards in Phase 4).
 add_library(atecc608 STATIC
     src/atecc608.c
 )
-target_include_directories(atecc608 PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
+# Public: consumers get the API header. Private: our implementation files
+# also need the module-internal HAL header; it is not part of the public
+# surface.
+target_include_directories(atecc608
+    PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 target_link_libraries(atecc608 PUBLIC
     cryptoauth_core   # brings pico_stdlib + hardware_i2c transitively
