@@ -11,8 +11,9 @@
 // cryptoauthlib for diagnostics.
 //
 // Phase 3 scope: lifecycle, diagnostics, zone/slot read-write, lock status.
-// Provisioning guards (read-back verify, typed lock confirm) arrive in
-// Phase 4; crypto pass-through (kdf/sign/verify) in Phase 5.
+// Phase 4A adds the config builder (atecc608_config.h) and the guarded
+// provisioning API (atecc608_prov.h); crypto pass-through (kdf/sign/verify)
+// arrives in Phase 5.
 
 #pragma once
 
@@ -23,6 +24,8 @@
 #include "hardware/i2c.h"
 #include "atca_status.h"
 
+#include "atecc608/atecc608_types.h"
+
 // --- chip constants -------------------------------------------------------
 
 // 7-bit I2C address, selected by the ADR pin on the package.
@@ -32,15 +35,6 @@
 // Normal command-traffic baud. The wake pulse is always sent at 100 kHz
 // (handled inside the HAL).
 #define ATECC608_FAST_BAUD_HZ   400000u
-
-// Zone / slot geometry of the ATECC608.
-#define ATECC608_CONFIG_ZONE_LEN 128  // config zone, bytes
-#define ATECC608_DATA_SLOT_LEN   32   // one data slot, bytes
-#define ATECC608_MAX_DATA_SLOT   15   // slots 0..15
-#define ATECC608_PUBKEY_LEN      64   // ECC P-256 public key
-#define ATECC608_SERIAL_LEN      9    // factory serial number
-#define ATECC608_INFO_LEN        4    // INFO (revision) response
-#define ATECC608_RNG_CHUNK_LEN   32   // one chip RANDOM command
 
 // --- types -----------------------------------------------------------------
 
@@ -66,21 +60,6 @@ typedef struct {
     uint8_t part;      // INFO byte 2 (0x60 = ATECC608 family)
     uint8_t revision;  // INFO byte 3 (silicon revision)
 } atecc608_info_t;
-
-// Curated error status returned by every atecc608_* function. The raw
-// cryptoauthlib ATCA_STATUS of the last failure is available via
-// atecc608_last_error().
-typedef enum {
-    ATECC608_OK = 0,        // success
-    ATECC608_ERR,           // other/unknown error (see atecc608_last_error())
-    ATECC608_ERR_BAD_PARAM, // argument or buffer-size problem
-    ATECC608_ERR_NOT_INIT,  // library not initialized (call atecc608_init)
-    ATECC608_ERR_WAKE,      // wake handshake failed (chip absent or asleep)
-    ATECC608_ERR_COMM,      // I2C transmit failure / timeout
-    ATECC608_ERR_RX,        // I2C response not received / corrupt
-    ATECC608_ERR_EXEC,      // chip rejected the command (status byte)
-    ATECC608_ERR_CHIP_STATE,// chip state prevents the operation (e.g. locked)
-} atecc608_status_t;
 
 // --- lifecycle --------------------------------------------------------------
 

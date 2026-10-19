@@ -1,17 +1,23 @@
 # Resume notes (pico-atecc608)
 
-Pause point: **2026-10-18, end of Phase 3.** This file is a continuity
-snapshot — update it at each pause. The forward plan lives in `PLAN.md`; this
-file captures the exact working state and the concrete next steps.
+Pause point: **2026-10-18, end of Phase 4A (dev-only).** This file is a
+continuity snapshot — update it at each pause. The forward plan lives in
+`PLAN.md`; this file captures the exact working state and the concrete next
+steps.
 
 ## Where we are
 - **Phase 1 DONE** — module skeleton + build wiring.
 - **Phase 2 DONE** — RP2350 I2C HAL on cryptoauthlib v3.8.0.
 - **Phase 3 DONE** — curated `atecc608_*` core API. Build green,
   hardware-validated (3 rounds, see below). Console now uses the module API.
-- **Phase 4 next** — provisioning utilities + config builder. **This is the
-  first phase that can write to the chip — the HARD RULE below applies: stop
-  and review the exact write plan with the user before anything touches it.**
+- **Phase 4A DONE** — config builder + guarded provisioning API + host unit
+  tests with a mock chip HAL. `ctest` 2/2 green; Pico build warning-clean.
+  **Chip untouched.** See "Phase 4A — what was built (and why)" below.
+- **Phase 4B next (STOP BOUNDARY)** — the actual chip provisioning. Before
+  ANY write: walk the provisioning scenarios (application → zone/slot field
+  values) with the user, draft the README guidance, then present the exact
+  byte plan (what, where, reversibility) for explicit approval. HARD RULE
+  below applies.
 
 ## Build (verified green)
 ```sh
@@ -25,6 +31,22 @@ Air-gapped: `-DCRYPTOAUTHLIB_SOURCE_DIR=/path/to/cryptoauthlib`.
 configure time, discarded otherwise. Known cosmetic warning: `ATCA_TA_SUPPORT
 redefined` (from cryptoauthlib's own headers, harmless; our sources are
 warning-clean).
+
+## Host unit tests (Phase 4A)
+```sh
+cmake -S tests -B tests/build -DCRYPTOAUTHLIB_SOURCE_DIR=/home/burnin/Projects/cryptoauthlib
+cmake --build tests/build -j
+ctest --test-dir tests/build --output-on-failure   # 2/2: test_config, test_prov
+# or run directly: ./tests/build/test_config  ./tests/build/test_prov
+```
+`tests/` is a standalone host CMake project: FetchContent of the same
+v3.8.0, `ca_host` = cryptoauthlib's portable sources (minus
+`hal/hal_rp2350.c` — the mock defines those 8 HAL symbols), `mock_chip`,
+`atecc608_host` (the three Phase-4A module sources). Executables link
+`-Wl,--start-group atecc608_host mock_chip ca_host -Wl,--end-group` (plain
+order fails: `test_config` references no mock symbols, so the linker never
+pulls in the mock objects and leaves the HAL symbols unresolved);
+`add_test` uses `$<TARGET_FILE:...>`.
 
 ## File layout (current)
 - `CMakeLists.txt` — module + demo build; FetchContent for cryptoauthlib;
@@ -43,6 +65,28 @@ warning-clean).
   The old `src/atecc608.h` is **gone** (moved to `include/atecc608/`).
 - `src/hal_rp2350.c/.h` — the RP2350 I2C HAL (Phase 2), module-internal
   (PRIVATE include only). ctx travels via `ATCAIfaceCfg.cfg_data`.
+- `include/atecc608/atecc608_config.h` + `src/atecc608_config.c` (4A) —
+  intent struct `atecc608_config_intent_t` (slot/key cfg, counters,
+  count_match, chip mode, secure boot, KDF level, extras, lock/slot-lock,
+  chip options, x509) + `atecc608_config_build()` → 128 B,
+  `atecc608_config_parse()`, `atecc608_config_crc16()` (== `atCRC`),
+  `atecc608_config_writable_equal()` (diff bitmap, 32-byte words; skips
+  factory [0:16) + lock bytes [86:88)). Builder validation: key_type ∈
+  {4,7}; private ⇒ ECC + is_secret + normal fields clear; enc_read/
+  write_config ⇒ is_secret; req_auth ↔ auth_key 1..15; x509_id ≤ 3 only on
+  a public ECC key slot; counter ≤ 0x1FFFFF; sb_mode ∈ {0,2,3} (+
+  pubkey/digest slots 1..15 when enabled); count_match/use_lock/io_prot
+  keys 1..15; ecdh/kdf_prot ≤ 1; clk_div ≤ 31; user_extra_add even or 0.
+- `include/atecc608/atecc608_prov.h` + `src/atecc608_prov.c` (4A) — guarded
+  provisioning over `atcab_*` (see the header for guarantees + limitations:
+  byte-16 preservation, UpdateExtra one-shot, UseLock not modeled, data-zone
+  slot 0/3 API restriction).
+- `src/atecc608_status.c` + `src/atecc608_int.h` (4A) — the shared
+  `atecc608_map_status` (moved out of `src/atecc608.c` for the host build).
+- `tests/` (4A) — `CMakeLists.txt` (generates its own `atca_config.h` from
+  cryptoauthlib's `atca_config.h.in`, same feature set as the top level),
+  `mock_chip.{h,c}`, `test_golden.h` (the golden G intent),
+  `test_config.c`, `test_prov.c`.
 - `app/main.c` + `app/CMakeLists.txt` — validation console (pico-command-
   line) over the **module API**: probe/info/serial/lock/random (atecc608_*),
   diag (raw I2C), bootrom, help. Phase 6 adds a config read-back demo.
@@ -89,6 +133,74 @@ unlocked; `atecc608_random` → `FF FF 00 00…` (normal pre-provisioning).
 Raw-I2C `diag` normal (general call NACK; wake-read NACK right after a
 command = chip awake). All values match the Phase-1 standalone driver
 exactly. Chip remains in factory state — **nothing has been written to it**.
+
+## Phase 4A — what was built (and why)
+- **Type rename (build-forced):** cryptoauthlib's `calib_device.h` defines
+  its own `atecc608_config_t`; our intent type is
+  `atecc608_config_intent_t` everywhere (7 files).
+- **Counter encoding (final, unit-tested):** for value v, the 8 zone bytes
+  are BE16(lin_a) BE16(lin_b) BE16(bin_a) BE16(bin_b) with
+  `lin_a = 0xFFFF>>(v%32)`, `lin_b = v>=16 ? 0xFFFF>>((v-16)%32) : 0xFFFF`,
+  `bin_a = v/32`, `bin_b = v>=16 ? (v-16)/32 : 0`. **Big-endian in the zone**
+  (library `calib_write_config_counter` byte order); the COUNTER *command*
+  returns the 4-byte LE binary value. Vectors: 0 → `FF FF FF FF 00 00 00 00`;
+  5 → `07 FF FF FF 00 00 00 00`; 32 → `FF FF 00 00 00 01 00 00`;
+  0x1FFFFF → `00 00 00 01 FF FF FF FF`.
+- **CRC:** `atecc608_config_crc16` is byte-identical to `atCRC`
+  (poly 0x8005, init 0, LSB→MSB per byte, LE16 out;
+  `calib/calib_command.c:706`). A real bug the harness caught: the inner
+  loop used `int bit` → 9 iterations/byte (0x80<<1 = 0x100 ≠ 0); fixed to
+  `uint8_t bit`.
+- **GenKey/PrivWrite bits = 13/14 (documented deviation).** The datasheet
+  (ATECC508A/608A Tables 2-10/2-11) puts GenKey at bit 13 and PrivWrite at
+  bit 14 of an ECC private-key slot word; cryptoauthlib's
+  `ATCA_SLOT_CONFIG_GEN_KEY_SHIFT`/`PRIV_WRITE_SHIFT` (8/9) contradict the
+  datasheet AND the library's own ATECC608 test vector (slot words
+  0x208F/0x2087/0x2082 have bit 13 set = GenKey). Datasheet wins; builder,
+  parser, mock, and docs all follow 13/14.
+- **Vector decode (authoritative):** `ATECC608_DEVICE_CONFIG_VECTOR` from
+  the cryptoauthlib manual (`/tmp/opencode/cab_manual.txt`, ~line 21030) —
+  a fully provisioned, LOCKED device: LockValue/LockConfig = 0x00/0x00,
+  SlotLocked = 0xFFFF, ChipOptions = 0x4006 (io_prot_en, kdf_aes_en,
+  io_prot_key 4), UserExtra/Add = 0, counters 0, keys
+  `[0033,001C,0013,0013,007C,001C,003C,0033,003C,003C,003C,0030,003C,003C,003C,0030]`
+  (key2 = 0x0013 HAS pub_info; key15 = 0x0030 — not 0x105C, that's the
+  golden G). `t_vector_decode` asserts the parse against it.
+- **Confirm semantics (verified vs. the prov code):** every lock attempt
+  that passes the state checks consumes exactly one confirm() call —
+  including refused attempts; already-locked checks happen BEFORE confirm.
+- **Mock chip contract** (`tests/mock_chip.{h,c}`): emulates the wire
+  protocol (frame = [count][opcode][p1][p2lo][p2hi][payload][crc_lo][crc_hi];
+  count includes count+CRC; command frames count=7; READ/WRITE param1 =
+  zone|0x80, param2 = word address = byte/4; receive = two partial reads;
+  WAKE token handshake {04 11 33 43}, absent chip → COMM_FAIL on all
+  paths). Factory state: serial [0:4]=01 23 06 40, [4:8]=00 00 60 05,
+  [8:13]=AE B6 B9 B7 EE, [13]=01, [14]=01, [16]=0xC0, counters 0, **KeyConfig
+  words 96..127 = 0 (documented assumption — verify on the real chip in
+  4B)**. `atcab_write_config_zone` = 13 WRITEs (words 84–87 skipped) +
+  2 UPDATE_EXTRA(84,85); UPDATE_EXTRA is one-shot (target≠0 → 0x0F even for
+  the same value). LOCK 0x17: 0=config (verifies atCRC over the full zone ==
+  param2, →[87]=0), 1=data (needs config locked, →[86]=0),
+  2|(slot<<2)=slot (needs KeyConfig bit5 Lockable); already-locked → 0x0F.
+  COUNTER 0x24: read+increment → 4-byte LE value; ≥0x1FFFFF increment → 0x0F;
+  no lock precondition. GENKEY 0x40 (mode 0x04 only): needs KeyConfig bit0,
+  SlotConfig bit13 (GenKey), and data zone unlocked; fake pubkey
+  `pub[i] = (slot*7 + i*3 + 1) & 0xFF`. Data zone: WRITE rejected if data
+  locked, slot secret, or (unlocked && word write-protected); READ requires
+  data locked AND not secret AND not private (fire-and-forget writes until
+  lock).
+- **Golden G** (`tests/test_golden.h`, byte-exact in `t_golden`): intent
+  [18]=0x51, [19]=0x12; slot0 = 0x6085 (ext_sig|ecdh|is_secret|gen_key
+  13|priv_write 14), slot2 = 0x208B, slot3 = 0x00D3, slot15 = 0x2280
+  (is_secret); counters c0=5, c1=0; [68]=0x81, [69]=0x8C, [70:72]=13 F7,
+  [72]=02, [73:75]=03 00; [84]=A5, [85]=C4, [86:88]=55 55; SlotLocked=0x0005;
+  ChipOptions=0x4107; x509=11 22 33 44; keys: key0=0x0033, key1=0xC692
+  (pub_info|ECC|req_auth|auth_key 6|x509 3 — x509 is a 2-bit field at
+  14:15), key2=0x0053, keys3–14=0x001C, key15=0x105C
+  (NON_ECC|req_random|persist_dis).
+- **UseLock finding:** the mock does NOT model UseLock enforcement; 4B
+  scenarios must keep `use_lock_en=false` until an auth flow exists
+  (documented in `atecc608_prov.h` + PLAN.md).
 
 ## Gotchas / decisions to remember
 - **Console scripting (CDC):** the console framework **echoes typed
@@ -137,6 +249,31 @@ exactly. Chip remains in factory state — **nothing has been written to it**.
   re-wakes on `ATCA_RX_NO_RESPONSE`.
 - `make CMakeFiles/.../x.c.o` reports "No rule to make target" — use full
   `make -j`.
+- **C printf argument evaluation order is unspecified** (cost real time in
+  4A debugging): never mix a function call with reading side-effect state in
+  the same `printf` (produced false `wakes=0` / `locked=86` readings).
+- **Wake counts: never assert an exact number** — the library issues
+  multiple WAKE handshakes per calib command (wrapper + inner); tests assert
+  `wakes >= 1`.
+- **`atcab_is_locked` on CA2** → `calib_is_locked_ext` →
+  `calib_ca2_is_config_locked` → **Info LockStatus command**, not a Read of
+  byte 87 (calib_helpers.c). The mock handles it.
+- **Data zone access:** `atcab_read_data_zone`/`atcab_write_data_zone` do
+  NOT exist; the `*_bytes_zone` family maps to ECC204-validated
+  `calib_ca2_read_bytes_zone` (slot 0..3 check) — do NOT use. Use
+  `atcab_read_zone(zone, slot, block, offset, data, len)` /
+  `atcab_write_zone(...)`: data zone slot 1..15 with **0 and 3 rejected by
+  the library**, len must be 32 (config: 16). Secret-slot read test uses
+  slot 15 (is_secret in golden G), not slot 3.
+- **Host test link order:** plain library order fails (`test_config`
+  references no mock symbols → mock objects never load → hal_* unresolved
+  in ca_host); use `--start-group`/`--end-group`, and `add_test` must use
+  `$<TARGET_FILE:...>`.
+- **x509_id is a 2-bit field** (values 0..3):
+  `ATCA_KEY_CONFIG_X509_ID_SHIFT 14`, `MASK 0x03<<14` (calib_device.h:273).
+- **Debugging pitfall when comparing zones:** dump the zone AND print the
+  first differing byte index — two dumps can look identical at a glance
+  (the golden had a 2-byte-shifted UseLock/VKP/SB/KDF region).
 
 ## Reference locations
 - `../cryptoauthlib/lib/hal/atca_hal.h` — HAL interface, `ATCA_HAL_CONTROL_*`,
@@ -158,8 +295,21 @@ exactly. Chip remains in factory state — **nothing has been written to it**.
   `atcab_read_pubkey(slot, uint8_t[64])`, `atcab_is_locked(LOCK_ZONE_*, bool*)`
 - `../cryptoauthlib/lib/calib/calib_info.c` — INFO (revision) = 4-byte
   response; bytes 2/3 = part id / silicon revision
-- `/tmp/opencode/cab_manual.txt` — extracted cryptoauthlib manual (747 pp)
-- `/tmp/opencode/atecc608_ds.txt` — summary-datasheet text
+- `/tmp/opencode/cab_manual.txt` — extracted cryptoauthlib manual (747 pp);
+  the ATECC608 config vectors + field dicts are around lines 20960–21060
+  (`ATECC608_DEVICE_CONFIG` / `..._VECTOR`)
+- `/tmp/opencode/atecc608a_ds.txt` — full ATECC608A datasheet text
+  (DS40002138A): config zone table ~790–1092, TFLXTLS slot policy tables
+  ~1600–1900
+- `/tmp/opencode/atecc508a_ds.txt` — full ATECC508A datasheet text
+  (DS20005927A): **Tables 2-10/2-11 (~line 1810) = the authoritative
+  GenKey bit 13 / PrivWrite bit 14 definitions**
+- `../cryptoauthlib/lib/calib/calib_command.c:706` — `atCRC` (ground truth
+  for `atecc608_config_crc16`)
+- `../cryptoauthlib/lib/calib/calib_helpers.c` — `calib_ca2_is_config_locked`
+  (Info LockStatus path behind `atcab_is_locked`)
+- `../cryptoauthlib/lib/calib/calib_read.c` / `calib_write.c` —
+  `calib_ca2_read/write_zone` (slot 0/3 rejection, len 32)
 - `/tmp/opencode/validate_phase3.py` — the CDC validation script (bounded
   per-command reads; pyserial)
 
@@ -184,22 +334,30 @@ The user has a limited number of spare ATECC608 chips and does NOT want the
 connected chip put into an unintended state. Until the user explicitly
 approves a specific write:
 - Hardware validation is **read-only** (probe / info / serial / lock status /
-  random). Write APIs are implemented (`atecc608_write_config_zone`,
-  `atecc608_write_slot`) but have **never been exercised** on the chip.
+  random). Write APIs are implemented (Phase-3 raw wrappers + the Phase-4A
+  guarded provisioning API in `atecc608_prov.h`) but have **never been
+  exercised** on the chip — the 4A tests run against the mock HAL only.
 - When a step genuinely requires writing to the chip (Phase 4 provisioning
   first), **STOP and review with the user first**: what is written, to which
   bytes, and whether it is reversible.
 
-## Next steps (Phase 4 — provisioning utilities + config builder)
-1. Config builder: field-level struct from `calib_device.h`
-   (`atecc608_config_s`) → 128-byte array + `atecc608_config_verify`;
-   consumers express intent, never raw bytes.
-2. Guarded provisioning API: idempotent write with read-back verify before
-   any lock, `lock_config_zone`/`lock_data_zone` behind a typed-confirm hook,
-   genkey, counter init.
-3. **Host unit tests (mock HAL)** asserting the produced 128-byte array for
-   known-intent configs (this is where the "host build warning-clean"
-   criterion gets a real host build).
-4. **WRITE CHECKPOINT:** before any on-hardware provisioning test, stop and
-   present the exact write plan (which bytes, why, reversibility) for user
-   approval. On-hardware write→read-back verification only after approval.
+## Next steps (Phase 4B — chip provisioning; STOP BOUNDARY)
+1. **Scenario walkthrough with the user:** what application does the chip
+   serve → which zones/slots/fields get what values (start from golden G or
+   the default intent as templates). Keep `use_lock_en=false` until an auth
+   flow exists.
+2. **Draft README scenario guidance** (the README still describes the
+   retired Phase-1 driver — a full rewrite is part of 4B).
+3. **WRITE CHECKPOINT (hard rule):** present the exact byte plan — which
+   bytes, their values, why, and reversibility (config write is reversible
+   while unlocked; locks and counter increments are not) — and get explicit
+   user approval BEFORE any chip write. On-hardware write→read-back
+   verification and the lock sequence only after approval.
+4. **4B verification items** (mock fidelity gaps — check on the real chip):
+   UpdateExtra same-value behavior; byte-16 write behavior; factory
+   KeyConfig words (mock assumes all 0); UseLock enforcement; GenKey/
+   PrivWrite bit 13/14 behavior on real hardware.
+
+Then per PLAN.md: Phase 5 (crypto pass-through: kdf/sign/verify) and Phase 6
+(config read-back console demo), then Phase 7 (on-hardware validation +
+bring-up checklist).

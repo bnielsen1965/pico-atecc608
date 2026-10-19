@@ -195,13 +195,61 @@ A single config struct drives init; everything else is a small, stable set.
     zones unlocked, `FF FF 00 00…` RNG). Build is warning-clean for our
     sources (the only warning is the known cosmetic `ATCA_TA_SUPPORT
     redefined` inside cryptoauthlib's own headers).
-- **Phase 4 — Provisioning utilities + config builder.** A field-level
-  config-builder (from `calib_device.h`) → 128-byte array + `config_verify`;
-  guarded provisioning API (read/write with read-back verify, lock_config/lock_
-  data, genkey, counter init). **Host unit tests** (mock HAL) assert the
-  produced 128-byte array for known-intent configs.
-  - **Done when:** unit tests pass on host; on a fresh chip, write→read-back
-    verify works and lock is gated behind read-back + typed-confirm.
+- **Phase 4 — Provisioning utilities + config builder. Split into 4A/4B
+  (2026-10-18, user): 4A is development-only (NO chip writes, per ground
+  rule 0); 4B is the actual chip provisioning and is gated on a review of
+  scenarios first.**
+  - **Phase 4A — Development (no chip writes) — DONE (2026-10-18).**
+    `include/atecc608/atecc608_config.{h,c}`: field-level intent struct
+    (`atecc608_config_intent_t` — renamed from `atecc608_config_t`, which
+    collides with cryptoauthlib's own type in `calib_device.h`) + builder →
+    128-byte array + parser + CRC-16 + `atecc608_config_writable_equal`
+    (byte-diff over the writable region: everything except the 16 factory
+    bytes and the lock bytes 86/87). `include/atecc608/atecc608_prov.{h,c}`:
+    guarded provisioning — idempotent `provision_config` (read-back verified,
+    preserves the chip's I2C address byte 16), `lock_config_zone`
+    (re-verify + CRC-verified Lock), `lock_data_zone` / `lock_data_slot`,
+    `genkey`, `counter_read` / `counter_increment`; every irreversible step
+    is confirm-hook gated, and a refused confirm still consumes exactly one
+    confirm call (confirm runs after the state checks, right before the
+    command). **Host tests** in `tests/` (standalone CMake project, same
+    v3.8.0 FetchContent): `ca_host` = the library's portable sources,
+    `mock_chip` = a HAL that emulates the ATECC608 wire protocol + factory
+    state, `test_config` (builder byte-exact golden, round-trip, counter
+    encoding vectors, decode of the manual's locked
+    `ATECC608_DEVICE_CONFIG_VECTOR`, CRC equivalence with `atCRC`,
+    writable-diff) and `test_prov` (provision/lock/genkey/counter flows
+    against the mock incl. confirm/state guards). `ctest`: **2/2 green**;
+    Pico build warning-clean for our sources. Chip untouched.
+    - **Real module bugs found by the harness and fixed:** (1)
+      `atecc608_config_crc16` inner loop used `int bit` — 9 shifts per byte
+      (0x80<<1 = 0x100 ≠ 0); changed to `uint8_t` so 0x80 wraps, now
+      byte-identical to `atCRC` (poly 0x8005, init 0, LSB-first per byte,
+      LE16). (2) Counter words are **big-endian** u16 in the zone (builder
+      was right; the parser and the mock read little-endian — fixed).
+    - **Documented deviation from the library (datasheet wins):** GenKey /
+      PrivWrite on ECC private key slots are **bits 13/14** (ATECC508A/608A
+      datasheet Tables 2-10/2-11; the library's own ATECC608 test vector
+      agrees — slot word 0x208F has GenKey set at bit 13), NOT bits 8/9 as
+      cryptoauthlib's `ATCA_SLOT_CONFIG_GEN_KEY_SHIFT` / `PRIV_WRITE_SHIFT`
+      define. Builder, parser, and mock all follow the datasheet.
+    - **4B verification flags (mock fidelity gaps, documented in
+      `atecc608_prov.h`):** UseLock enforcement is not modeled (keep
+      `use_lock_en=false` until an auth flow exists); UpdateExtra is
+      strictly one-shot in the mock (verify same-value behavior on a real
+      chip); factory KeyConfig words are assumed 0 (verify on the real
+      chip); data-zone READ requires the data zone to be locked in the mock
+      (fire-and-forget writes until lock); byte 16 is preserved, never
+      written.
+  - **Phase 4B — Chip provisioning (writes only after user approval).**
+    Before any write: go over provisioning **scenarios** (what application
+    the chip serves → how to configure zones/slots) and write that guidance
+    into the README to assist the decision. Then, with the user's explicit
+    go-ahead on the exact byte plan (what, where, reversibility):
+    write→read-back verify, and lock gated behind read-back + typed-confirm.
+    - **Done when:** on the chip, write→read-back verify works and lock is
+      gated behind read-back + typed-confirm; README scenario guidance
+      committed.
 - **Phase 5 — Crypto pass-through (on demand).** `kdf` / `sign` / `verify` /
   `genkey` / `read_pubkey` wrappers, added as consumers need them.
   - **Done when:** at least a KDF round-trip is validated on hardware.
@@ -329,6 +377,10 @@ the Lock command owns bytes 86–87.
   rounds match the Phase-1 standalone outputs exactly (Phase 3 exit criteria).
 - cryptoauthlib **v3.8.0** fetched at build time; the clone at
   `../cryptoauthlib` is a development reference only.
+- **Phase 4A complete (2026-10-18, dev-only):** config builder + guarded
+  provisioning API + host unit tests with a mock chip HAL — `ctest` 2/2
+  green, Pico build warning-clean, **chip still untouched** (4B writes remain
+  gated on user approval; see the 4B verification flags in Phase 4A).
 
 ## Open items (resolve during implementation — not re-opens)
 
@@ -336,10 +388,16 @@ the Lock command owns bytes 86–87.
   1-byte dummy workaround.~~ — **Resolved 2026-10-18:** full handshake in
   `hal_i2c_control(WAKE)`; the 1-byte dummy write is wire-identical to a 0-byte
   general call (chip NACKs 0x00 before any data byte is clocked). See Phase 2.
-- **Phase 4:** exact READKEY/WRITE_KEY (4-bit), KEY_TYPE (3-bit), and the
+- ~~**Phase 4:** exact READKEY/WRITE_KEY (4-bit), KEY_TYPE (3-bit), and the
   counter "special format" encodings — decode against the **manual's field
   tables**, not from memory. ECC private-key slots use a *distinct* SlotConfig
-  bit layout (EXT_SIG/INT_SIG/ECDH/WRITE_ECDH + GEN_KEY bit8 / PRIV_WRITE bit9).
+  bit layout (EXT_SIG/INT_SIG/ECDH/WRITE_ECDH + GEN_KEY bit8 / PRIV_WRITE
+  bit9).~~ — **Resolved 2026-10-18 (Phase 4A):** encodings decoded from the
+  manual + datasheet and unit-tested (see the Phase 4A entry). The counter is
+  the 8-byte dual linear+binary **BE16** encoding (documented in
+  `atecc608_config.h`); the ECC private-key slot GEN_KEY/PRIV_WRITE bits are
+  **13/14 per the datasheet**, contradicting the library's 8/9 defines — the
+  datasheet wins (see Phase 4A).
 - **API:** whether to add a small raw-command escape hatch (default: no).
 - **CI:** an automated bring-up check (follow-on, not yet scoped).
 

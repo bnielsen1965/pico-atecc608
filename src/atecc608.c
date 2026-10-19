@@ -6,74 +6,16 @@
 #include "cryptoauthlib.h"
 #include "hal_rp2350.h"
 
+// atecc608_map_status() / atecc608_last_error() / atecc608_status_str()
+// live in atecc608_status.c (shared with the provisioning unit, which
+// compiles on the host too).
+#include "atecc608_int.h"
+
 // The HAL context and interface configuration live in module storage so
 // they outlive the caller's stack frame: cryptoauthlib retains the
 // ATCAIfaceCfg (and its cfg_data pointer) for the whole session.
 static hal_rp2350_ctx_t s_hal_ctx;
 static ATCAIfaceCfg s_iface_cfg;
-
-// Raw ATCA_STATUS of the last failed call (module storage; the API is
-// single-threaded and blocking).
-static ATCA_STATUS s_last_error = ATCA_SUCCESS;
-
-// Map a raw cryptoauthlib status onto the curated atecc608_status_t and
-// record the raw code for atecc608_last_error(). The raw code is always
-// preserved, so no diagnostic information is lost in the mapping.
-static atecc608_status_t atecc608_map_status(ATCA_STATUS atca_status)
-{
-    if (ATCA_SUCCESS == atca_status) {
-        s_last_error = ATCA_SUCCESS;
-        return ATECC608_OK;
-    }
-
-    s_last_error = atca_status;
-
-    switch (atca_status) {
-    case ATCA_BAD_PARAM:
-    case ATCA_INVALID_SIZE:
-    case ATCA_SMALL_BUFFER:
-        return ATECC608_ERR_BAD_PARAM;
-
-    case ATCA_NOT_INITIALIZED:
-        return ATECC608_ERR_NOT_INIT;
-
-    case ATCA_WAKE_FAILED:
-    case ATCA_NO_DEVICES:
-    case ATCA_TOO_MANY_COMM_RETRIES:
-        return ATECC608_ERR_WAKE;
-
-    case ATCA_COMM_FAIL:
-    case ATCA_TX_FAIL:
-    case ATCA_TIMEOUT:
-    case ATCA_TX_TIMEOUT:
-    case ATCA_RX_TIMEOUT:
-        return ATECC608_ERR_COMM;
-
-    case ATCA_RX_FAIL:
-    case ATCA_RX_NO_RESPONSE:
-    case ATCA_RX_CRC_ERROR:
-    case ATCA_STATUS_CRC:
-    case ATCA_PARITY_ERROR:
-        return ATECC608_ERR_RX;
-
-    case ATCA_EXECUTION_ERROR:
-    case ATCA_FUNC_FAIL:
-    case ATCA_BAD_OPCODE:
-    case ATCA_PARSE_ERROR:
-    case ATCA_STATUS_ECC:
-    case ATCA_STATUS_SELFTEST_ERROR:
-    case ATCA_STATUS_UNKNOWN:
-    case ATCA_CHECKMAC_VERIFY_FAILED:
-        return ATECC608_ERR_EXEC;
-
-    case ATCA_NOT_LOCKED:
-    case ATCA_USE_FLAGS_CONSUMED:
-        return ATECC608_ERR_CHIP_STATE;
-
-    default:
-        return ATECC608_ERR;
-    }
-}
 
 atecc608_status_t atecc608_init(const atecc608_cfg_t *cfg)
 {
@@ -239,27 +181,6 @@ atecc608_status_t atecc608_read_pubkey(uint8_t slot, uint8_t pub[ATECC608_PUBKEY
     }
 
     return atecc608_map_status(atcab_read_pubkey(slot, pub));
-}
-
-ATCA_STATUS atecc608_last_error(void)
-{
-    return s_last_error;
-}
-
-const char *atecc608_status_str(atecc608_status_t st)
-{
-    switch (st) {
-    case ATECC608_OK:              return "ok";
-    case ATECC608_ERR:             return "error";
-    case ATECC608_ERR_BAD_PARAM:   return "bad parameter";
-    case ATECC608_ERR_NOT_INIT:    return "not initialized";
-    case ATECC608_ERR_WAKE:        return "wake handshake failed (chip absent or asleep)";
-    case ATECC608_ERR_COMM:        return "I2C transmit failed";
-    case ATECC608_ERR_RX:          return "I2C receive failed";
-    case ATECC608_ERR_EXEC:        return "chip execution error";
-    case ATECC608_ERR_CHIP_STATE:  return "chip state prevents operation";
-    default:                       return "unknown status";
-    }
 }
 
 void atecc608_print_hex(const uint8_t *data, size_t len)
