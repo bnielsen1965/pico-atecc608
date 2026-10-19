@@ -1,9 +1,32 @@
 # Resume notes (pico-atecc608)
 
-Pause point: **2026-10-18, end of Phase 4A (dev-only).** This file is a
-continuity snapshot — update it at each pause. The forward plan lives in
-`PLAN.md`; this file captures the exact working state and the concrete next
-steps.
+Pause point: **2026-10-18, after Phase 4A — at the Phase 4B scenario
+discussion.** This file is a continuity snapshot — update it at each pause.
+The forward plan lives in `PLAN.md`; this file captures the exact working
+state and the concrete next steps.
+
+## ⏸ Where the conversation stopped (read this first on resume)
+Phase 4A is committed (`063d579`). The user was asked which scenario Phase
+4B should provision for. **Their answer:** target a **development config**,
+but "we should discuss what that actually means, based on some application
+scenarios" — then they paused the session. So on resume, **do NOT jump to a
+byte plan.** Open with the application-scenario discussion:
+1. Sketch 2–3 concrete application scenarios (e.g. device-identity attester;
+   local secret store / password-store pre-provision; crypto co-processor for
+   sign/verify/KDF with host-side keys in public slots) and, for each, what
+   it implies for slots/keys/counters/locks.
+2. Agree on what the *development* config should be: the working assumption
+   is **a flexible dev config, both zones left UNLOCKED** (re-writable), so
+   the chip stays usable across experiments. Golden G
+   (`tests/test_golden.h`) is the reference template; the builder's
+   `atecc608_config_default()` is the minimal alternative.
+3. Then draft the README scenario guidance, and only then present the exact
+   byte plan (which bytes, values, reversibility) for the write approval the
+   HARD RULE requires. Even the "unlocked" config write is a write — it needs
+   explicit approval first (it IS reversible while the zone is unlocked, but
+   the rule is the rule).
+4. Keep `use_lock_en=false` in the intent until an auth flow exists (mock
+   does not model UseLock enforcement — 4B verification item).
 
 ## Where we are
 - **Phase 1 DONE** — module skeleton + build wiring.
@@ -13,11 +36,12 @@ steps.
 - **Phase 4A DONE** — config builder + guarded provisioning API + host unit
   tests with a mock chip HAL. `ctest` 2/2 green; Pico build warning-clean.
   **Chip untouched.** See "Phase 4A — what was built (and why)" below.
-- **Phase 4B next (STOP BOUNDARY)** — the actual chip provisioning. Before
-  ANY write: walk the provisioning scenarios (application → zone/slot field
-  values) with the user, draft the README guidance, then present the exact
-  byte plan (what, where, reversibility) for explicit approval. HARD RULE
-  below applies.
+- **Phase 4B next (STOP BOUNDARY — PAUSED HERE)** — the actual chip
+  provisioning. User's target: **development config**, to be nailed down via
+  an application-scenario discussion (see the pause note at the top). Before
+  ANY write: scenario agreement → README guidance → exact byte plan
+  (what, where, reversibility) for explicit approval. HARD RULE below
+  applies.
 
 ## Build (verified green)
 ```sh
@@ -342,10 +366,12 @@ approves a specific write:
   bytes, and whether it is reversible.
 
 ## Next steps (Phase 4B — chip provisioning; STOP BOUNDARY)
-1. **Scenario walkthrough with the user:** what application does the chip
-   serve → which zones/slots/fields get what values (start from golden G or
-   the default intent as templates). Keep `use_lock_en=false` until an auth
-   flow exists.
+**Status as of pause: user picked "development config" as the 4B target,
+pending the application-scenario discussion (see the pause note above).**
+1. **Scenario walkthrough with the user:** concrete application scenarios →
+   what they imply for zones/slots/fields → agree on the dev config (working
+   assumption: flexible, both zones left unlocked; golden G as template).
+   Keep `use_lock_en=false` until an auth flow exists.
 2. **Draft README scenario guidance** (the README still describes the
    retired Phase-1 driver — a full rewrite is part of 4B).
 3. **WRITE CHECKPOINT (hard rule):** present the exact byte plan — which

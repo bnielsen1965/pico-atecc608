@@ -242,7 +242,10 @@ A single config struct drives init; everything else is a small, stable set.
       (fire-and-forget writes until lock); byte 16 is preserved, never
       written.
   - **Phase 4B — Chip provisioning (writes only after user approval).**
-    Before any write: go over provisioning **scenarios** (what application
+    **User's target (2026-10-18): a development config**, to be defined
+    through the scenario discussion below (working assumption: a flexible
+    dev config with both zones left unlocked). Before any write: go over
+    provisioning **scenarios** (what application
     the chip serves → how to configure zones/slots) and write that guidance
     into the README to assist the decision. Then, with the user's explicit
     go-ahead on the exact byte plan (what, where, reversibility):
