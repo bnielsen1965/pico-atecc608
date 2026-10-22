@@ -6,27 +6,86 @@ The forward plan lives in `PLAN.md`; this file captures the exact working
 state and the concrete next steps.
 
 ## ⏸ Where the conversation stopped (read this first on resume)
-Phase 4A is committed (`063d579`). The user was asked which scenario Phase
-4B should provision for. **Their answer:** target a **development config**,
-but "we should discuss what that actually means, based on some application
-scenarios" — then they paused the session. So on resume, **do NOT jump to a
-byte plan.** Open with the application-scenario discussion:
-1. Sketch 2–3 concrete application scenarios (e.g. device-identity attester;
-   local secret store / password-store pre-provision; crypto co-processor for
-   sign/verify/KDF with host-side keys in public slots) and, for each, what
-   it implies for slots/keys/counters/locks.
-2. Agree on what the *development* config should be: the working assumption
-   is **a flexible dev config, both zones left UNLOCKED** (re-writable), so
-   the chip stays usable across experiments. Golden G
-   (`tests/test_golden.h`) is the reference template; the builder's
-   `atecc608_config_default()` is the minimal alternative.
-3. Then draft the README scenario guidance, and only then present the exact
-   byte plan (which bytes, values, reversibility) for the write approval the
-   HARD RULE requires. Even the "unlocked" config write is a write — it needs
-   explicit approval first (it IS reversible while the zone is unlocked, but
-   the rule is the rule).
-4. Keep `use_lock_en=false` in the intent until an auth flow exists (mock
-   does not model UseLock enforcement — 4B verification item).
+Phase 4A is committed (`063d579`). The 4B application-scenario discussion is
+**DONE (2026-10-22)**; the full config is agreed (below). On resume, do NOT
+re-litigate scenarios and do NOT jump to chip writes. The **README scenario
+guidance is drafted** (full README rewrite, 2026-10-22; pending user
+review). Next step after review: present the exact byte plan (which bytes,
+values, reversibility) for the write approval the HARD RULE requires. The
+config write is reversible while the zone is unlocked; the lock is not —
+approval covers both.
+
+## Agreed 4B config (scenario discussion, 2026-10-22)
+Principle: **lock the layout, keep the contents open.** The config zone is
+locked during provisioning; key material stays (re)writable per the frozen
+rules until a slot is individually locked (slot-lock freezes contents, not
+use — KDF/sign from a locked slot still works). All slots: `write_config=0`,
+`req_auth=0`; priv slots `gen_key=1`; `lockable=1` on 0, 7, 8, 9, 10, 11;
+`use_lock_en=false` (no auth flow yet).
+
+Slots (16): 0 = EC pub, firmware validation (primary); 1 = EC priv + 2 = EC
+pub, device identity; 3–6 = EC priv ×4, FIDO2 credentials; 7 = non-ECC
+unreadable secret, password-store master (shared by all stores); 8–10 =
+non-ECC unreadable secrets, spare compartments (claim = GenKey → use →
+individual slot lock, repeatable per slot); 11 = EC pub, second firmware
+key; 12 = EC priv + 13 = EC pub, spare pair (ECDH / 2nd identity);
+14 = non-ECC unreadable secret, I/O protection key (same class as 7–10);
+15 = data, spare.
+
+Counters: 0 = FIDO2 signature count (CTAP global); 1 = firmware
+anti-rollback (must be chip-side — a flash counter is reset by the same
+attacker it defends against). PIN brute-force counter is **Pico NVS-side**:
+the chip has no native lockout, so enforcement lives in the Pico unlock flow
+(5 failures → locked until deliberate reset).
+
+Password store: master = on-chip random in slot 7 (`is_secret`, no reads at
+all). Use = KDF (v3.8.0 KDF, PRF mode, source = slot 7, input = 16B vault
+salt ‖ PIN ‖ context, target = output buffer) → 32B derived key → Pico does
+AES-256-GCM (RP2350 hw AES). PIN: **8–16 hex digits** (32–64 bits).
+Per-entry keys = same master + per-entry salt in KDF input (different
+PIN/salt = different derived key, so one master serves unlimited stores;
+slots 8–10 remain for full master-level compartmentalization if ever
+wanted). Salt: 16B from chip RNG at vault creation, stored in the vault
+header on Pico flash (not secret). Wrong PIN → wrong derived key → GCM tag
+fails.
+
+I/O protection: **ON from the start** (user-approved 2026-10-22) —
+`io_prot_en=1`, key in slot 14 (Pico keeps a copy in NVS), `kdf_prot=1`
+(derived keys never in clear on the bus), `ecdh_prot=1`, and
+**`kdf_aes_en=1`** (required for KDF; the library's ATECC608 KDF test
+checks it). Command-level wire protection, not transport-level. Open for
+the byte plan: whether the request direction (KDF input / PIN) is also
+covered; and `kdf_prot`/`ecdh_prot` enforce(1) vs opt-in(0) — the
+reference config uses 0 and the test opts in per-command via
+`KDF_MODE_TARGET_OUTPUT_ENC`; enforce is our choice, verify 2-bit semantics
+against the NDA datasheet. Mock does NOT model I/O protection → 4B hardware
+verification item. Evidence (2026-10-22, user review of slot-14 type):
+the library's locked ATECC608 reference config (manual's
+`ATECC608_DEVICE_CONFIG_VECTOR`, ChipOptions 0x4006 = io_prot_en +
+kdf_aes_en + io key slot 4) keeps its I/O key in a **type-7 non-ECC
+secret slot** (KeyConfig 0x007C, SlotConfig 0x0F8F: is_secret + enc_read),
+and the library's ATECC608-only KDF test exercises I/O-protected KDF
+against it (`atcab_kdf` TARGET_OUTPUT_ENC → `atcah_io_decrypt` with
+`g_slot4_key`). So: no AES slot *type* exists to require on the 608
+(key_type is only 4=ECC / 7=non-ECC, rest RFU — Phase-4A datasheet
+finding); what matters is `is_secret=1` on the io-key slot, which is why
+slot 14 is now an unreadable secret slot. Reference:
+cryptoauthlib `app/secure_boot`
+(`bind_host_and_secure_element_with_io_protection`).
+
+FIDO2: resident/discoverable — private keys always on-chip; the credential
+DB (credID, user handle, RP ID hash, slot index) lives in Pico flash, so
+chip config is unaffected. **4 slots = 4 discoverable credentials total**
+(all RPs combined) — the cost of halving the budget; state in README. Pico
+reflash loses the DB only; slots survive and can be re-bound
+(`gen_key=1`).
+
+4B hardware verification items (mock fidelity gaps): GenKey fill size on
+non-ECC slots (16 vs 32 bytes — if 16, accept a 128-bit master or fill via
+Random+Write); KDF from an `is_secret` slot; I/O protection end-to-end incl.
+request direction; `kdf_aes_en`/`kdf_prot` settings; UpdateExtra same-value
+behavior; byte-16 write behavior; factory KeyConfig words (mock assumes all
+0); UseLock enforcement; GenKey/PrivWrite bit 13/14 behavior.
 
 ## Where we are
 - **Phase 1 DONE** — module skeleton + build wiring.
@@ -36,12 +95,12 @@ byte plan.** Open with the application-scenario discussion:
 - **Phase 4A DONE** — config builder + guarded provisioning API + host unit
   tests with a mock chip HAL. `ctest` 2/2 green; Pico build warning-clean.
   **Chip untouched.** See "Phase 4A — what was built (and why)" below.
-- **Phase 4B next (STOP BOUNDARY — PAUSED HERE)** — the actual chip
-  provisioning. User's target: **development config**, to be nailed down via
-  an application-scenario discussion (see the pause note at the top). Before
-  ANY write: scenario agreement → README guidance → exact byte plan
-  (what, where, reversibility) for explicit approval. HARD RULE below
-  applies.
+- **Phase 4B next (STOP BOUNDARY)** — the actual chip provisioning.
+  Scenario discussion done 2026-10-22; the agreed config is in "Agreed 4B
+  config" above (locked layout / open contents, usable across all apps,
+  I/O protection on). Before ANY write: README scenario guidance → exact
+  byte plan (what, where, reversibility) for explicit approval. HARD RULE
+  below applies.
 
 ## Build (verified green)
 ```sh
@@ -366,14 +425,13 @@ approves a specific write:
   bytes, and whether it is reversible.
 
 ## Next steps (Phase 4B — chip provisioning; STOP BOUNDARY)
-**Status as of pause: user picked "development config" as the 4B target,
-pending the application-scenario discussion (see the pause note above).**
-1. **Scenario walkthrough with the user:** concrete application scenarios →
-   what they imply for zones/slots/fields → agree on the dev config (working
-   assumption: flexible, both zones left unlocked; golden G as template).
-   Keep `use_lock_en=false` until an auth flow exists.
-2. **Draft README scenario guidance** (the README still describes the
-   retired Phase-1 driver — a full rewrite is part of 4B).
+**Status (2026-10-22): scenario discussion complete — config agreed (see
+"Agreed 4B config" above). `use_lock_en=false` until an auth flow exists.**
+1. ~~Scenario walkthrough~~ — **done 2026-10-22.**
+2. ~~Draft README scenario guidance~~ — **drafted 2026-10-22** (full README
+   rewrite; old Phase-1 driver text replaced; "Application scenarios —
+   provisioning guidance" section documents the agreed config). Pending user
+   review.
 3. **WRITE CHECKPOINT (hard rule):** present the exact byte plan — which
    bytes, their values, why, and reversibility (config write is reversible
    while unlocked; locks and counter increments are not) — and get explicit

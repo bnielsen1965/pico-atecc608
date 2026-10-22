@@ -242,13 +242,23 @@ A single config struct drives init; everything else is a small, stable set.
       (fire-and-forget writes until lock); byte 16 is preserved, never
       written.
   - **Phase 4B — Chip provisioning (writes only after user approval).**
-    **User's target (2026-10-18): a development config**, to be defined
-    through the scenario discussion below (working assumption: a flexible
-    dev config with both zones left unlocked). Before any write: go over
-    provisioning **scenarios** (what application
-    the chip serves → how to configure zones/slots) and write that guidance
-    into the README to assist the decision. Then, with the user's explicit
-    go-ahead on the exact byte plan (what, where, reversibility):
+    **Scenario discussion done 2026-10-22 — config agreed** (see RESUME.md,
+    "Agreed 4B config"): one *locked* config usable by all apps — "lock the
+    layout, keep the contents open" (all slots `write_config=0`/`req_auth=0`,
+    priv slots `gen_key=1`, `lockable=1` where later slot-locks are wanted).
+    Slots: 0 fw-validation pub; 1/2 identity pair; 3–6 FIDO2 creds (4 total);
+    7 password-store master (unreadable, KDF PRF source, shared by all
+    stores); 8–10 spare unreadable secrets (compartmentalized stores /
+    future apps); 11 second fw key; 12/13 spare EC pair (ECDH); 14 I/O
+    protection key (unreadable secret, same class as 7–10 — the library's
+    locked ATECC608 reference config keeps its io key in a type-7 secret
+    slot and its ATECC608 KDF test exercises I/O-protected KDF against it);
+    15 data spare. Counters: 0 = FIDO2 sig count, 1 = fw anti-rollback.
+    PIN brute-force counter is Pico-side (no native chip lockout).
+    **I/O protection ON from the start** (`io_prot_en`, `kdf_prot=1`,
+    `ecdh_prot=1`, `kdf_aes_en=1`, key slot 14). Before any write: README
+    scenario guidance, then the user's explicit go-ahead on the exact byte
+    plan (what, where, reversibility):
     write→read-back verify, and lock gated behind read-back + typed-confirm.
     - **Done when:** on the chip, write→read-back verify works and lock is
       gated behind read-back + typed-confirm; README scenario guidance
