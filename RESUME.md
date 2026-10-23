@@ -2,24 +2,29 @@
 
 Pause point: **2026-10-23, byte plan APPROVED by the user (full
 sequence) — the write sequence (reflash → iokey → config → lock) is the
-current action; chip writes are now authorized.** This file is a
-continuity snapshot — update it at each pause. The forward plan lives in
-`PLAN.md`; this file captures the exact working state and the concrete
-next steps.
+current action; chip writes are now authorized.** The first `prov iokey`
+attempt hit a design bug (its guard test-read slot 14, which the chip
+refuses while the data zone is unlocked — no write was issued, chip
+still untouched); fixed in `009df06` and the uf2 rebuilt — **reflash is
+mandatory again before step 1.** This file is a continuity snapshot —
+update it at each pause. The forward plan lives in `PLAN.md`; this file
+captures the exact working state and the concrete next steps.
 
 ## ⏸ Where the conversation stopped (read this first on resume)
-HEAD is `d6cf44d` (working tree clean). **The chip is still untouched** —
-everything since the flash has been read-only. On resume: do NOT
-re-litigate scenarios and do NOT run any chip write before the user has
-explicitly approved the byte plan (section below). Scenario guidance is
+HEAD is `009df06` (working tree clean). **The chip is still untouched** —
+the failed `prov iokey` attempt issued NO write (the guard refused
+before any chip command). On resume: do NOT re-litigate scenarios. The
+byte plan is approved (section below); the only new requirement is a
+**reflash of the rebuilt uf2** (it now contains the `prov iokey` guard
+fix, `009df06`) before re-running step 1. Scenario guidance is
 user-reviewed (2026-10-22) and lives in `example/README.md`.
 
 State at the pause:
-- The console uf2 is on the bench (manual BOOTSEL drag; drive label
-  **RP2350** on the Pico 2). The flashed image **predates the
-  SlotLocked fix (`d6cf44d`) — reflash the rebuilt uf2 before any write**
-  (reflashing wipes littlefs; nothing is on it yet — the I/O key has not
-  been generated).
+- The console uf2 on the bench (manual BOOTSEL drag; drive label
+  **RP2350** on the Pico 2) **predates the `prov iokey` fix
+  (`009df06`) — reflash the rebuilt uf2 before re-running step 1**
+  (reflashing wipes littlefs; nothing is on it yet — the I/O key has
+  not been generated).
 - Read-only bench steps done: probe / info / serial / lock +
   `prov status`. The factory-zone dump below is the recorded output;
   **verified** — its CRC-16 = 4AB4 = the device's own print, and the
@@ -31,6 +36,13 @@ State at the pause:
   verification item: resolved).
 - **The SlotLocked (88–89) issue is found + fixed** (`d6cf44d`, details
   below). Pico build green, host ctest 2/2.
+- **The `prov iokey` guard is fixed** (`009df06`, details in the new
+  section below): the old guard test-read slot 14 to prove it was
+  clear-readable, but the ATECC608 refuses data-slot reads while the
+  data zone is unlocked — so the read-back verify was impossible at any
+  point in the flow. The write is now confirmed by the chip's write ACK
+  only; the key is verified functionally by an I/O-protected
+  transaction after `prov lock`. Pico build green, host ctest 2/2.
 - **The byte plan was presented and APPROVED by the user (2026-10-23,
   full sequence: iokey + config + lock).** Chip writes are now
   authorized. On resume: check the progress checklist below; if the
@@ -41,10 +53,13 @@ State at the pause:
 Progress (check off as the bench proceeds; every step is idempotent
 except the lock):**
 - [ ] 0. BOOTSEL-reflash `build/example/console/pico-atecc608.uf2`
-  (the flashed image predates `d6cf44d` — required before any write;
+  (the flashed image predates `009df06` — required before step 1;
   littlefs wipe is harmless, nothing is stored on it yet).
-- [ ] 1. `prov iokey` — **record the printed 64-hex I/O key** (the
-  durable backup; `/io_key.bin` on littlefs is lost on reflash).
+- [ ] 1. `prov iokey` — expect: "I/O protection key written to slot 14
+  (write ACKed by the chip)" + the NOTE (no read-back possible) + **the
+  printed 64-hex I/O key — RECORD IT** (the durable backup; `/io_key.bin`
+  on littlefs is lost on reflash) + "saved to littlefs: /io_key.bin
+  (read-back verified)".
 - [ ] 2. `prov config` — expect: "planned image (chip's byte 16 = 0xC0,
   bytes 88..89 = FF FF): summary CRC 822F", one write pass, "verified:
   chip zone matches the planned image", chip-zone CRC 822F.
@@ -88,6 +103,48 @@ except the lock):**
   `prov status` / `prov config` now print and what `prov lock` uses
   (Lock takes the chip's actual zone CRC; after `prov config` that is
   822F). (AA8F was the pre-fix on-device value — obsolete.)
+
+### Data-zone reads while unlocked — impossible (found at the bench 2026-10-23, fixed `009df06`)
+- **Symptom:** first `prov iokey` attempt printed "slot 14 is not
+  clear-readable (not a plain factory slot), so the write could not be
+  verified — no write issued." The old guard test-read slot 14 to prove
+  it was a plain slot before writing. **No write was issued — the chip
+  is still factory-fresh.**
+- **Root cause:** the ATECC608 **refuses data-slot reads while the data
+  zone is unlocked.** Confirmed by Microchip's own conformance test
+  `cryptoauthlib/test/api_atcab/atca_tests_read.c`:
+  `TEST_ASSERT_EQUAL(locked ? ATCA_SUCCESS : ATCA_EXECUTION_ERROR,
+  status)` with the comment "data zone cannot be read unless the data
+  zone is locked". The mock modeled this correctly (mock_chip.c:204);
+  the guard's premise was wrong, and the iokey console path was never
+  exercised by the host tests (they cover the prov layer only).
+- **Consequence:** the I/O-key read-back verify is impossible at ANY
+  point in the flow — pre-config the data zone is unlocked (reads
+  refused); post-config slot 14 is is_secret (reads refused); the data
+  zone is never locked in our flow. **New verification model:** the
+  chip's write ACK (the Write commits atomically, OK response only
+  after commit) + a functional I/O-protected transaction after
+  `prov lock` (an existing 4B/Phase-7 verification item — a wrong or
+  missing key fails every protected command).
+- **Fix (`009df06`):** new prov-layer API
+  `atecc608_write_iokey(slot, key)` with the hardware-legal
+  preconditions: config zone unlocked (post-lock, I/O protection makes
+  the chip unreachable without the key), data zone unlocked (locked
+  zone: no writes), and the slot accepts a clear Write in the CURRENT
+  config (not an ECC private key slot; write_key = 0; write_config = 0
+  — parsed from the config zone, which is always readable). Then the
+  write; the chip's OK commits it. The console `prov iokey` runs the
+  same prechecks for its user-facing messages, generates the key (Pico
+  TRNG), calls the API, prints the 64-hex key, saves `/io_key.bin`.
+  Touched: `include/atecc608/atecc608_prov.h`, `src/atecc608_prov.c`,
+  `example/console/main.c`, `tests/test_prov.c` (new `t_iokey`:
+  unlocked data read refused, write committed, preconditions refused,
+  post-config re-key of an is_secret slot, config/data-lock refusal).
+  Pico build green, host ctest 2/2.
+- **Ordering consequence:** `prov iokey` now runs before OR after
+  `prov config` — slot 14 stays clear-writable after config (is_secret
+  blocks reads, not writes), so re-keying works up to `prov lock`. The
+  run sheet keeps iokey first (unchanged, simplest).
 
 ### Factory config zone (pre-write backup, CRC 4AB4)
 ```
@@ -140,14 +197,20 @@ unchanged; the fields that actually change are:
   822F.** `prov lock` locks with the CRC of the chip's actual zone,
   which equals 822F after `prov config`.
 
-**I/O key (before the config write):** `prov iokey` = 8 × `get_rand_32()`
-from the Pico TRNG → 32 B → Write to data slot 14 **while it is still a
-plain factory slot** → read-back verify (only chance — post-config slot
-14 is is_secret and unreadable) → print 64 hex chars (durable backup) →
-save `/io_key.bin` (magic 0x494F4B31 'IOK1', len, key, CRC-32).
+**I/O key (run first; also re-runnable after config):** `prov iokey` =
+8 × `get_rand_32()` from the Pico TRNG → 32 B → preconditions (config
+zone unlocked, data zone unlocked, slot 14 accepts a clear Write —
+parsed from the config zone) → Write to data slot 14 (the chip's OK
+commits it — a read-back verify is impossible: data slots are
+unreadable while the data zone is unlocked, and post-config slot 14 is
+is_secret) → print 64 hex chars (durable backup) → save
+`/io_key.bin` (magic 0x494F4B31 'IOK1', len, key, CRC-32). The key is
+verified functionally by an I/O-protected transaction after
+`prov lock`.
 
-**Reversibility:** `prov iokey` — re-runnable while pre-config (re-run
-re-keys; the printed hex is the record). `prov config` — the config zone
+**Reversibility:** `prov iokey` — re-runnable before OR after
+`prov config` (re-run re-keys; the printed hex is the record).
+`prov config` — the config zone
 stays re-writable until Lock; re-running is idempotent (no writes when
 the zone already matches). `prov lock` — **irreversible**: the config
 zone can never change again (the data zone is NOT locked — contents
@@ -292,7 +355,7 @@ callback):
 |----------------|-------------------------------------------------------------|------------|
 | `prov status`  | chip state + factory-zone dump + diff vs planned image      | read-only  |
 | `prov randtest`| `atcab_random` ×2, print — expect 0xFFFF0000 pattern        | read-only  |
-| `prov iokey`   | Pico TRNG → Write slot 14 → read-back verify → print 64 hex → save `/io_key.bin` | yes (re-run re-keys) |
+| `prov iokey`   | Pico TRNG → prechecks → Write slot 14 (chip ACK; no read-back possible) → print 64 hex → save `/io_key.bin` | yes (re-run re-keys, before OR after config) |
 | `prov config`  | build intent → write zone (byte 16 + SlotLocked 88..89 preserved) → read-back verify | yes |
 | `prov lock`    | re-verify zone vs intent → typed confirm → Lock w/ summary CRC | **no** |
 
@@ -304,7 +367,10 @@ path above) — **CONFIRMED 2026-10-23** (`prov randtest` showed the
 pattern; user-reported); GenKey fill size on non-ECC slots (16 vs 32
 bytes — if 16, accept a 128-bit master or fill via Pico-entropy+Write);
 KDF from an `is_secret` slot; I/O protection end-to-end incl.
-request direction; `kdf_aes_en`/`kdf_prot` settings; UpdateExtra
+request direction — **this is now also the functional verification of
+the `prov iokey` write** (a wrong/missing slot-14 key fails every
+protected command after `prov lock`); `kdf_aes_en`/`kdf_prot` settings;
+UpdateExtra
 same-value behavior (we send 00 00 → 00 00); byte-16 write behavior;
 ~~factory KeyConfig words (mock assumes all 0)~~ **KNOWN 2026-10-23**:
 the real factory ships 0x0033 ×3 / 0x001C ×5 / 0x003C ×7 / 0x001C (mock
@@ -713,12 +779,17 @@ approves a specific write:
      `get_32bit_random()` module (that was SDK 1.x); on RP2350 `pico_rand`
      uses the hardware TRNG as entropy source by default
      (`PICO_RAND_ENTROPY_SRC_TRNG`, gated on `HAS_RP2350_TRNG`). →
-     WriteCommand to
-     slot 14 **while it is still a plain factory slot** (pre-config) →
-     read-back verify (only chance — post-config slot 14 is is_secret and
-     unreadable) → print the 64 hex chars on the console (durable record) →
-     save `/io_key.bin` (littlefs; 32 B key + magic/len/CRC header per the
-     Persistence-layer section). Re-running re-keys (dev flow).
+     preconditions via `atecc608_write_iokey()` (config zone unlocked,
+     data zone unlocked, slot accepts a clear Write in the current
+     config) → WriteCommand to slot 14 — the chip's OK commits it;
+     **NO read-back verify: data slots are unreadable while the data
+     zone is unlocked (Microchip conformance test), and post-config
+     slot 14 is is_secret** → print the 64 hex chars on the console
+     (durable record) → save `/io_key.bin` (littlefs; 32 B key +
+     magic/len/CRC header per the Persistence-layer section). Re-running
+     re-keys (dev flow; works before OR after `prov config`). The key is
+     verified functionally by an I/O-protected transaction after
+     `prov lock` (see the "Data-zone reads while unlocked" section).
    - **`prov config`** (WRITE — gated): build the G intent → call
      `atecc608_provision_config()` (already: unlocked check → read zone →
      preserve byte 16 + SlotLocked 88..89 → write → read-back verify).
