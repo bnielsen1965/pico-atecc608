@@ -1,65 +1,167 @@
 # Resume notes (pico-atecc608)
 
-Pause point: **2026-10-23, after implementing the 4B `prov` console
-command set — next is flashing + the read-only bench steps, THEN the write
-checkpoint.** This file is a continuity snapshot — update it at each
-pause. The forward plan lives in `PLAN.md`; this file captures the exact
-working state and the concrete next steps.
+Pause point: **2026-10-23, at the WRITE CHECKPOINT — the exact byte plan
+is presented (section below); waiting for the user's explicit approval
+before the first chip write (HARD RULE).** This file is a continuity
+snapshot — update it at each pause. The forward plan lives in `PLAN.md`;
+this file captures the exact working state and the concrete next steps.
 
 ## ⏸ Where the conversation stopped (read this first on resume)
-HEAD is `d39a65d` (working tree clean). The 4B application-scenario
-discussion is **DONE (2026-10-22)**; the full config is agreed (below) and
-the exact byte plan exists (see "I/O key generation" +
-`example/tools/dump_devconfig.c`, summary CRC **4FE8**). On resume, do NOT
-re-litigate scenarios and do NOT jump to chip writes. The **scenario
-guidance is user-reviewed** (2026-10-22, "all looking pretty good") and
-lives in `example/README.md`. **Repo reorg (2026-10-22, committed as
-`4f6b211`):** the provisioning PoC + demo apps are the *examples*, not the
-library — `app/` → `example/console/`, `tools/` → `example/tools/`,
-new `example/CMakeLists.txt` (+ `ATECC608_BUILD_EXAMPLES`, default ON)
-and `example/README.md`. Examples are **discrete applications** (one
-directory per app: password-store, fido2, …); every example's startup
-contract = "is the chip provisioned? if not, provision via the module API,
-then run" (shared base in `example/common/`, to be factored out of the
-console in 4B). Pico build + host ctest green after the reorg; the uf2 is
-now at `build/example/console/pico-atecc608.uf2`.
+HEAD is `d6cf44d` (working tree clean). **The chip is still untouched** —
+everything since the flash has been read-only. On resume: do NOT
+re-litigate scenarios and do NOT run any chip write before the user has
+explicitly approved the byte plan (section below). Scenario guidance is
+user-reviewed (2026-10-22) and lives in `example/README.md`.
 
-**Done 2026-10-23 (`cc51d2a`, `6448a0d`, `d39a65d`):** (1) the
-pico-command-line submodule moved from the repo root into `example/` (it
-is used by the examples only, not the library); (2) the `prov` console
-command set is implemented (build-only work, **chip untouched**):
-`prov status` / `randtest` (read-only), `iokey` / `config` / `lock`
-(writes — gated at the bench by the HARD RULE); (3) pico-littlefs
-converted from a sibling-project reference into an `example/` submodule.
-Details:
-- littlefs is wired via `add_subdirectory` of the `example/pico-littlefs`
-  **submodule** (github.com/bnielsen1965/pico-littlefs, pinned at
-  `936c07f` = `origin/main`, the same code the sibling clone had) in
-  `example/console/CMakeLists.txt`; target `pico-littlefs`, header
-  `pico_littlefs.h`. Init/mount at startup (auto-formats a fresh volume),
-  warns when `/io_key.bin` is gone. `pico_rand` (SDK target, header
-  `pico/rand.h`, `get_rand_32()`) supplies the I/O-key entropy.
-- The agreed 4B config now lives in **`example/common/dev_config.h`**,
-  shared by the console and the host byte-plan tool so both always encode
-  the same image (image unchanged; summary CRC still **4FE8**).
-- **Typed-confirm design:** the confirm is the command line itself —
-  `prov lock` verifies the zone and aborts, `prov lock CONFIRM` carries
-  the confirm. Both pass through the module's confirm-callback API
-  (`atecc608_lock_config_zone`). Reason: the command handlers run on
-  core1 while pico-command-line's stdin loop runs on core0, so an
-  interactive "type yes" prompt inside a command would have its keystrokes
-  split between the two cores.
-- Pico build green and warning-clean; app is 98.5 KB (well under the
-  512 KB littlefs boundary at 0x80000); host ctest 2/2.
+State at the pause:
+- The console uf2 is on the bench (manual BOOTSEL drag; drive label
+  **RP2350** on the Pico 2). The flashed image **predates the
+  SlotLocked fix (`d6cf44d`) — reflash the rebuilt uf2 before any write**
+  (reflashing wipes littlefs; nothing is on it yet — the I/O key has not
+  been generated).
+- Read-only bench steps done: probe / info / serial / lock +
+  `prov status`. The factory-zone dump below is the recorded output;
+  **verified** — its CRC-16 = 4AB4 = the device's own print, and the
+  device's 38-byte diff list matches a recomputation from the dump + the
+  builder image exactly. It is the pre-write backup; the zone stays
+  re-writable until Lock.
+- **`prov randtest`: awaiting user confirmation** that it printed the
+  0xFFFF0000 factory pattern (the user reached the checkpoint without
+  quoting it). If it did NOT, the I/O-key plan's premise changes — stop
+  and revisit before writing anything.
+- **The SlotLocked (88–89) issue is found + fixed** (`d6cf44d`, details
+  below). Pico build green, host ctest 2/2.
+- **The byte plan was presented; waiting for explicit approval** (HARD
+  RULE). On resume, re-present it (section below) and wait.
 
-**Immediate next work:** flash
-`build/example/console/pico-atecc608.uf2` and run the bench read-only
-steps (`prov status` — factory-zone dump + diff vs planned image;
-`prov randtest` — expect the 0xFFFF0000 pattern). THEN the **WRITE
-CHECKPOINT**: present the exact byte plan (which bytes, values,
-reversibility) for the approval the HARD RULE requires. The config write
-is reversible while the zone is unlocked; the lock is not — approval
-covers both.
+**Next, on approval (the write sequence):**
+1. If the post-fix uf2 is not flashed yet: BOOTSEL-reflash
+   `build/example/console/pico-atecc608.uf2`.
+2. `prov iokey` — record the printed 64-hex I/O key (the durable backup;
+   `/io_key.bin` on littlefs is lost on reflash).
+3. `prov config` — expect: planned image "summary CRC **822F**", one
+   write pass, read-back verify OK, chip-zone CRC 822F.
+4. `prov status` — expect: writable region **matches** the planned image
+   (no diff bytes), both CRCs 822F, byte 16 = C0, bytes 88..89 = FF FF.
+5. `prov lock` — verifies the zone, then aborts (no confirm typed).
+6. `prov lock CONFIRM` — Lock with summary CRC 822F → OK.
+7. `prov status` — expect: `config zone: LOCKED`, lock bytes 00 00. The
+   chip-zone CRC will differ from the planned-image CRC: Lock flips the
+   lock bytes 55 55 → 00 00 (excluded from the compare, inside the CRC).
+   Expected, not a failure.
+
+### The SlotLocked (88–89) issue — found + fixed (`d6cf44d`)
+- The factory zone holds **FF FF** at 88–89 (SlotLocked); the builder
+  emits 00 00. The library's write path (calib_write.c: writes 16..127,
+  only 84–87 skipped — 84/85 via UpdateExtra, 86/87 lock-only) DOES send
+  88–89, but whether the chip honors the write is undocumented. If it
+  ignores the write, both the `prov config` read-back verify and the
+  `prov lock` re-verify would fail (image 00 00 vs chip FF FF).
+- **Polarity — confirmed from cryptoauthlib's own code, two independent
+  sources:** bit n = 0 → slot n LOCKED; bit n = 1 → unlocked; the Lock
+  command clears the bit. `calib_helpers.c calib_is_slot_locked()`:
+  `is_locked = (slot_locked & (1u << slot)) == 0`. Hardware test
+  `test/api_atcab/atca_tests_write.c write_upper_slots()` skips a slot
+  when the bit is 0 ("Slot is locked and can't be written to"). Factory
+  FF FF = nothing locked, consistent.
+- **Fix:** the prov path preserves the chip's 88–89 in the planned image
+  (exactly like byte 16). Touched: `src/atecc608_prov.c` (both
+  `provision_config` and `lock_config_zone`), `example/console/main.c`
+  (`planned_image()` now takes the chip zone; `prov status` prints the
+  preserved bytes; `prov config` reads the zone before building the
+  image), `tests/mock_chip.c` (factory 88–89 = FF FF; Lock handler
+  polarity flipped: lock CLEARS the bit), `tests/test_prov.c`
+  (`t_lock_data_slot` expectations), `include/atecc608/atecc608_prov.h`
+  (contract note), `example/tools/dump_devconfig.c` (note), README /
+  example README / PLAN.md. Robust in both worlds: if the chip honors
+  the write, we write back exactly what it holds (no-op); if it ignores
+  the write, the verify still sees the same bytes.
+- **CRCs:** host tool (zeroed variant) = **4FE8** (unchanged); on-device
+  planned image (chip's byte 16 = C0 + 88–89 = FF FF) = **822F** — what
+  `prov status` / `prov config` now print and what `prov lock` uses
+  (Lock takes the chip's actual zone CRC; after `prov config` that is
+  822F). (AA8F was the pre-fix on-device value — obsolete.)
+
+### Factory config zone (pre-write backup, CRC 4AB4)
+```
+0000: 01 23 06 40 00 00 60 05 AE B6 B9 B7 EE 61 65 00
+0010: C0 00 00 00 83 20 87 20 8F 20 C4 8F 8F 8F 8F 8F
+0020: 9F 8F AF 8F 00 00 00 00 00 00 00 00 00 00 00 00
+0030: 00 00 AF 8F FF FF FF FF 00 00 00 00 FF FF FF FF
+0040: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+0050: 00 00 00 00 00 00 55 55 FF FF 00 00 00 00 00 00
+0060: 33 00 33 00 33 00 1C 00 1C 00 1C 00 1C 00 1C 00
+0070: 3C 00 3C 00 3C 00 3C 00 3C 00 3C 00 3C 00 1C 00
+```
+Decode: serial 01 23 06 40 AE B6 B9 B7 EE = bytes [0:4]+[8:13); part
+0x60 rev 5 (bytes 4–7, matches INFO); AES_Enable 0x61 / I2C_Enable 0x65
+(bit 0 set + factory feature bits — factory region, never touched);
+**byte 16 = C0** (I2C address, 8-bit on-the-wire form of 0x60); factory
+SlotConfig (20–51) = 0x2083, 0x2087, 0x208F, 0x8FC4, 0x8F8F, 0x8F8F,
+0x8F9F, 0x8FAF, 0×6, 0x8FAF ("secure by default" key-protected layout);
+counters both 0 (FF FF FF FF 00 00 00 00); UserExtra / UserExtraAdd
+00/00; lock bytes 86–87 = 55 55 (unlocked); **SlotLocked (88–89) =
+FF FF**; ChipOptions 00 00; X509 0×4; factory KeyConfig (96–127) =
+0x0033 ×3 (ECC priv+pub+lockable), 0x001C ×5 (plain non-ECC), 0x003C ×7
+(non-ECC+lockable), 0x001C.
+
+### Byte plan (write checkpoint, presented 2026-10-23)
+**Preserved from the chip (the prov path copies them into the planned
+image, so they never change):** bytes 0–15 (factory region,
+write-protected anyway), byte 16 = C0 (I2C address — writing anything
+else would move the bus address), bytes 88–89 = FF FF (SlotLocked,
+Lock-command-managed).
+
+**Written** (library write path: Write commands cover 16..127 minus
+84–87; 84/85 via UpdateExtra = 00/00, same-value case): the planned
+image below — i.e. everything already equal to the factory is re-written
+unchanged; the fields that actually change are:
+- SlotConfig (20–51): 0x2083, 0x2087, 0x208F, 0x8FC4, 0x8F8F, 0x8F8F,
+  0x8F9F, 0x8FAF, 0×6, 0x8FAF → 0x0000, 0x2085, 0x0000, 0x2081 ×4,
+  0x0080 ×4, 0x0000, 0x2085, 0x0000, 0x0080, 0x0000
+- KeyConfig (96–127): 0x0033, 0x0033, 0x0033, 0x001C ×5, 0x003C ×7,
+  0x001C → 0x0032, 0x0013, 0x0012, 0x0013 ×4, 0x003C, 0x003C ×3, 0x0032,
+  0x0013, 0x0012, 0x003C, 0x001C
+- ChipOptions (90–91): 00 00 → 06 E5 (LE16 0xE506: io_prot_en +
+  kdf_aes_en, ecdh_prot = 1, kdf_prot = 1, io_prot_key = slot 14)
+- 36 changed bytes total: 0x14 0x15 0x16 0x18 0x19 0x1A 0x1B 0x1C 0x1D
+  0x1E 0x1F 0x20 0x21 0x22 0x23 0x24 0x26 0x28 0x2C 0x2D 0x30 0x32 0x33
+  0x5A 0x5B 0x60 0x62 0x64 0x66 0x68 0x6A 0x6C 0x6E 0x76 0x78 0x7A
+  (this is the post-fix `prov status` diff; the pre-fix firmware listed
+  38 bytes incl. 0x58/0x59 and CRC AA8F)
+- **Planned image summary CRC (on-device, with the preserved bytes):
+  822F.** `prov lock` locks with the CRC of the chip's actual zone,
+  which equals 822F after `prov config`.
+
+**I/O key (before the config write):** `prov iokey` = 8 × `get_rand_32()`
+from the Pico TRNG → 32 B → Write to data slot 14 **while it is still a
+plain factory slot** → read-back verify (only chance — post-config slot
+14 is is_secret and unreadable) → print 64 hex chars (durable backup) →
+save `/io_key.bin` (magic 0x494F4B31 'IOK1', len, key, CRC-32).
+
+**Reversibility:** `prov iokey` — re-runnable while pre-config (re-run
+re-keys; the printed hex is the record). `prov config` — the config zone
+stays re-writable until Lock; re-running is idempotent (no writes when
+the zone already matches). `prov lock` — **irreversible**: the config
+zone can never change again (the data zone is NOT locked — contents
+stay open per the agreed layout). Locking the config zone also makes
+the 84/85 one-shot bytes final.
+
+**Done 2026-10-23 (earlier, `cc51d2a` / `6448a0d` / `d39a65d`):** the
+pico-command-line submodule moved into `example/`; the `prov` console
+command set implemented (build-only, chip untouched); pico-littlefs
+converted to an `example/` submodule (pinned `936c07f`, target
+`pico-littlefs`, header `pico_littlefs.h`, init/mount at startup, warns
+when `/io_key.bin` is gone); `pico_rand` (`get_rand_32()`) supplies the
+I/O-key entropy. The agreed 4B config lives in
+**`example/common/dev_config.h`**, shared by console + host byte-plan
+tool. **Typed-confirm design:** `prov lock` verifies then aborts,
+`prov lock CONFIRM` carries the confirm (both via the module's
+confirm-callback API) — the command handlers run core1 while
+pico-command-line's stdin loop runs core0, so an interactive prompt
+would have its keystrokes split. Pico build green/warning-clean (app
+98.5 KB, well under the 512 KB littlefs boundary at 0x80000); host
+ctest 2/2.
 
 ## Agreed 4B config (scenario discussion, 2026-10-22)
 Principle: **lock the layout, keep the contents open.** The config zone is
@@ -184,18 +286,25 @@ callback):
 | `prov status`  | chip state + factory-zone dump + diff vs planned image      | read-only  |
 | `prov randtest`| `atcab_random` ×2, print — expect 0xFFFF0000 pattern        | read-only  |
 | `prov iokey`   | Pico TRNG → Write slot 14 → read-back verify → print 64 hex → save `/io_key.bin` | yes (re-run re-keys) |
-| `prov config`  | build intent → write zone (byte 16 preserved) → read-back verify | yes |
+| `prov config`  | build intent → write zone (byte 16 + SlotLocked 88..89 preserved) → read-back verify | yes |
 | `prov lock`    | re-verify zone vs intent → typed confirm → Lock w/ summary CRC | **no** |
 
-4B hardware verification items (mock fidelity gaps): factory-zone diff
-before any write (first step); Random command on the unlocked chip
+4B hardware verification items (mock fidelity gaps): ~~factory-zone diff
+before any write~~ **DONE 2026-10-23** (dump recorded + CRC-verified, see
+"Factory config zone" above); Random command on the unlocked chip
 returns the documented 0xFFFF0000 pattern (confirms the Pico-entropy
-path above); GenKey fill size on non-ECC slots (16 vs 32 bytes — if 16,
-accept a 128-bit master or fill via Pico-entropy+Write); KDF from an
-`is_secret` slot; I/O protection end-to-end incl.
-request direction; `kdf_aes_en`/`kdf_prot` settings; UpdateExtra same-value
-behavior; byte-16 write behavior; factory KeyConfig words (mock assumes all
-0); UseLock enforcement; GenKey/PrivWrite bit 13/14 behavior.
+path above) — **awaiting user confirmation** (ran `prov randtest` but
+the output was not quoted); GenKey fill size on non-ECC slots (16 vs 32
+bytes — if 16, accept a 128-bit master or fill via Pico-entropy+Write);
+KDF from an `is_secret` slot; I/O protection end-to-end incl.
+request direction; `kdf_aes_en`/`kdf_prot` settings; UpdateExtra
+same-value behavior (we send 00 00 → 00 00); byte-16 write behavior;
+~~factory KeyConfig words (mock assumes all 0)~~ **KNOWN 2026-10-23**:
+the real factory ships 0x0033 ×3 / 0x001C ×5 / 0x003C ×7 / 0x001C (mock
+still all-0 — recorded, the prov path overwrites them all);
+**SlotLocked: resolved** (factory FF FF, polarity bit 0 = locked, mock
++ prov path fixed in `d6cf44d`); UseLock enforcement; GenKey/PrivWrite
+bit 13/14 behavior.
 
 ## Where we are
 - **Phase 1 DONE** — module skeleton + build wiring.
@@ -205,14 +314,16 @@ behavior; byte-16 write behavior; factory KeyConfig words (mock assumes all
 - **Phase 4A DONE** — config builder + guarded provisioning API + host unit
   tests with a mock chip HAL. `ctest` 2/2 green; Pico build warning-clean.
   **Chip untouched.** See "Phase 4A — what was built (and why)" below.
-- **Phase 4B next (STOP BOUNDARY)** — the actual chip provisioning.
-  Scenario discussion done 2026-10-22; the agreed config is in "Agreed 4B
-  config" above (locked layout / open contents, usable across all apps,
-  I/O protection on). Exact byte plan exists: `example/tools/dump_devconfig.c`
-  (builder output: 128 B image + summary CRC; slot 14 lockable per the
-  2026-10-22 decision). Before ANY write: README scenario guidance → the
-  byte plan (what, where, reversibility) for explicit approval. HARD RULE
-  below applies.
+- **Phase 4B in progress (STOP BOUNDARY: WRITE CHECKPOINT)** — the
+  actual chip provisioning. Scenario discussion done 2026-10-22; the
+  agreed config is in "Agreed 4B config" above (locked layout / open
+  contents, usable across all apps, I/O protection on). Console uf2
+  flashed; read-only bench steps done (factory zone recorded +
+  verified); SlotLocked (88–89) issue found + fixed (`d6cf44d`, mock +
+  prov path now preserve the chip's value). **The byte plan is
+  presented (section above); waiting for explicit user approval.**
+  Before ANY write: the byte plan (what, where, reversibility) for
+  explicit approval. HARD RULE below applies.
 
 ## Build (verified green)
 ```sh
@@ -583,7 +694,9 @@ approves a specific write:
      included), print a byte-by-byte diff vs the planned image (embed the
      agreed G intent — same builder call as
      `example/tools/dump_devconfig.c`, via `atecc608_config_build` with the
-     agreed field values; byte 16 compared as "chip keeps own").
+     agreed field values; bytes 16 and 88..89 patched from the chip — the
+     prov path preserves them, so the compare sees them as "chip keeps
+     own").
    - **`prov randtest`** (read-only): `atecc608_random` ×2 (32 B each),
      print hex; annotate whether the 0xFFFF0000 factory pattern is present
      (expected while the zone is unlocked — manual-cited).
@@ -601,16 +714,16 @@ approves a specific write:
      Persistence-layer section). Re-running re-keys (dev flow).
    - **`prov config`** (WRITE — gated): build the G intent → call
      `atecc608_provision_config()` (already: unlocked check → read zone →
-     preserve byte 16 → write → read-back verify). Prints the verify
-     result + summary CRC.
+     preserve byte 16 + SlotLocked 88..89 → write → read-back verify).
+     Prints the verify result + summary CRC.
    - **`prov lock`** (WRITE, IRREVERSIBLE — gated + typed confirm):
-     re-verify zone vs intent (full byte compare, byte 16 excluded) →
-     typed confirm via the existing confirm-callback API (reuse the
-     pattern the Phase-4A prov API already takes; on the console that is a
-     type-to-confirm prompt) → `atecc608_lock_config_zone()` (Lock command
-     with the summary CRC computed from the chip's ACTUAL zone at lock
-     time — NOT the builder CRC 4FE8, which differs in the factory bytes
-     0–15).
+     re-verify zone vs intent (full byte compare, byte 16 + 88..89
+     preserved) → typed confirm via the existing confirm-callback API
+     (reuse the pattern the Phase-4A prov API already takes; on the
+     console that is a type-to-confirm prompt) →
+     `atecc608_lock_config_zone()` (Lock command with the summary CRC
+     computed from the chip's ACTUAL zone at lock time — NOT the builder
+     CRC 4FE8, which differs in the factory bytes 0–15).
    - Reuse the `bootrom` command's registration pattern in
      `example/console/main.c` for all five.
    - **Then:** Pico build green, host ctest still 2/2, flash the uf2
@@ -627,12 +740,18 @@ approves a specific write:
    `prov iokey` → (record the 64-hex io key) → `prov config` →
    `prov lock` (typed confirm).
 6. **4B verification items** (mock fidelity gaps — check on the real chip):
-   UpdateExtra same-value behavior; byte-16 write behavior; factory
-   KeyConfig words (mock assumes all 0); UseLock enforcement; GenKey/
-   PrivWrite bit 13/14 behavior on real hardware; I/O protection coverage
-   of the request direction (mock does NOT model I/O protection at all);
-   kdf_prot/ecdh_prot 2-bit semantics (enforce vs opt-in) per NDA
-   datasheet.
+   UpdateExtra same-value behavior (we send 00 00 → 00 00); byte-16
+   write behavior; ~~factory KeyConfig words (mock assumes all 0)~~
+   known 2026-10-23: real factory ships 0x0033 ×3 / 0x001C ×5 /
+   0x003C ×7 / 0x001C (mock still all-0, prov path overwrites them
+   all); ~~factory SlotLocked~~ resolved 2026-10-23 (`d6cf44d`):
+   factory FF FF, polarity bit n = 0 → locked (confirmed from
+   cryptoauthlib's own `calib_is_slot_locked` + hardware write test),
+   prov path now preserves the chip's 88–89 like byte 16; UseLock
+   enforcement; GenKey/PrivWrite bit 13/14 behavior on real hardware;
+   I/O protection coverage of the request direction (mock does NOT
+   model I/O protection at all); kdf_prot/ecdh_prot 2-bit semantics
+   (enforce vs opt-in) per NDA datasheet.
 
 Then per PLAN.md: Phase 5 (crypto pass-through: kdf/sign/verify) and Phase 6
 (config read-back console demo), then Phase 7 (on-hardware validation +
