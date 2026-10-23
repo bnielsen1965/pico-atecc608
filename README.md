@@ -132,7 +132,7 @@ cmake .. -DPICO_SDK_PATH="$HOME/Projects/pico-sdk"
 make -j
 
 # Flash over USB: drag build/example/console/pico-atecc608.uf2 to the
-# RPI-RP2 drive, or use the `bootrom` console command to re-enter BOOTSEL.
+# RP2350 drive, or use the `bootrom` console command to re-enter BOOTSEL.
 ```
 
 The build produces the console example image in

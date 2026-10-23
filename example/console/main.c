@@ -145,7 +145,7 @@ static void commandHelp(char *cmdLine)
 static void commandBootrom(char *cmdLine)
 {
     (void)cmdLine;
-    printf("Rebooting into BOOTSEL mode... (watch for the RPI-RP2 drive)\n");
+    printf("Rebooting into BOOTSEL mode... (watch for the RP2350 drive)\n");
     // Give the console a moment to flush the message out the UART.
     sleep_ms(200);
     rom_reset_usb_boot(0, 0);
