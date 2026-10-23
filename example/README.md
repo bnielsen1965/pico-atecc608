@@ -26,13 +26,19 @@ implementation.)
 
 ## What's here
 
-- **`console/`** — bench console over the serial port (pico-command-line):
-  probe/diagnostic smoke commands plus the Phase 4B `prov` command set.
+- **`console/`** — bench console over the serial port (pico-command-line,
+  a submodule in this folder): probe/diagnostic smoke commands plus the
+  Phase 4B `prov` command set. Pico-side state lives in littlefs
+  (pico-littlefs, `~/Projects/pico-littlefs` — a sibling project, not a
+  submodule): `/io_key.bin` for now, later `/vault.db` and `/fido2.db`.
   The `bootrom` command re-enters BOOTSEL for reflashing.
 - **`tools/dump_devconfig.c`** — host tool that encodes the agreed dev
   config and prints the exact 128-byte config-zone image + summary CRC
   from the module's real builder (the byte plan).
-- **`common/`** — the shared provision-on-first-boot base (see above).
+- **`common/dev_config.h`** — the agreed 4B dev config as a build intent,
+  shared by the console (`prov status/config/lock`) and the byte-plan tool
+  so both always encode the same image. (The shared provision-on-first-boot
+  base also lands here — see above.)
 
 ## Console example
 
@@ -65,6 +71,13 @@ already takes a confirm callback):
 | `prov iokey` | Pico TRNG → Write slot 14 → read-back verify → print 64 hex chars → save `/io_key.bin` (littlefs) | yes (re-run re-keys) |
 | `prov config` | build intent → write zone (byte 16 preserved) → read-back verify | yes |
 | `prov lock` | re-verify zone vs intent → typed confirm → Lock with summary CRC | **no** |
+
+The typed confirm on `prov lock` is the command line itself: the handlers
+run on core1 while the console's stdin loop runs on core0, so an
+interactive prompt inside a command would have its keystrokes split
+between the two cores. `prov lock` verifies the zone and aborts;
+`prov lock CONFIRM` carries the confirm. Both go through the module's
+confirm-callback API.
 
 ## Application scenarios — provisioning guidance
 
