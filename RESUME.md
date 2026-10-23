@@ -1,10 +1,11 @@
 # Resume notes (pico-atecc608)
 
-Pause point: **2026-10-23, at the WRITE CHECKPOINT — the exact byte plan
-is presented (section below); waiting for the user's explicit approval
-before the first chip write (HARD RULE).** This file is a continuity
-snapshot — update it at each pause. The forward plan lives in `PLAN.md`;
-this file captures the exact working state and the concrete next steps.
+Pause point: **2026-10-23, byte plan APPROVED by the user (full
+sequence) — the write sequence (reflash → iokey → config → lock) is the
+current action; chip writes are now authorized.** This file is a
+continuity snapshot — update it at each pause. The forward plan lives in
+`PLAN.md`; this file captures the exact working state and the concrete
+next steps.
 
 ## ⏸ Where the conversation stopped (read this first on resume)
 HEAD is `d6cf44d` (working tree clean). **The chip is still untouched** —
@@ -25,30 +26,36 @@ State at the pause:
   device's 38-byte diff list matches a recomputation from the dump + the
   builder image exactly. It is the pre-write backup; the zone stays
   re-writable until Lock.
-- **`prov randtest`: awaiting user confirmation** that it printed the
-  0xFFFF0000 factory pattern (the user reached the checkpoint without
-  quoting it). If it did NOT, the I/O-key plan's premise changes — stop
-  and revisit before writing anything.
+- **`prov randtest`: CONFIRMED by the user (2026-10-23)** — it printed
+  the 0xFFFF0000 factory pattern, as expected for an unlocked zone (4B
+  verification item: resolved).
 - **The SlotLocked (88–89) issue is found + fixed** (`d6cf44d`, details
   below). Pico build green, host ctest 2/2.
-- **The byte plan was presented; waiting for explicit approval** (HARD
-  RULE). On resume, re-present it (section below) and wait.
+- **The byte plan was presented and APPROVED by the user (2026-10-23,
+  full sequence: iokey + config + lock).** Chip writes are now
+  authorized. On resume: check the progress checklist below; if the
+  sequence is mid-way, continue it (every step is idempotent except the
+  lock, and the lock refuses to run twice).
 
-**Next, on approval (the write sequence):**
-1. If the post-fix uf2 is not flashed yet: BOOTSEL-reflash
-   `build/example/console/pico-atecc608.uf2`.
-2. `prov iokey` — record the printed 64-hex I/O key (the durable backup;
-   `/io_key.bin` on littlefs is lost on reflash).
-3. `prov config` — expect: planned image "summary CRC **822F**", one
-   write pass, read-back verify OK, chip-zone CRC 822F.
-4. `prov status` — expect: writable region **matches** the planned image
-   (no diff bytes), both CRCs 822F, byte 16 = C0, bytes 88..89 = FF FF.
-5. `prov lock` — verifies the zone, then aborts (no confirm typed).
-6. `prov lock CONFIRM` — Lock with summary CRC 822F → OK.
-7. `prov status` — expect: `config zone: LOCKED`, lock bytes 00 00. The
-   chip-zone CRC will differ from the planned-image CRC: Lock flips the
-   lock bytes 55 55 → 00 00 (excluded from the compare, inside the CRC).
-   Expected, not a failure.
+**Write sequence — approved by the user 2026-10-23 (full sequence).
+Progress (check off as the bench proceeds; every step is idempotent
+except the lock):**
+- [ ] 0. BOOTSEL-reflash `build/example/console/pico-atecc608.uf2`
+  (the flashed image predates `d6cf44d` — required before any write;
+  littlefs wipe is harmless, nothing is stored on it yet).
+- [ ] 1. `prov iokey` — **record the printed 64-hex I/O key** (the
+  durable backup; `/io_key.bin` on littlefs is lost on reflash).
+- [ ] 2. `prov config` — expect: "planned image (chip's byte 16 = 0xC0,
+  bytes 88..89 = FF FF): summary CRC 822F", one write pass, "verified:
+  chip zone matches the planned image", chip-zone CRC 822F.
+- [ ] 3. `prov status` — expect: "writable region: matches the planned
+  image", "summary CRC: chip zone 822F  planned image 822F".
+- [ ] 4. `prov lock` — verifies the zone, then aborts (no confirm typed).
+- [ ] 5. `prov lock CONFIRM` — Lock with summary CRC 822F → OK.
+- [ ] 6. `prov status` — expect: `config zone: LOCKED`, lock bytes 00
+  00. The chip-zone CRC will differ from the planned-image CRC: Lock
+  flips the lock bytes 55 55 → 00 00 (excluded from the compare, inside
+  the CRC). Expected, not a failure.
 
 ### The SlotLocked (88–89) issue — found + fixed (`d6cf44d`)
 - The factory zone holds **FF FF** at 88–89 (SlotLocked); the builder
@@ -293,8 +300,8 @@ callback):
 before any write~~ **DONE 2026-10-23** (dump recorded + CRC-verified, see
 "Factory config zone" above); Random command on the unlocked chip
 returns the documented 0xFFFF0000 pattern (confirms the Pico-entropy
-path above) — **awaiting user confirmation** (ran `prov randtest` but
-the output was not quoted); GenKey fill size on non-ECC slots (16 vs 32
+path above) — **CONFIRMED 2026-10-23** (`prov randtest` showed the
+pattern; user-reported); GenKey fill size on non-ECC slots (16 vs 32
 bytes — if 16, accept a 128-bit master or fill via Pico-entropy+Write);
 KDF from an `is_secret` slot; I/O protection end-to-end incl.
 request direction; `kdf_aes_en`/`kdf_prot` settings; UpdateExtra
