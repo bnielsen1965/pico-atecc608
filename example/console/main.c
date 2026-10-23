@@ -26,8 +26,10 @@
 //                    the planned image
 //   prov randtest  - read-only: chip RNG x2; the 0xFFFF0000 factory pattern
 //                    is expected while the config zone is unlocked
-//   prov iokey     - WRITE: Pico TRNG -> slot 14 -> read-back verify ->
-//                    print 64 hex chars -> save /io_key.bin (littlefs)
+//   prov iokey     - WRITE: Pico TRNG -> slot 14 (write ACK; no read-back
+//                    possible — data slots are unreadable while the data
+//                    zone is unlocked) -> print 64 hex chars -> save
+//                    /io_key.bin (littlefs)
 //   prov config    - WRITE: agreed intent -> config zone (byte 16 +
 //                    SlotLocked 88..89 preserved), read-back verified;
 //                    idempotent
@@ -401,32 +403,59 @@ static void provRandtest(void)
 }
 
 // prov iokey — WRITE (dev flow; re-running re-keys): Pico TRNG -> Write
-// slot 14 while it is still a plain factory slot -> read-back verify (the
-// ONLY chance — after `prov config` slot 14 is is_secret) -> print the key
-// -> save /io_key.bin in littlefs.
+// slot 14 -> print the key -> save /io_key.bin in littlefs.
+// The write is verified by the chip's write ACK only: a read-back verify
+// is impossible on the ATECC608 — data slots cannot be read while the
+// data zone is unlocked (Microchip's own conformance test asserts this),
+// and `prov config` marks slot 14 is_secret. The key is verified
+// functionally by an I/O-protected transaction after `prov lock`.
 static void provIokey(void)
 {
     uint8_t key[PROV_IOKEY_LEN];
-    uint8_t back[ATECC608_DATA_SLOT_LEN];
+    uint8_t zone[ATECC608_CONFIG_ZONE_LEN];
+    atecc608_config_intent_t cfg;
     bool locked = false;
     atecc608_status_t st;
 
-    // Gate: only while the config zone is unlocked — after `prov config`
-    // slot 14 is is_secret and the read-back verify is impossible.
+    // Gate: only while the config zone is unlocked — after `prov lock`
+    // I/O protection is enforced and the chip is unreachable without the
+    // key (the driver has no I/O-protection support yet).
     st = atecc608_is_locked(ATECC608_ZONE_CONFIG, &locked);
     if (ATECC608_OK != st) {
         report_fail("IS_LOCKED (config)", st);
         return;
     }
     if (locked) {
-        printf("config zone is LOCKED — `prov iokey` must run before `prov config`.\n");
+        printf("config zone is LOCKED — `prov iokey` must run before `prov lock`.\n");
         return;
     }
-    // Slot 14 must be a plain (clear-readable) factory slot; otherwise the
-    // write could not be verified and we refuse to issue it.
-    if (ATECC608_OK != atecc608_read_slot(PROV_IO_KEY_SLOT, back)) {
-        printf("slot %d is not clear-readable (not a plain factory slot), so the\n"
-               "write could not be verified — no write issued.\n", PROV_IO_KEY_SLOT);
+    st = atecc608_is_locked(ATECC608_ZONE_DATA, &locked);
+    if (ATECC608_OK != st) {
+        report_fail("IS_LOCKED (data)", st);
+        return;
+    }
+    if (locked) {
+        printf("data zone is LOCKED — slot %d can no longer be written.\n",
+               PROV_IO_KEY_SLOT);
+        return;
+    }
+    // Slot 14 must accept a clear Write in the current config (parsed
+    // from the config zone, which is always readable).
+    st = atecc608_read_config_zone(zone);
+    if (ATECC608_OK != st) {
+        report_fail("READ CONFIG ZONE", st);
+        return;
+    }
+    st = atecc608_config_parse(zone, &cfg);
+    if (ATECC608_OK != st) {
+        report_fail("PARSE CONFIG ZONE", st);
+        return;
+    }
+    if (cfg.key[PROV_IO_KEY_SLOT].private_key
+        || cfg.slot[PROV_IO_KEY_SLOT].write_key != 0
+        || cfg.slot[PROV_IO_KEY_SLOT].write_config != 0) {
+        printf("slot %d does not accept clear writes in the current config —\n"
+               "no write issued.\n", PROV_IO_KEY_SLOT);
         return;
     }
 
@@ -438,20 +467,17 @@ static void provIokey(void)
         memcpy(&key[4 * i], &w, sizeof(w));
     }
 
-    st = atecc608_write_slot(PROV_IO_KEY_SLOT, key);
+    st = atecc608_write_iokey(PROV_IO_KEY_SLOT, key);
     if (ATECC608_OK != st) {
         report_fail("WRITE SLOT 14", st);
         return;
     }
-    st = atecc608_read_slot(PROV_IO_KEY_SLOT, back);
-    if ((ATECC608_OK != st) || (0 != memcmp(key, back, sizeof(key)))) {
-        printf("READ-BACK VERIFY FAILED — the slot %d key could not be confirmed.\n"
-               "Re-run `prov iokey` to generate a fresh key (safe while unlocked).\n",
-               PROV_IO_KEY_SLOT);
-        return;
-    }
-    printf("I/O protection key written to slot %d and verified by read-back.\n",
+    printf("I/O protection key written to slot %d (write ACKed by the chip).\n",
            PROV_IO_KEY_SLOT);
+    printf("NOTE: no read-back verify is possible — data slots are not readable\n"
+           "while the data zone is unlocked, and `prov config` marks the slot\n"
+           "is_secret. The key is verified functionally by an I/O-protected\n"
+           "transaction after `prov lock`.\n");
     printf("RECORD THIS — it is the durable backup (a Pico reflash wipes the\n"
            "littlefs copy):\n");
     atecc608_print_hex(key, sizeof(key));

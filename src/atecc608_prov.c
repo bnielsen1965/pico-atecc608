@@ -205,6 +205,59 @@ atecc608_status_t atecc608_genkey(uint8_t slot, uint8_t pub[ATECC608_PUBKEY_LEN]
     return atecc608_map_status(st);
 }
 
+atecc608_status_t atecc608_write_iokey(uint8_t slot,
+                                       const uint8_t key[ATECC608_DATA_SLOT_LEN])
+{
+    uint8_t zone[ATECC608_CONFIG_ZONE_LEN];
+    atecc608_config_intent_t cfg;
+    bool locked = false;
+    ATCA_STATUS st;
+
+    if ((slot > ATECC608_MAX_DATA_SLOT) || (NULL == key)) {
+        return ATECC608_ERR_BAD_PARAM;
+    }
+
+    st = get_locked(LOCK_ZONE_CONFIG, &locked);
+    if (ATECC608_OK != st) {
+        return st;
+    }
+    if (locked) {
+        // With the config zone locked and io_prot_en set, every I2C
+        // command needs the I/O key: the chip is unreachable without it.
+        return ATECC608_ERR_CHIP_STATE;
+    }
+
+    st = get_locked(LOCK_ZONE_DATA, &locked);
+    if (ATECC608_OK != st) {
+        return st;
+    }
+    if (locked) {
+        return ATECC608_ERR_CHIP_STATE; // locked zone: no writes
+    }
+
+    // The slot must accept a clear Write in the CURRENT config (the
+    // config zone is readable even when locked). A read-back verify of
+    // the data write is impossible — see the header — so this is the
+    // only pre-write check the hardware allows.
+    st = atcab_read_config_zone(zone);
+    if (ATCA_SUCCESS != st) {
+        return atecc608_map_status(st);
+    }
+    if (ATECC608_OK != atecc608_config_parse(zone, &cfg)) {
+        return ATECC608_ERR;
+    }
+    if (cfg.key[slot].private_key
+        || (cfg.slot[slot].write_key != 0u)
+        || (cfg.slot[slot].write_config != 0u)) {
+        return ATECC608_ERR_CHIP_STATE;
+    }
+
+    // The chip's OK response commits the write.
+    st = atcab_write_bytes_zone(ATCA_ZONE_DATA, slot, 0, (uint8_t *)key,
+                                ATECC608_DATA_SLOT_LEN);
+    return atecc608_map_status(st);
+}
+
 atecc608_status_t atecc608_counter_read(uint8_t counter_id, uint32_t *value)
 {
     ATCA_STATUS st;

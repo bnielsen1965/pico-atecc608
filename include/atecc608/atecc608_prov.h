@@ -96,6 +96,23 @@ atecc608_status_t atecc608_lock_data_slot(uint8_t slot,
 // generated again, so this is re-runnable and is not confirm-gated.
 atecc608_status_t atecc608_genkey(uint8_t slot, uint8_t pub[ATECC608_PUBKEY_LEN]);
 
+// Write a 32-byte I/O protection key to a plain data slot (Phase 4B).
+// Preconditions (ATECC608_ERR_CHIP_STATE, no write issued if violated):
+// the config zone is unlocked (once locked, I/O protection is enforced
+// and the chip is unreachable without the key), the data zone is
+// unlocked (a locked zone rejects writes), and the slot accepts a clear
+// Write in the current config (not an ECC private key slot; write_key
+// and write_config both 0).
+// The chip's OK response commits the write. A read-back verify is
+// impossible on the ATECC608: data slots cannot be read while the data
+// zone is unlocked (Microchip's own conformance test asserts this), and
+// provisioning marks the I/O key slot is_secret. The key is verified
+// functionally by an I/O-protected transaction after the config zone
+// lock. Re-runnable (re-keys) while the data zone is unlocked —
+// including after provision_config: is_secret blocks reads, not writes.
+atecc608_status_t atecc608_write_iokey(uint8_t slot,
+                                       const uint8_t key[ATECC608_DATA_SLOT_LEN]);
+
 // Read a monotonic counter (read-only; safe at any time).
 atecc608_status_t atecc608_counter_read(uint8_t counter_id, uint32_t *value);
 
