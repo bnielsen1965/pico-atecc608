@@ -26,7 +26,9 @@
 //                    the planned image
 //   prov randtest  - read-only: chip RNG x2; the 0xFFFF0000 factory pattern
 //                    is expected while the config zone is unlocked
-//   prov iokey     - WRITE: Pico TRNG -> slot 14 (write ACK; no read-back
+//   prov iokey     - WRITE (AFTER `prov lock CONFIRM` — the chip refuses
+//                    data-zone writes until the config zone is locked):
+//                    Pico TRNG -> slot 14 (write ACK; no read-back
 //                    possible — data slots are unreadable while the data
 //                    zone is unlocked) -> print 64 hex chars -> save
 //                    /io_key.bin (littlefs)
@@ -143,7 +145,7 @@ static void commandHelp(char *cmdLine)
     printf("lock    - atecc608_is_locked (config / data zone)\n");
     printf("prov status   - chip state + config zone + diff vs planned image\n");
     printf("prov randtest - chip RNG x2 (0xFFFF0000 pattern while unlocked)\n");
-    printf("prov iokey    - Pico TRNG -> slot 14 -> verify -> print -> save\n");
+    printf("prov iokey    - Pico TRNG -> slot 14 (after prov lock) -> print -> save\n");
     printf("prov config   - write the agreed config zone (idempotent)\n");
     printf("prov lock     - LOCK the config zone (IRREVERSIBLE; add CONFIRM)\n");
 }
@@ -404,11 +406,15 @@ static void provRandtest(void)
 
 // prov iokey — WRITE (dev flow; re-running re-keys): Pico TRNG -> Write
 // slot 14 -> print the key -> save /io_key.bin in littlefs.
-// The write is verified by the chip's write ACK only: a read-back verify
-// is impossible on the ATECC608 — data slots cannot be read while the
-// data zone is unlocked (Microchip's own conformance test asserts this),
-// and `prov config` marks slot 14 is_secret. The key is verified
-// functionally by an I/O-protected transaction after `prov lock`.
+// Runs AFTER `prov lock CONFIRM`: the chip refuses data-zone writes until
+// the config zone is locked (verified on the bench 2026-10-23). I/O
+// protection (io_prot_en) protects the I/O of ECDH/KDF/Verify/SecureBoot,
+// not the transport — the chip stays reachable with plain commands after
+// the lock. The write is verified by the chip's write ACK only: a
+// read-back verify is impossible on the ATECC608 — data slots cannot be
+// read while the data zone is unlocked (Microchip's own conformance test
+// asserts this), and `prov config` marks slot 14 is_secret. The key is
+// verified functionally by an I/O-protected transaction (Phase 7).
 static void provIokey(void)
 {
     uint8_t key[PROV_IOKEY_LEN];
@@ -417,16 +423,20 @@ static void provIokey(void)
     bool locked = false;
     atecc608_status_t st;
 
-    // Gate: only while the config zone is unlocked — after `prov lock`
-    // I/O protection is enforced and the chip is unreachable without the
-    // key (the driver has no I/O-protection support yet).
+    // Gate: only while the config zone is LOCKED — the chip refuses any
+    // data-zone write until it is (verified on the bench 2026-10-23).
+    // The approved order is `prov config` -> `prov lock CONFIRM` ->
+    // `prov iokey`. I/O protection protects command I/O, not the
+    // transport, so the chip stays reachable after the lock.
     st = atecc608_is_locked(ATECC608_ZONE_CONFIG, &locked);
     if (ATECC608_OK != st) {
         report_fail("IS_LOCKED (config)", st);
         return;
     }
-    if (locked) {
-        printf("config zone is LOCKED — `prov iokey` must run before `prov lock`.\n");
+    if (!locked) {
+        printf("config zone is UNLOCKED — the chip refuses data-zone writes\n"
+               "until it is locked. Run `prov config`, then\n"
+               "`prov lock CONFIRM`, then `prov iokey` again.\n");
         return;
     }
     st = atecc608_is_locked(ATECC608_ZONE_DATA, &locked);
@@ -477,7 +487,7 @@ static void provIokey(void)
     printf("NOTE: no read-back verify is possible — data slots are not readable\n"
            "while the data zone is unlocked, and `prov config` marks the slot\n"
            "is_secret. The key is verified functionally by an I/O-protected\n"
-           "transaction after `prov lock`.\n");
+           "transaction (Phase 7).\n");
     printf("RECORD THIS — it is the durable backup (a Pico reflash wipes the\n"
            "littlefs copy):\n");
     atecc608_print_hex(key, sizeof(key));

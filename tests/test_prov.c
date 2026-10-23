@@ -246,14 +246,20 @@ static void t_lock_data_zone(void)
     CHECK(3u == s_confirm_calls);
     CHECK(0x00u == s_chip.config[86]);
 
-    // After the lock: data writes are rejected, plain slots are readable,
-    // secret slots (slot 15 in the golden intent) are not. (Slots 0 and 3
-    // are key slots and not readable from the data zone at all.)
+    // After the lock: plain slots stay WRITABLE — the data-zone lock
+    // switches the zone to policy enforcement (reads become possible,
+    // 4-byte word writes are allowed); only individual slot locks freeze
+    // contents (Microchip's write_upper_slots expects the 32-byte write to
+    // succeed "for both locked and unlocked case"). Plain slots are
+    // readable; secret slots (slot 15 in the golden intent) are not.
+    // (Slots 0 and 3 are key slots and not readable from the data zone at
+    // all.)
     memset(data, 0x5Au, sizeof(data));
-    CHECK(ATCA_EXECUTION_ERROR ==
+    CHECK(ATCA_SUCCESS ==
           atcab_write_zone(ATCA_ZONE_DATA, 1, 0, 0, data, ATECC608_DATA_SLOT_LEN));
     CHECK(ATCA_SUCCESS ==
           atcab_read_zone(ATCA_ZONE_DATA, 1, 0, 0, readback, ATECC608_DATA_SLOT_LEN));
+    CHECK(0 == memcmp(readback, data, sizeof(data)));
     CHECK(ATCA_EXECUTION_ERROR ==
           atcab_read_zone(ATCA_ZONE_DATA, 15, 0, 0, readback, ATECC608_DATA_SLOT_LEN));
 
@@ -294,6 +300,18 @@ static void t_lock_data_slot(void)
 
     // Re-locking the same slot: the chip rejects it.
     CHECK(ATECC608_ERR_EXEC == atecc608_lock_data_slot(15, confirm_hook, NULL));
+
+    // With the config zone locked (the precondition for any data-zone
+    // write), a 32-byte write to the individually locked slot is
+    // rejected by the chip (atca_tests_write.c write_upper_slots skips
+    // such slots: "Slot is locked and can't be written to").
+    CHECK(ATECC608_OK == atecc608_lock_config_zone(&cfg, confirm_hook, NULL));
+    {
+        uint8_t data[ATECC608_DATA_SLOT_LEN];
+        memset(data, 0x5Au, sizeof(data));
+        CHECK(ATCA_EXECUTION_ERROR ==
+              atcab_write_zone(ATCA_ZONE_DATA, 15, 0, 0, data, ATECC608_DATA_SLOT_LEN));
+    }
 
     // Out-of-range slot: rejected without any chip command.
     CHECK(ATECC608_ERR_BAD_PARAM == atecc608_lock_data_slot(16, confirm_hook, NULL));
@@ -342,23 +360,49 @@ static void t_iokey(void)
     CHECK(ATCA_EXECUTION_ERROR ==
           atcab_read_zone(ATCA_ZONE_DATA, 14, 0, 0, readback, ATECC608_DATA_SLOT_LEN));
 
-    // Factory slot 14 (non-ECC, clear write): the chip's OK commits the
-    // write and the slot holds the key.
+    // Real chip behavior (verified on the bench 2026-10-23: a 32-byte
+    // Write to a plain factory slot returns ATCA_EXECUTION_ERROR): the
+    // data zone cannot be WRITTEN until the config zone is locked — all
+    // of Microchip's data-write conformance tests run with the config
+    // zone locked. The prov layer refuses before reaching the chip; the
+    // chip refuses the raw write as well.
     for (size_t i = 0; i < sizeof(key); i++) {
         key[i] = (uint8_t)(0xA0u + i);
     }
+    CHECK(ATECC608_ERR_CHIP_STATE == atecc608_write_iokey(14, key));
+    CHECK(ATCA_EXECUTION_ERROR ==
+          atcab_write_zone(ATCA_ZONE_DATA, 14, 0, 0, key, ATECC608_DATA_SLOT_LEN));
+
+    // The approved 4B order: provision the config zone, lock it
+    // (irreversible), THEN write the I/O key.
+    atecc608_config_default(&cfg);
+    cfg.slot[14].is_secret = true;   // the dev intent marks slot 14 secret
+    CHECK(ATECC608_OK == atecc608_provision_config(&cfg));
+    CHECK(ATECC608_OK == atecc608_lock_config_zone(&cfg, confirm_hook, NULL));
+
+    // Now the write is permitted: the chip's OK commits it and the slot
+    // holds the key. Still unreadable (data zone unlocked).
     CHECK(ATECC608_OK == atecc608_write_iokey(14, key));
     CHECK(0 == memcmp(&s_chip.data[14 * ATECC608_DATA_SLOT_LEN], key, sizeof(key)));
-
-    // Still unreadable (data zone unlocked).
     CHECK(ATCA_EXECUTION_ERROR ==
           atcab_read_zone(ATCA_ZONE_DATA, 14, 0, 0, readback, ATECC608_DATA_SLOT_LEN));
+
+    // Re-keying after the config zone lock: is_secret blocks reads, not
+    // writes; the data zone is still unlocked.
+    for (size_t i = 0; i < sizeof(key); i++) {
+        key[i] = (uint8_t)(0x30u + i);
+    }
+    CHECK(ATECC608_OK == atecc608_write_iokey(14, key));
+    CHECK(0 == memcmp(&s_chip.data[14 * ATECC608_DATA_SLOT_LEN], key, sizeof(key)));
 
     // Invalid arguments: rejected before any chip command.
     CHECK(ATECC608_ERR_BAD_PARAM == atecc608_write_iokey(16, key));
     CHECK(ATECC608_ERR_BAD_PARAM == atecc608_write_iokey(14, NULL));
 
-    // Slots that do not accept a clear write: refused before the write.
+    // Slots that do not accept a clear write in the LOCKED config:
+    // refused before the write (the config zone is readable even when
+    // locked). Slot 14 is plain in this intent, so it still works.
+    setup();
     atecc608_config_default(&cfg);
     cfg.slot[5].is_secret    = true;
     cfg.slot[5].write_config = 7;  // writing slot 5 requires key 7
@@ -366,26 +410,13 @@ static void t_iokey(void)
     cfg.key[0].key_type      = ATECC608_KEY_TYPE_ECC;
     cfg.slot[0].is_secret    = true;
     CHECK(ATECC608_OK == atecc608_provision_config(&cfg));
+    CHECK(ATECC608_OK == atecc608_lock_config_zone(&cfg, confirm_hook, NULL));
     CHECK(ATECC608_ERR_CHIP_STATE == atecc608_write_iokey(5, key));  // write_config
     CHECK(ATECC608_ERR_CHIP_STATE == atecc608_write_iokey(0, key));  // private key
-
-    // Re-keying after provisioning: is_secret blocks reads, not writes —
-    // slot 14 stays writable (the dev intent marks it is_secret for the
-    // same reason).
-    cfg.slot[14].is_secret = true;
-    CHECK(ATECC608_OK == atecc608_provision_config(&cfg));
-    for (size_t i = 0; i < sizeof(key); i++) {
-        key[i] = (uint8_t)(0x30u + i);
-    }
     CHECK(ATECC608_OK == atecc608_write_iokey(14, key));
-    CHECK(0 == memcmp(&s_chip.data[14 * ATECC608_DATA_SLOT_LEN], key, sizeof(key)));
 
-    // Config zone locked: refused (I/O protection makes the chip
-    // unreachable without the key).
-    CHECK(ATECC608_OK == atecc608_lock_config_zone(&cfg, confirm_hook, NULL));
-    CHECK(ATECC608_ERR_CHIP_STATE == atecc608_write_iokey(14, key));
-
-    // Data zone locked: refused (locked zone: no writes).
+    // Data zone locked: refused (our flow never locks the data zone; the
+    // guard stays conservative).
     setup();
     fill_golden_config(&cfg);
     CHECK(ATECC608_OK == atecc608_provision_config(&cfg));

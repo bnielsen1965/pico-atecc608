@@ -221,9 +221,12 @@ atecc608_status_t atecc608_write_iokey(uint8_t slot,
     if (ATECC608_OK != st) {
         return st;
     }
-    if (locked) {
-        // With the config zone locked and io_prot_en set, every I2C
-        // command needs the I/O key: the chip is unreachable without it.
+    if (!locked) {
+        // The chip refuses any data-zone write while the config zone is
+        // unlocked (verified on the bench: a 32-byte Write to a plain
+        // factory slot returns ATCA_EXECUTION_ERROR; all of Microchip's
+        // data-write conformance tests run with the config zone locked).
+        // The approved 4B order is config -> lock -> iokey.
         return ATECC608_ERR_CHIP_STATE;
     }
 

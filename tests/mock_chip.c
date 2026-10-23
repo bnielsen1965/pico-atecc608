@@ -69,6 +69,18 @@ static bool mock_data_locked(const mock_chip_t *chip)
     return chip->config[86] != 0x55u;
 }
 
+// SlotLocked polarity (verified against the chip's factory value 0xFFFF
+// = no slot locked, and cryptoauthlib's own hardware test
+// atca_tests_write.c "write_upper_slots"): bit n = 1 -> slot n unlocked,
+// bit n = 0 -> slot n locked.
+static bool mock_slot_locked(const mock_chip_t *chip, uint16_t slot)
+{
+    if (slot < 8u) {
+        return (chip->config[88] & (uint8_t)(1u << slot)) == 0u;
+    }
+    return (chip->config[89] & (uint8_t)(1u << (slot - 8u))) == 0u;
+}
+
 // Encode a counter value into the chip's 8-byte dual linear + binary format
 // (identical to cryptoauthlib's calib_write_config_counter).
 static void mock_encode_counter(uint32_t v, uint8_t b[8])
@@ -259,13 +271,25 @@ static void mock_handle_write(mock_chip_t *chip, uint8_t param1, uint16_t param2
         const uint16_t word  = (uint16_t)(param2 & 0x07u);
         const uint16_t byte_addr = (uint16_t)(slot * 32u + block * 32u + word * 4u);
 
-        if (mock_data_locked(chip)) {
-            mock_resp_exec(chip); // locked zone: no writes
-        } else if (!block_write) {
-            // Unlocked data zone: only 32-byte slot writes are allowed.
+        if (!mock_cfg_locked(chip)) {
+            // The data zone cannot be written until the config zone is
+            // locked (verified on the bench 2026-10-23: a 32-byte Write
+            // to a plain factory slot returns an execution error; all of
+            // Microchip's data-write conformance tests run with the
+            // config zone locked).
+            mock_resp_exec(chip);
+        } else if (!block_write && !mock_data_locked(chip)) {
+            // Unlocked data zone: only 32-byte slot writes are allowed
+            // (atca_tests_write.c: "4-byte writes are not allowed when
+            // zone unlocked"; 4-byte writes work once the data zone is
+            // locked).
             mock_resp_exec(chip);
         } else if ((mock_key_cfg(chip, slot) & 0x01u) != 0u) {
             // Private key slots may only be written by GenKey / PrivWrite.
+            mock_resp_exec(chip);
+        } else if (mock_slot_locked(chip, slot)) {
+            // Individually locked slot: no writes (atca_tests_write.c:
+            // "Slot is locked and can't be written to").
             mock_resp_exec(chip);
         } else if (byte_addr + len > (MOCK_DATA_SLOTS * MOCK_DATA_SLOT_LEN)) {
             mock_resp_exec(chip);
