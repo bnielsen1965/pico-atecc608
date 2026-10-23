@@ -166,7 +166,10 @@ target_link_libraries(atecc608 PUBLIC
 add_library(atecc608::atecc608 ALIAS atecc608)
 
 # ============================================================================
-# command-line framework + demo app
+# Examples (proof of concept — NOT part of the library).
 # ============================================================================
-add_subdirectory(pico-command-line)
-add_subdirectory(app)
+option(ATECC608_BUILD_EXAMPLES
+    "Build the example/ proof-of-concept applications (console, ...)" ON)
+if (ATECC608_BUILD_EXAMPLES)
+    add_subdirectory(example)
+endif()

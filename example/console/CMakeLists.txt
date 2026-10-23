@@ -1,8 +1,7 @@
-# Demo / diagnostic console app.
-#
-# Phase 2: drives read-only operations through cryptoauthlib (atcab_*)
-# initialized via the module's atecc608_init(). By Phase 6 it exercises the
-# module's public atecc608_* API.
+# Bench console example (example/console): probe/diagnostic commands over
+# the serial console (pico-command-line), and — as of Phase 4B — the
+# provisioning command set (prov status/randtest/iokey/config/lock).
+# Proof of concept for the module; not part of the library.
 add_executable(pico-atecc608
     main.c
 )

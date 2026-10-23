@@ -79,7 +79,8 @@ pico-sdk                          (hardware_i2c, stdlib)
   ```
   include/atecc608/atecc608.h    public API
   src/                           module code (driver/HAL → Phase 2; API → 3; builder → 4)
-  app/                           demo/diagnostic console (current src/main.c)
+  example/                       proof-of-concept examples (NOT the library):
+                                 console/ (bench console), tools/, common/
   CMakeLists.txt                 lib + INTERFACE target + FetchContent + demo app
   ```
 - **Provisioning** is a guarded library API (idempotent, read-back-verify
@@ -124,7 +125,9 @@ A single config struct drives init; everything else is a small, stable set.
 
 - **Phase 1 — Module skeleton + build wiring — DONE (2026-10-17).** Restructured
   into the module layout; CMake builds the `atecc608` static lib + an
-  `atecc608::atecc608` ALIAS target; the console moved to `app/`; cryptoauthlib is
+  `atecc608::atecc608` ALIAS target; the console moved to `app/` (since
+  re-homed under `example/console/` — see the example/ reorg note below);
+  cryptoauthlib is
   fetched at build time and compiled for the Pico target.
   - **Key deviation from the original sketch:** cryptoauthlib's own CMake picks
     its HAL by *build host* — on any UNIX machine it force-adds `hal/hal_linux.c`
@@ -140,7 +143,8 @@ A single config struct drives init; everything else is a small, stable set.
     the HAL. Air-gapped: `-DCRYPTOAUTHLIB_SOURCE_DIR=<path>`.
   - **Done when (verified):** `cmake` fetches cryptoauthlib from GitHub; builds
     `libatecc608.a` + `libcryptoauth_core.a` + the demo `pico-atecc608.uf2` (in
-    `build/app/`); no cryptoauthlib source in the repo (`build/` is gitignored).
+    `build/example/console/` after the example/ reorg; originally `build/app/`);
+    no cryptoauthlib source in the repo (`build/` is gitignored).
     *The demo's hardware run (probe/random/info/serial) is build-verified here;
     confirm on the board.*
 - **Phase 2 — RP2350 I2C HAL — DONE (2026-10-18).** Implemented the
@@ -266,8 +270,16 @@ A single config struct drives init; everything else is a small, stable set.
     lib; SDK 2.x ships no nvs/littlefs) holds `/io_key.bin`, `/vault.db`,
     `/fido2.db`, lockout state. 4B runs as serial-console commands
     (`prov status/randtest/iokey/config/lock`; only `prov lock` is
-    irreversible, typed-confirm). Exact byte plan: `tools/dump_devconfig.c`
-    (builder output, 128 B + summary CRC). Before any write: README
+    irreversible, typed-confirm). Exact byte plan:
+    `example/tools/dump_devconfig.c` (builder output, 128 B + summary CRC).
+    **Repo reorg (2026-10-22):** the provisioning PoC + demo apps are the
+    *examples*, not the library — `app/` → `example/console/`,
+    `tools/` → `example/tools/`, new `example/CMakeLists.txt` (+
+    `ATECC608_BUILD_EXAMPLES` option, default ON) and `example/README.md`
+    (contract: every example checks provisioning state at startup and
+    provisions via the module API if needed; shared base in
+    `example/common/`). Examples stay **discrete applications** (one
+    directory per app: password-store, fido2, …), not one multi-mode app. Before any write: README
     scenario guidance, then the user's explicit go-ahead on the exact byte
     plan (what, where, reversibility):
     write→read-back verify, and lock gated behind read-back + typed-confirm.
@@ -277,10 +289,10 @@ A single config struct drives init; everything else is a small, stable set.
 - **Phase 5 — Crypto pass-through (on demand).** `kdf` / `sign` / `verify` /
   `genkey` / `read_pubkey` wrappers, added as consumers need them.
   - **Done when:** at least a KDF round-trip is validated on hardware.
-- **Phase 6 — Sample / diagnostic app.** The `app/` console exercises the
-  library API (probe/info/serial/random were wired in Phase 3; add a config
-  read-back demo) — it uses the module, not the raw driver. It is a demo,
-  **not** a provisioning tool.
+- **Phase 6 — Sample / diagnostic app.** The `example/console/` console
+  exercises the library API (probe/info/serial/random were wired in Phase 3;
+  add a config read-back demo) — it uses the module, not the raw driver.
+  It is a demo, **not** a provisioning tool.
   - **Done when:** the demo builds against the lib and runs on hardware.
 - **Phase 7 — On-hardware validation + regression + bring-up checklist.**
   Full on-hardware suite; a documented, reusable bring-up checklist.
@@ -396,7 +408,8 @@ the Lock command owns bytes 86–87.
   stuck-bus recovery, 10 ms timeouts) + `src/atecc608.c` (the curated
   `atecc608_*` core API over `atcab_*`, public header in
   `include/atecc608/atecc608.h`). The old standalone driver is retired. The
-  console (`app/main.c`) exercises the module API (`atecc608_probe/info/
+  console (`example/console/main.c`, originally `app/main.c`) exercises the
+  module API (`atecc608_probe/info/
   serial/is_locked/random`) plus raw-I2C `diag` and `bootrom`; 3 validation
   rounds match the Phase-1 standalone outputs exactly (Phase 3 exit criteria).
 - cryptoauthlib **v3.8.0** fetched at build time; the clone at

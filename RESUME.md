@@ -8,12 +8,22 @@ state and the concrete next steps.
 ## ⏸ Where the conversation stopped (read this first on resume)
 Phase 4A is committed (`063d579`). The 4B application-scenario discussion is
 **DONE (2026-10-22)**; the full config is agreed (below). On resume, do NOT
-re-litigate scenarios and do NOT jump to chip writes. The **README scenario
-guidance is drafted** (full README rewrite, 2026-10-22; pending user
-review). Next step after review: present the exact byte plan (which bytes,
-values, reversibility) for the write approval the HARD RULE requires. The
-config write is reversible while the zone is unlocked; the lock is not —
-approval covers both.
+re-litigate scenarios and do NOT jump to chip writes. The **scenario
+guidance is drafted** (2026-10-22) and now lives in
+`example/README.md`. **Repo reorg (2026-10-22, in progress at this
+pause):** the provisioning PoC + demo apps are the *examples*, not the
+library — `app/` → `example/console/`, `tools/` → `example/tools/`,
+new `example/CMakeLists.txt` (+ `ATECC608_BUILD_EXAMPLES`, default ON)
+and `example/README.md`. Examples are **discrete applications** (one
+directory per app: password-store, fido2, …); every example's startup
+contract = "is the chip provisioned? if not, provision via the module API,
+then run" (shared base in `example/common/`, to be factored out of the
+console in 4B). Immediate next work: implement the `prov` console command
+set in `example/console/main.c` (wire pico-littlefs in for `/io_key.bin`),
+build + host tests green, flash. THEN present the exact byte plan (which
+bytes, values, reversibility) for the write approval the HARD RULE
+requires. The config write is reversible while the zone is unlocked; the
+lock is not — approval covers both.
 
 ## Agreed 4B config (scenario discussion, 2026-10-22)
 Principle: **lock the layout, keep the contents open.** The config zone is
@@ -173,7 +183,9 @@ behavior; byte-16 write behavior; factory KeyConfig words (mock assumes all
 cd build
 cmake .. -DPICO_SDK_PATH="$HOME/Projects/pico-sdk"   # fetches cryptoauthlib once
 make -j
-# outputs: build/app/pico-atecc608.uf2   (+ libatecc608.a, libcryptoauth_core.a)
+# outputs: build/example/console/pico-atecc608.uf2
+#          (+ libatecc608.a, libcryptoauth_core.a)
+# examples are ON by default; -DATECC608_BUILD_EXAMPLES=OFF skips them
 ```
 Air-gapped: `-DCRYPTOAUTHLIB_SOURCE_DIR=/path/to/cryptoauthlib`.
 **No cryptoauthlib source is in the repo** — fetched into `build/` at
@@ -236,10 +248,16 @@ pulls in the mock objects and leaves the HAL symbols unresolved);
   cryptoauthlib's `atca_config.h.in`, same feature set as the top level),
   `mock_chip.{h,c}`, `test_golden.h` (the golden G intent),
   `test_config.c`, `test_prov.c`.
-- `app/main.c` + `app/CMakeLists.txt` — validation console (pico-command-
-  line) over the **module API**: probe/info/serial/lock/random (atecc608_*),
-  diag (raw I2C), bootrom, help. Phase 6 adds a config read-back demo.
-- `pico-command-line/` — submodule (console framework).
+- `example/console/main.c` + CMakeLists — validation console
+  (pico-command-line) over the **module API**: probe/info/serial/lock/
+  random (atecc608_*), diag (raw I2C), bootrom, help; Phase 4B adds the
+  `prov` command set. Phase 6 adds a config read-back demo.
+- `example/` — proof-of-concept examples (NOT part of the library):
+  `console/`, `tools/dump_devconfig.c` (the byte-plan host tool),
+  `common/` (shared provision-on-first-boot base, to be factored out in
+  4B); contract + scenarios + slot layout in `example/README.md`.
+- `pico-command-line/` — submodule (console framework, used by examples
+  only; wired in via `example/CMakeLists.txt`).
 - `../cryptoauthlib` — dev-reference clone (NOT part of this repo).
 
 ## Phase 3 — what was built (and why)
@@ -495,9 +513,10 @@ approves a specific write:
 "Agreed 4B config" above). `use_lock_en=false` until an auth flow exists.**
 1. ~~Scenario walkthrough~~ — **done 2026-10-22.**
 2. ~~Draft README scenario guidance~~ — **drafted 2026-10-22** (full README
-   rewrite; old Phase-1 driver text replaced; "Application scenarios —
-   provisioning guidance" section documents the agreed config). Pending user
-   review.
+   rewrite; old Phase-1 driver text replaced). After the example/ reorg the
+   scenario guidance ("Application scenarios — provisioning guidance", slot
+   table, locking discipline) lives in `example/README.md`; the top-level
+   README is module-centric and points there. Pending user review.
 3. **WRITE CHECKPOINT (hard rule):** present the exact byte plan — which
    bytes, their values, why, and reversibility (config write is reversible
    while unlocked; locks and counter increments are not) — and get explicit
