@@ -1,29 +1,35 @@
 # Resume notes (pico-atecc608)
 
-Pause point: **2026-10-18, after Phase 4A — at the Phase 4B scenario
-discussion.** This file is a continuity snapshot — update it at each pause.
-The forward plan lives in `PLAN.md`; this file captures the exact working
-state and the concrete next steps.
+Pause point: **2026-10-22, after the example/ reorg — about to implement
+the 4B `prov` console command set.** This file is a continuity snapshot —
+update it at each pause. The forward plan lives in `PLAN.md`; this file
+captures the exact working state and the concrete next steps.
 
 ## ⏸ Where the conversation stopped (read this first on resume)
-Phase 4A is committed (`063d579`). The 4B application-scenario discussion is
-**DONE (2026-10-22)**; the full config is agreed (below). On resume, do NOT
+HEAD is `4f6b211` (working tree clean). The 4B application-scenario
+discussion is **DONE (2026-10-22)**; the full config is agreed (below) and
+the exact byte plan exists (see "I/O key generation" +
+`example/tools/dump_devconfig.c`, summary CRC **4FE8**). On resume, do NOT
 re-litigate scenarios and do NOT jump to chip writes. The **scenario
-guidance is drafted** (2026-10-22) and now lives in
-`example/README.md`. **Repo reorg (2026-10-22, in progress at this
-pause):** the provisioning PoC + demo apps are the *examples*, not the
+guidance is user-reviewed** (2026-10-22, "all looking pretty good") and
+lives in `example/README.md`. **Repo reorg (2026-10-22, committed as
+`4f6b211`):** the provisioning PoC + demo apps are the *examples*, not the
 library — `app/` → `example/console/`, `tools/` → `example/tools/`,
 new `example/CMakeLists.txt` (+ `ATECC608_BUILD_EXAMPLES`, default ON)
 and `example/README.md`. Examples are **discrete applications** (one
 directory per app: password-store, fido2, …); every example's startup
 contract = "is the chip provisioned? if not, provision via the module API,
 then run" (shared base in `example/common/`, to be factored out of the
-console in 4B). Immediate next work: implement the `prov` console command
-set in `example/console/main.c` (wire pico-littlefs in for `/io_key.bin`),
-build + host tests green, flash. THEN present the exact byte plan (which
-bytes, values, reversibility) for the write approval the HARD RULE
-requires. The config write is reversible while the zone is unlocked; the
-lock is not — approval covers both.
+console in 4B). Pico build + host ctest green after the reorg; the uf2 is
+now at `build/example/console/pico-atecc608.uf2`.
+
+**Immediate next work (no chip writes involved):** implement the `prov`
+console command set in `example/console/main.c` + wire pico-littlefs into
+`example/console/CMakeLists.txt` for `/io_key.bin` (see the concrete task
+list under "Next steps"). THEN the WRITE CHECKPOINT: present the exact
+byte plan (which bytes, values, reversibility) for the approval the HARD
+RULE requires. The config write is reversible while the zone is unlocked;
+the lock is not — approval covers both.
 
 ## Agreed 4B config (scenario discussion, 2026-10-22)
 Principle: **lock the layout, keep the contents open.** The config zone is
@@ -172,7 +178,7 @@ behavior; byte-16 write behavior; factory KeyConfig words (mock assumes all
 - **Phase 4B next (STOP BOUNDARY)** — the actual chip provisioning.
   Scenario discussion done 2026-10-22; the agreed config is in "Agreed 4B
   config" above (locked layout / open contents, usable across all apps,
-  I/O protection on). Exact byte plan exists: `tools/dump_devconfig.c`
+  I/O protection on). Exact byte plan exists: `example/tools/dump_devconfig.c`
   (builder output: 128 B image + summary CRC; slot 14 lockable per the
   2026-10-22 decision). Before ANY write: README scenario guidance → the
   byte plan (what, where, reversibility) for explicit approval. HARD RULE
@@ -512,20 +518,82 @@ approves a specific write:
 **Status (2026-10-22): scenario discussion complete — config agreed (see
 "Agreed 4B config" above). `use_lock_en=false` until an auth flow exists.**
 1. ~~Scenario walkthrough~~ — **done 2026-10-22.**
-2. ~~Draft README scenario guidance~~ — **drafted 2026-10-22** (full README
-   rewrite; old Phase-1 driver text replaced). After the example/ reorg the
-   scenario guidance ("Application scenarios — provisioning guidance", slot
-   table, locking discipline) lives in `example/README.md`; the top-level
-   README is module-centric and points there. Pending user review.
-3. **WRITE CHECKPOINT (hard rule):** present the exact byte plan — which
+2. ~~Draft README scenario guidance~~ — **done + user-reviewed 2026-10-22.**
+   After the example/ reorg (`4f6b211`) the scenario guidance ("Application
+   scenarios — provisioning guidance", slot table, locking discipline)
+   lives in `example/README.md`; the top-level README is module-centric and
+   points there.
+3. **Implement the `prov` console command set (NEXT TASK — no chip writes
+   involved, build-only work).** The command table is above ("4B runs as
+   serial-console commands"); the concrete implementation plan:
+   - **Wire pico-littlefs** into `example/console/CMakeLists.txt`:
+     `add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../../pico-littlefs
+     <binary dir>)` (console is at `<repo>/example/console`;
+     pico-littlefs is a *sibling of the repo* at
+     `~/Projects/pico-littlefs` — three levels up), link **`pico-littlefs`**
+     (hyphen — the CMake target; the header is `pico_littlefs.h` with
+     underscores) into the console target. Optional `PICO_LFS_USE_FREERTOS`
+     stays OFF (bare-metal). LFS_NO_MALLOC (static
+     buffers); default layout (FS @ flash 0x80000, 384×4 KB) needs no
+     override on this 4 MB app. Init/mount at startup (before the console
+     loop); print a warning if the FS is fresh (first boot / after reflash
+     = `/io_key.bin` gone — re-run `prov iokey` and re-record).
+   - **`prov status`** (read-only): chip state via the module API (info,
+     serial, lock status, config-zone lock byte), dump the current 128-byte
+     config zone (Read with the config zone start; first 16 factory bytes
+     included), print a byte-by-byte diff vs the planned image (embed the
+     agreed G intent — same builder call as
+     `example/tools/dump_devconfig.c`, via `atecc608_config_build` with the
+     agreed field values; byte 16 compared as "chip keeps own").
+   - **`prov randtest`** (read-only): `atecc608_random` ×2 (32 B each),
+     print hex; annotate whether the 0xFFFF0000 factory pattern is present
+     (expected while the zone is unlocked — manual-cited).
+   - **`prov iokey`** (WRITE — gated by the user checkpoint): Pico TRNG —
+     **confirmed API (SDK 2.x, 2026-10-22): `get_rand_32()` from
+     `pico/rand.h`** (8 calls → 32 B). SDK 2.x has NO `hardware_rng` /
+     `get_32bit_random()` module (that was SDK 1.x); on RP2350 `pico_rand`
+     uses the hardware TRNG as entropy source by default
+     (`PICO_RAND_ENTROPY_SRC_TRNG`, gated on `HAS_RP2350_TRNG`). →
+     WriteCommand to
+     slot 14 **while it is still a plain factory slot** (pre-config) →
+     read-back verify (only chance — post-config slot 14 is is_secret and
+     unreadable) → print the 64 hex chars on the console (durable record) →
+     save `/io_key.bin` (littlefs; 32 B key + magic/len/CRC header per the
+     Persistence-layer section). Re-running re-keys (dev flow).
+   - **`prov config`** (WRITE — gated): build the G intent → call
+     `atecc608_provision_config()` (already: unlocked check → read zone →
+     preserve byte 16 → write → read-back verify). Prints the verify
+     result + summary CRC.
+   - **`prov lock`** (WRITE, IRREVERSIBLE — gated + typed confirm):
+     re-verify zone vs intent (full byte compare, byte 16 excluded) →
+     typed confirm via the existing confirm-callback API (reuse the
+     pattern the Phase-4A prov API already takes; on the console that is a
+     type-to-confirm prompt) → `atecc608_lock_config_zone()` (Lock command
+     with the summary CRC computed from the chip's ACTUAL zone at lock
+     time — NOT the builder CRC 4FE8, which differs in the factory bytes
+     0–15).
+   - Reuse the `bootrom` command's registration pattern in
+     `example/console/main.c` for all five.
+   - **Then:** Pico build green, host ctest still 2/2, flash the uf2
+     (`/tmp/opencode/flash_phase3.py` sequence or manual BOOTSEL drag of
+     `build/example/console/pico-atecc608.uf2`).
+4. **Bench, read-only first:** `prov status` (factory-zone dump + diff vs
+   planned image) and `prov randtest` (expect the 0xFFFF0000 pattern —
+   confirms the manual note on this silicon).
+5. **WRITE CHECKPOINT (hard rule):** present the exact byte plan — which
    bytes, their values, why, and reversibility (config write is reversible
    while unlocked; locks and counter increments are not) — and get explicit
    user approval BEFORE any chip write. On-hardware write→read-back
-   verification and the lock sequence only after approval.
-4. **4B verification items** (mock fidelity gaps — check on the real chip):
+   verification and the lock sequence only after approval:
+   `prov iokey` → (record the 64-hex io key) → `prov config` →
+   `prov lock` (typed confirm).
+6. **4B verification items** (mock fidelity gaps — check on the real chip):
    UpdateExtra same-value behavior; byte-16 write behavior; factory
    KeyConfig words (mock assumes all 0); UseLock enforcement; GenKey/
-   PrivWrite bit 13/14 behavior on real hardware.
+   PrivWrite bit 13/14 behavior on real hardware; I/O protection coverage
+   of the request direction (mock does NOT model I/O protection at all);
+   kdf_prot/ecdh_prot 2-bit semantics (enforce vs opt-in) per NDA
+   datasheet.
 
 Then per PLAN.md: Phase 5 (crypto pass-through: kdf/sign/verify) and Phase 6
 (config read-back console demo), then Phase 7 (on-hardware validation +
