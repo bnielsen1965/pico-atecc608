@@ -1,12 +1,13 @@
 # Resume notes (pico-atecc608)
 
-Pause point: **2026-10-22, after the example/ reorg — about to implement
-the 4B `prov` console command set.** This file is a continuity snapshot —
-update it at each pause. The forward plan lives in `PLAN.md`; this file
-captures the exact working state and the concrete next steps.
+Pause point: **2026-10-23, after implementing the 4B `prov` console
+command set — next is flashing + the read-only bench steps, THEN the write
+checkpoint.** This file is a continuity snapshot — update it at each
+pause. The forward plan lives in `PLAN.md`; this file captures the exact
+working state and the concrete next steps.
 
 ## ⏸ Where the conversation stopped (read this first on resume)
-HEAD is `4f6b211` (working tree clean). The 4B application-scenario
+HEAD is `6448a0d` (working tree clean). The 4B application-scenario
 discussion is **DONE (2026-10-22)**; the full config is agreed (below) and
 the exact byte plan exists (see "I/O key generation" +
 `example/tools/dump_devconfig.c`, summary CRC **4FE8**). On resume, do NOT
@@ -23,13 +24,39 @@ then run" (shared base in `example/common/`, to be factored out of the
 console in 4B). Pico build + host ctest green after the reorg; the uf2 is
 now at `build/example/console/pico-atecc608.uf2`.
 
-**Immediate next work (no chip writes involved):** implement the `prov`
-console command set in `example/console/main.c` + wire pico-littlefs into
-`example/console/CMakeLists.txt` for `/io_key.bin` (see the concrete task
-list under "Next steps"). THEN the WRITE CHECKPOINT: present the exact
-byte plan (which bytes, values, reversibility) for the approval the HARD
-RULE requires. The config write is reversible while the zone is unlocked;
-the lock is not — approval covers both.
+**Done 2026-10-23 (`cc51d2a`, `6448a0d`):** (1) the pico-command-line
+submodule moved from the repo root into `example/` (it is used by the
+examples only, not the library); (2) the `prov` console command set is
+implemented (build-only work, **chip untouched**): `prov status` /
+`randtest` (read-only), `iokey` / `config` / `lock` (writes — gated at the
+bench by the HARD RULE). Details:
+- littlefs is wired via `add_subdirectory` of the *sibling project*
+  `~/Projects/pico-littlefs` (NOT a submodule) in
+  `example/console/CMakeLists.txt`; target `pico-littlefs`, header
+  `pico_littlefs.h`. Init/mount at startup (auto-formats a fresh volume),
+  warns when `/io_key.bin` is gone. `pico_rand` (SDK target, header
+  `pico/rand.h`, `get_rand_32()`) supplies the I/O-key entropy.
+- The agreed 4B config now lives in **`example/common/dev_config.h`**,
+  shared by the console and the host byte-plan tool so both always encode
+  the same image (image unchanged; summary CRC still **4FE8**).
+- **Typed-confirm design:** the confirm is the command line itself —
+  `prov lock` verifies the zone and aborts, `prov lock CONFIRM` carries
+  the confirm. Both pass through the module's confirm-callback API
+  (`atecc608_lock_config_zone`). Reason: the command handlers run on
+  core1 while pico-command-line's stdin loop runs on core0, so an
+  interactive "type yes" prompt inside a command would have its keystrokes
+  split between the two cores.
+- Pico build green and warning-clean; app is 98.5 KB (well under the
+  512 KB littlefs boundary at 0x80000); host ctest 2/2.
+
+**Immediate next work:** flash
+`build/example/console/pico-atecc608.uf2` and run the bench read-only
+steps (`prov status` — factory-zone dump + diff vs planned image;
+`prov randtest` — expect the 0xFFFF0000 pattern). THEN the **WRITE
+CHECKPOINT**: present the exact byte plan (which bytes, values,
+reversibility) for the approval the HARD RULE requires. The config write
+is reversible while the zone is unlocked; the lock is not — approval
+covers both.
 
 ## Agreed 4B config (scenario discussion, 2026-10-22)
 Principle: **lock the layout, keep the contents open.** The config zone is
@@ -259,9 +286,12 @@ pulls in the mock objects and leaves the HAL symbols unresolved);
   random (atecc608_*), diag (raw I2C), bootrom, help; Phase 4B adds the
   `prov` command set. Phase 6 adds a config read-back demo.
 - `example/` — proof-of-concept examples (NOT part of the library):
-  `console/`, `tools/dump_devconfig.c` (the byte-plan host tool),
-  `common/` (shared provision-on-first-boot base, to be factored out in
-  4B); contract + scenarios + slot layout in `example/README.md`.
+  `console/` (probe/diag + the Phase 4B `prov` command set; littlefs via
+  the sibling pico-littlefs project for `/io_key.bin`, `pico_rand` for the
+  I/O-key entropy), `tools/dump_devconfig.c` (the byte-plan host tool),
+  `common/dev_config.h` (the agreed 4B config intent, shared by console +
+  tool; the provision-on-first-boot base is factored out here in 4B);
+  contract + scenarios + slot layout in `example/README.md`.
 - `example/pico-command-line/` — submodule (console framework, used by
   examples only; wired in via `example/CMakeLists.txt`).
 - `../cryptoauthlib` — dev-reference clone (NOT part of this repo).
@@ -523,9 +553,14 @@ approves a specific write:
    scenarios — provisioning guidance", slot table, locking discipline)
    lives in `example/README.md`; the top-level README is module-centric and
    points there.
-3. **Implement the `prov` console command set (NEXT TASK — no chip writes
-   involved, build-only work).** The command table is above ("4B runs as
-   serial-console commands"); the concrete implementation plan:
+3. ~~Implement the `prov` console command set~~ — **done 2026-10-23**
+   (`6448a0d`): all five commands implemented per the plan below
+   (littlefs + `pico_rand` wired; shared config in
+   `example/common/dev_config.h`; typed confirm = the command line
+   `prov lock CONFIRM` — see "Where the conversation stopped" for the
+   rationale). The command table is above ("4B runs as
+   serial-console commands"); the plan (kept as the record of what was
+   built):
    - **Wire pico-littlefs** into `example/console/CMakeLists.txt`:
      `add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../../pico-littlefs
      <binary dir>)` (console is at `<repo>/example/console`;
