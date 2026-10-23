@@ -99,9 +99,9 @@ appear in clear on the I2C bus.
   different keys, one master can serve unlimited stores; slots 8–10 remain
   for apps that want a fully separate master.
 - **Brute-force lockout:** enforced Pico-side (fail count + lock flag in
-  NVS; e.g. 5 failures → locked until a deliberate reset). The chip has no
-  native lockout, and a 32–64-bit PIN already makes online guessing
-  infeasible — the lockout is defense in depth.
+  the littlefs store; e.g. 5 failures → locked until a deliberate reset).
+  The chip has no native lockout, and a 32–64-bit PIN already makes online
+  guessing infeasible — the lockout is defense in depth.
 
 ### Scenario 2 — FIDO2 / passkey (CTAP2)
 

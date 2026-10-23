@@ -57,13 +57,18 @@ static void dev_config(atecc608_config_intent_t *c)
     // Non-ECC unreadable secret slots (key_type NON_ECC is the default):
     // is_secret = no clear reads at all; KDF/sign stay internal.
     //   7-10 = password-store master + spare compartments, lockable
-    //   14   = I/O protection key (Pico keeps a copy in NVS)
+    //   14   = I/O protection key, LOCKABLE (user decision 2026-10-22):
+    //          contents stay re-writable in development (lost copy =
+    //          re-key); production hardening slot-locks it after the
+    //          recorded copy is verified, closing the bus-attacker
+    //          re-key hole.
     //   15   = plain data spare (all clear)
     for (int i = 7; i <= 10; i++) {
         c->slot[i].is_secret = true;
         c->key[i].lockable   = true;
     }
     c->slot[14].is_secret = true;
+    c->key[14].lockable   = true;
 
     // --- Counters ----------------------------------------------------------
     // 0 = FIDO2 signature count (CTAP global), 1 = firmware

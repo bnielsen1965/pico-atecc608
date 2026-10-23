@@ -20,8 +20,8 @@ Principle: **lock the layout, keep the contents open.** The config zone is
 locked during provisioning; key material stays (re)writable per the frozen
 rules until a slot is individually locked (slot-lock freezes contents, not
 use — KDF/sign from a locked slot still works). All slots: `write_config=0`,
-`req_auth=0`; priv slots `gen_key=1`; `lockable=1` on 0, 7, 8, 9, 10, 11;
-`use_lock_en=false` (no auth flow yet).
+`req_auth=0`; priv slots `gen_key=1`; `lockable=1` on 0, 7, 8, 9, 10, 11,
+14; `use_lock_en=false` (no auth flow yet).
 
 Slots (16): 0 = EC pub, firmware validation (primary); 1 = EC priv + 2 = EC
 pub, device identity; 3–6 = EC priv ×4, FIDO2 credentials; 7 = non-ECC
@@ -29,12 +29,14 @@ unreadable secret, password-store master (shared by all stores); 8–10 =
 non-ECC unreadable secrets, spare compartments (claim = GenKey → use →
 individual slot lock, repeatable per slot); 11 = EC pub, second firmware
 key; 12 = EC priv + 13 = EC pub, spare pair (ECDH / 2nd identity);
-14 = non-ECC unreadable secret, I/O protection key (same class as 7–10);
+14 = non-ECC unreadable secret, I/O protection key (same class as 7–10),
+**lockable** (user decision 2026-10-22 — see "I/O key generation" below);
 15 = data, spare.
 
 Counters: 0 = FIDO2 signature count (CTAP global); 1 = firmware
 anti-rollback (must be chip-side — a flash counter is reset by the same
-attacker it defends against). PIN brute-force counter is **Pico NVS-side**:
+attacker it defends against). PIN brute-force counter is **Pico-side
+(littlefs, see "Persistence layer")**:
 the chip has no native lockout, so enforcement lives in the Pico unlock flow
 (5 failures → locked until deliberate reset).
 
@@ -50,7 +52,7 @@ header on Pico flash (not secret). Wrong PIN → wrong derived key → GCM tag
 fails.
 
 I/O protection: **ON from the start** (user-approved 2026-10-22) —
-`io_prot_en=1`, key in slot 14 (Pico keeps a copy in NVS), `kdf_prot=1`
+`io_prot_en=1`, key in slot 14 (Pico keeps a copy in littlefs), `kdf_prot=1`
 (derived keys never in clear on the bus), `ecdh_prot=1`, and
 **`kdf_aes_en=1`** (required for KDF; the library's ATECC608 KDF test
 checks it). Command-level wire protection, not transport-level. Open for
@@ -83,21 +85,26 @@ therefore comes from **Pico-side entropy (RP2350 hw TRNG)**: 32B random →
 Write slot 14 **while it is still a plain factory slot** → **read-back
 verify** (the last chance to verify it — `is_secret` after the config
 write) → **print the hex on the serial console** (durable record in case
-NVS is wiped by a full-flash reflash; the NVS copy survives app updates)
-→ save NVS copy → config write → lock. Alternative (chip RNG *after* the
-config lock, slot 14 stays writable) is possible but leaves an unverified
-key and a zero-io-key window; not preferred.
+flash is wiped by a full reflash) → save to littlefs → config write →
+lock. Alternative (chip RNG *after* the config lock, slot 14 stays
+writable) is possible but leaves an unverified key and a zero-io-key
+window; not preferred.
 
-**Losing the I/O key is NOT bricking.** It is a transport key (bus
-encryption of KDF/ECDH output), not an input to vault derivation —
-re-keying slot 14 leaves the derived key and all vault data untouched.
-And slot 14 is deliberately **non-lockable** in the agreed config
-(lockable only on 0, 7–10, 11), so its contents are re-writable at any
-time, config-locked or not: lost copy → new random → Write slot 14 →
-re-record. (Had slot 14 been lockable + locked, a lost copy would be
-fatal: is_secret = unreadable, locked = unfreezeable.) The only
-unrecoverable secret is the slot-7 master, which by design never leaves
-the chip — no copy to lose; chip death = vault death.
+**Losing the I/O key is NOT bricking — in development.** It is a
+transport key (bus encryption of KDF/ECDH output), not an input to vault
+derivation — re-keying slot 14 leaves the derived key and all vault data
+untouched. Slot 14 is **lockable but left unlocked in the dev config**,
+so its contents are re-writable at any time, config-locked or not: lost
+copy → new random → Write slot 14 → re-record. **Production hardening
+(user decision 2026-10-22):** slot-14 gets slot-locked as the final step,
+*after* proving the recorded copy decrypts a live KDF — that closes the
+bus-attacker re-key hole (a writer on the bus could otherwise rewrite the
+io key to one they know). Once slot-locked, a lost copy IS fatal for the
+I/O-protected flows (is_secret = unreadable + locked = unfreezeable),
+which is the accepted production trade; the console print is the durable
+backup. The only unrecoverable secret either way is the slot-7 master,
+which by design never leaves the chip — no copy to lose; chip death =
+vault death.
 
 FIDO2: resident/discoverable — private keys always on-chip; the credential
 DB (credID, user handle, RP ID hash, slot index) lives in Pico flash, so
@@ -105,6 +112,34 @@ chip config is unaffected. **4 slots = 4 discoverable credentials total**
 (all RPs combined) — the cost of halving the budget; state in README. Pico
 reflash loses the DB only; slots survive and can be re-bound
 (`gen_key=1`).
+
+**Persistence layer: pico-littlefs (user decision 2026-10-22).** SDK 2.x
+ships neither `pico_nvs` nor `pico_littlefs`, so all Pico-side state goes
+into our own `pico-littlefs` library (~/Projects/pico-littlefs,
+github.com/bnielsen1965/pico-littlefs) — drop-in CMake static lib,
+LittleFS v2.9.3, `pico_lfs_init/mount/write_file/read_file/remove/stat/
+list/space`, LFS_NO_MALLOC, default layout = FS at flash offset 0x80000,
+384 × 4 KB blocks (1.5 MB), which clears a small app on the RP2350's
+4 MB flash (no override needed). Files: `/io_key.bin` (32B key +
+magic/len/CRC header), `/vault.db` (salt, header, entries), `/fido2.db`
+(credID / user handle / RP ID hash / slot index), lockout-counter state.
+Power-loss safety (littlefs crash consistency) matters for the vault
+specifically. Flash-dump exposure of the io key is accepted: without the
+PIN (never stored) it unlocks nothing.
+
+**4B runs as serial-console commands** (existing pico-command-line
+console; `bootrom` → BOOTSEL command already in the app). Every step
+idempotent and safe to re-run; only `prov lock` is irreversible and
+gates on a typed confirm (the module API already takes a confirm
+callback):
+
+| command        | does                                                        | reversible |
+|----------------|-------------------------------------------------------------|------------|
+| `prov status`  | chip state + factory-zone dump + diff vs planned image      | read-only  |
+| `prov randtest`| `atcab_random` ×2, print — expect 0xFFFF0000 pattern        | read-only  |
+| `prov iokey`   | Pico TRNG → Write slot 14 → read-back verify → print 64 hex → save `/io_key.bin` | yes (re-run re-keys) |
+| `prov config`  | build intent → write zone (byte 16 preserved) → read-back verify | yes |
+| `prov lock`    | re-verify zone vs intent → typed confirm → Lock w/ summary CRC | **no** |
 
 4B hardware verification items (mock fidelity gaps): factory-zone diff
 before any write (first step); Random command on the unlocked chip
@@ -127,7 +162,9 @@ behavior; byte-16 write behavior; factory KeyConfig words (mock assumes all
 - **Phase 4B next (STOP BOUNDARY)** — the actual chip provisioning.
   Scenario discussion done 2026-10-22; the agreed config is in "Agreed 4B
   config" above (locked layout / open contents, usable across all apps,
-  I/O protection on). Before ANY write: README scenario guidance → exact
+  I/O protection on). Exact byte plan exists: `tools/dump_devconfig.c`
+  (builder output: 128 B image + summary CRC; slot 14 lockable per the
+  2026-10-22 decision). Before ANY write: README scenario guidance → the
   byte plan (what, where, reversibility) for explicit approval. HARD RULE
   below applies.
 

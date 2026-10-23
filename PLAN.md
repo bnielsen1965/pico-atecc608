@@ -252,11 +252,22 @@ A single config struct drives init; everything else is a small, stable set.
     future apps); 11 second fw key; 12/13 spare EC pair (ECDH); 14 I/O
     protection key (unreadable secret, same class as 7–10 — the library's
     locked ATECC608 reference config keeps its io key in a type-7 secret
-    slot and its ATECC608 KDF test exercises I/O-protected KDF against it);
-    15 data spare. Counters: 0 = FIDO2 sig count, 1 = fw anti-rollback.
-    PIN brute-force counter is Pico-side (no native chip lockout).
+    slot and its ATECC608 KDF test exercises I/O-protected KDF against it;
+    **lockable** — dev leaves it unlocked/re-keyable, production
+    slot-locks it after the recorded copy is verified, closing the
+    bus-attacker re-key hole); 15 data spare. Counters: 0 = FIDO2 sig
+    count, 1 = fw anti-rollback. PIN brute-force counter is Pico-side
+    (no native chip lockout).
     **I/O protection ON from the start** (`io_prot_en`, `kdf_prot=1`,
-    `ecdh_prot=1`, `kdf_aes_en=1`, key slot 14). Before any write: README
+    `ecdh_prot=1`, `kdf_aes_en=1`, key slot 14). The io key comes from
+    **Pico TRNG**, not the chip RNG: the chip's Random command returns a
+    0xFFFF0000 factory pattern until the config zone is locked (v3.8.0
+    manual, `atcab_random()`). **Persistence: pico-littlefs** (our own
+    lib; SDK 2.x ships no nvs/littlefs) holds `/io_key.bin`, `/vault.db`,
+    `/fido2.db`, lockout state. 4B runs as serial-console commands
+    (`prov status/randtest/iokey/config/lock`; only `prov lock` is
+    irreversible, typed-confirm). Exact byte plan: `tools/dump_devconfig.c`
+    (builder output, 128 B + summary CRC). Before any write: README
     scenario guidance, then the user's explicit go-ahead on the exact byte
     plan (what, where, reversibility):
     write→read-back verify, and lock gated behind read-back + typed-confirm.
