@@ -7,11 +7,11 @@ add_executable(pico-atecc608
 )
 
 # pico-littlefs — Pico-side persistence for /io_key.bin (and later
-# /vault.db, /fido2.db). It is a sibling project of this repo
-# (~/Projects/pico-littlefs — three levels up from example/console),
-# not a submodule; the bare-metal default layout (FS at flash 0x80000,
-# 384 x 4 KB) needs no override on this 4 MB app.
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../../pico-littlefs
+# /vault.db, /fido2.db). Submodule in example/ (used by the examples
+# only; the library does not depend on it). The bare-metal default
+# layout (FS at flash 0x80000, 384 x 4 KB) needs no override on this
+# 4 MB app.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../pico-littlefs
                  ${CMAKE_CURRENT_BINARY_DIR}/pico-littlefs)
 
 target_link_libraries(pico-atecc608

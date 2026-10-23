@@ -112,6 +112,14 @@ supplies its own.
 
 ## Building
 
+Clone with submodules (the examples use `example/pico-command-line` and
+`example/pico-littlefs`; the latter nests LittleFS inside it):
+
+```sh
+git clone --recursive <this repo>
+# or, if already cloned: git submodule update --init --recursive
+```
+
 The first `cmake` configure **fetches cryptoauthlib v3.8.0 from GitHub**
 (network needed once; it is cached under `build/` afterward and is never
 stored in this repo). For an air-gapped build, point CMake at a local clone
@@ -165,9 +173,10 @@ ctest --test-dir tests/build --output-on-failure
 example/              proof-of-concept examples (NOT part of the library):
                       console/ (bench console: probe/diag + prov commands),
                       tools/ (dump_devconfig host tool), common/ (shared
-                      provision-on-first-boot base), pico-command-line/
-                      (submodule — console/CLI framework, examples only);
-                      see example/README.md
+                      provision-on-first-boot base), submodules
+                      pico-command-line/ (console/CLI framework) and
+                      pico-littlefs/ (Pico-side persistence) — examples
+                      only; see example/README.md
 include/atecc608/     public headers: atecc608.h (core API),
                       atecc608_config.h (config builder),
                       atecc608_prov.h (guarded provisioning),

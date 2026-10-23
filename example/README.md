@@ -29,9 +29,9 @@ implementation.)
 - **`console/`** — bench console over the serial port (pico-command-line,
   a submodule in this folder): probe/diagnostic smoke commands plus the
   Phase 4B `prov` command set. Pico-side state lives in littlefs
-  (pico-littlefs, `~/Projects/pico-littlefs` — a sibling project, not a
-  submodule): `/io_key.bin` for now, later `/vault.db` and `/fido2.db`.
-  The `bootrom` command re-enters BOOTSEL for reflashing.
+  (pico-littlefs, a submodule in this folder): `/io_key.bin` for now,
+  later `/vault.db` and `/fido2.db`. The `bootrom` command re-enters
+  BOOTSEL for reflashing.
 - **`tools/dump_devconfig.c`** — host tool that encodes the agreed dev
   config and prints the exact 128-byte config-zone image + summary CRC
   from the module's real builder (the byte plan).

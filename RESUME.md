@@ -30,8 +30,9 @@ examples only, not the library); (2) the `prov` console command set is
 implemented (build-only work, **chip untouched**): `prov status` /
 `randtest` (read-only), `iokey` / `config` / `lock` (writes — gated at the
 bench by the HARD RULE). Details:
-- littlefs is wired via `add_subdirectory` of the *sibling project*
-  `~/Projects/pico-littlefs` (NOT a submodule) in
+- littlefs is wired via `add_subdirectory` of the `example/pico-littlefs`
+  **submodule** (github.com/bnielsen1965/pico-littlefs, pinned at
+  `936c07f` = `origin/main`, the same code the sibling clone had) in
   `example/console/CMakeLists.txt`; target `pico-littlefs`, header
   `pico_littlefs.h`. Init/mount at startup (auto-formats a fresh volume),
   warns when `/io_key.bin` is gone. `pico_rand` (SDK target, header
@@ -287,7 +288,7 @@ pulls in the mock objects and leaves the HAL symbols unresolved);
   `prov` command set. Phase 6 adds a config read-back demo.
 - `example/` — proof-of-concept examples (NOT part of the library):
   `console/` (probe/diag + the Phase 4B `prov` command set; littlefs via
-  the sibling pico-littlefs project for `/io_key.bin`, `pico_rand` for the
+  the pico-littlefs submodule for `/io_key.bin`, `pico_rand` for the
   I/O-key entropy), `tools/dump_devconfig.c` (the byte-plan host tool),
   `common/dev_config.h` (the agreed 4B config intent, shared by console +
   tool; the provision-on-first-boot base is factored out here in 4B);

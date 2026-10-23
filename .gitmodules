@@ -1,3 +1,6 @@
 [submodule "example/pico-command-line"]
 	path = example/pico-command-line
 	url = https://github.com/bnielsen1965/pico-command-line.git
+[submodule "example/pico-littlefs"]
+	path = example/pico-littlefs
+	url = https://github.com/bnielsen1965/pico-littlefs.git
