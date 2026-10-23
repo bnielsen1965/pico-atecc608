@@ -318,14 +318,19 @@ static void mock_handle_lock(mock_chip_t *chip, uint8_t param1, uint16_t param2)
             mock_resp_exec(chip); // slot not marked lockable
             return;
         }
-        if ((mock_le16(&chip->config[88]) & (uint16_t)(1u << slot)) != 0u) {
+        // SlotLocked polarity (verified against the chip's factory value
+        // 0xFFFF = no slot locked, and cryptoauthlib's own hardware test
+        // atca_tests_write.c "write_upper_slots"): bit n = 1 -> slot n
+        // unlocked, bit n = 0 -> slot n locked. The Lock command clears the
+        // bit.
+        if ((mock_le16(&chip->config[88]) & (uint16_t)(1u << slot)) == 0u) {
             mock_resp_exec(chip); // already locked
             return;
         }
         if (slot < 8u) {
-            chip->config[88] |= (uint8_t)(1u << slot);
+            chip->config[88] &= (uint8_t)~(1u << slot);
         } else {
-            chip->config[89] |= (uint8_t)(1u << (slot - 8u));
+            chip->config[89] &= (uint8_t)~(1u << (slot - 8u));
         }
         mock_resp_ok(chip);
     } else {
@@ -512,6 +517,12 @@ void mock_chip_reset(mock_chip_t *chip)
 
     chip->config[86] = 0x55; // LockValue  (data zone, unlocked)
     chip->config[87] = 0x55; // LockConfig (config zone, unlocked)
+
+    // SlotLocked: the factory ships 0xFFFF (verified on the bench chip
+    // 2026-10-23). Lock-command-managed; the prov path preserves it, so the
+    // mock's write path never has to decide what it does with the field.
+    chip->config[88] = 0xFF;
+    chip->config[89] = 0xFF;
 
     chip->present = true;
 }

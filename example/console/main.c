@@ -28,8 +28,9 @@
 //                    is expected while the config zone is unlocked
 //   prov iokey     - WRITE: Pico TRNG -> slot 14 -> read-back verify ->
 //                    print 64 hex chars -> save /io_key.bin (littlefs)
-//   prov config    - WRITE: agreed intent -> config zone (byte 16
-//                    preserved), read-back verified; idempotent
+//   prov config    - WRITE: agreed intent -> config zone (byte 16 +
+//                    SlotLocked 88..89 preserved), read-back verified;
+//                    idempotent
 //   prov lock      - WRITE, IRREVERSIBLE: verify zone vs intent -> typed
 //                    confirm -> Lock with the summary CRC
 //
@@ -93,9 +94,10 @@ static uint32_t crc32_buf(const uint8_t *buf, size_t len)
 }
 
 // The planned config image for this bench chip: the agreed intent, with the
-// I2C address byte patched the way the prov path does (the builder does not
-// model it). Returns false if the intent is rejected by validation.
-static bool planned_image(uint8_t addr_byte,
+// bytes the prov path preserves from the chip patched in the same way (the
+// builder does not model them). Returns false if the intent is rejected by
+// validation.
+static bool planned_image(const uint8_t chip[ATECC608_CONFIG_ZONE_LEN],
                           uint8_t img[ATECC608_CONFIG_ZONE_LEN])
 {
     atecc608_config_intent_t cfg;
@@ -103,7 +105,9 @@ static bool planned_image(uint8_t addr_byte,
     if (ATECC608_OK != atecc608_config_build(&cfg, img)) {
         return false;
     }
-    img[16] = addr_byte;
+    img[16] = chip[16]; // I2C address (8-bit on-the-wire form)
+    img[88] = chip[88]; // SlotLocked (Lock-command-managed, factory FF FF)
+    img[89] = chip[89];
     return true;
 }
 
@@ -328,7 +332,7 @@ static void provStatus(void)
         report_fail("READ CONFIG ZONE", st);
         return;
     }
-    if (!planned_image(zone[16], plan)) {
+    if (!planned_image(zone, plan)) {
         printf("planned image build FAILED (intent rejected by validation)\n");
         return;
     }
@@ -348,6 +352,8 @@ static void provStatus(void)
     }
     printf("bytes 0..15: factory (chip keeps its own)\n");
     printf("byte 16: I2C address, preserved by the prov path (chip = 0x%02X)\n", zone[16]);
+    printf("bytes 88..89: SlotLocked, preserved by the prov path (chip = %02X %02X)\n",
+           zone[88], zone[89]);
     printf("lock bytes [86:88]: %02X %02X (%s)\n", zone[86], zone[87],
            (zone[86] == ATECC608_CONFIG_UNLOCKED &&
             zone[87] == ATECC608_CONFIG_UNLOCKED) ? "unlocked" : "locked/other");
@@ -470,9 +476,10 @@ static void provIokey(void)
 }
 
 // prov config — WRITE (reversible while the zone is unlocked): build the
-// agreed intent, provision (unlocked check -> read -> preserve byte 16 ->
-// write -> read-back verify), report the result + the summary CRC the lock
-// will use. Idempotent: an already-matching chip takes no writes.
+// agreed intent, provision (unlocked check -> read -> preserve byte 16 and
+// SlotLocked 88..89 -> write -> read-back verify), report the result + the
+// summary CRC the lock will use. Idempotent: an already-matching chip takes
+// no writes.
 static void provConfig(void)
 {
     atecc608_config_intent_t cfg;
@@ -481,19 +488,19 @@ static void provConfig(void)
     atecc608_status_t st;
 
     dev_config(&cfg);
-    if (ATECC608_OK != atecc608_config_build(&cfg, plan)) {
-        printf("intent rejected by builder validation — nothing written.\n");
-        return;
-    }
     st = atecc608_read_config_zone(zone);
     if (ATECC608_OK != st) {
         report_fail("READ CONFIG ZONE", st);
         return;
     }
-    plan[16] = zone[16]; // the prov path preserves the chip's address byte
+    if (!planned_image(zone, plan)) {
+        printf("intent rejected by builder validation — nothing written.\n");
+        return;
+    }
     const bool already = atecc608_config_writable_equal(zone, plan, NULL);
-    printf("planned image (byte 16 = chip's 0x%02X): summary CRC %04X\n",
-           zone[16], atecc608_config_crc16(plan));
+    printf("planned image (chip's byte 16 = 0x%02X, bytes 88..89 = %02X %02X):"
+           " summary CRC %04X\n",
+           zone[16], zone[88], zone[89], atecc608_config_crc16(plan));
     printf(already
            ? "chip already matches the planned image — no writes (idempotent).\n"
            : "writing the planned image to the config zone...\n");

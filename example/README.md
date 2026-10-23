@@ -69,7 +69,7 @@ already takes a confirm callback):
 | `prov status` | chip state + factory-zone dump + diff vs planned image | read-only |
 | `prov randtest` | `atcab_random` ×2, print — expect the `0xFFFF0000` factory pattern while unlocked | read-only |
 | `prov iokey` | Pico TRNG → Write slot 14 → read-back verify → print 64 hex chars → save `/io_key.bin` (littlefs) | yes (re-run re-keys) |
-| `prov config` | build intent → write zone (byte 16 preserved) → read-back verify | yes |
+| `prov config` | build intent → write zone (byte 16 + SlotLocked 88..89 preserved) → read-back verify | yes |
 | `prov lock` | re-verify zone vs intent → typed confirm → Lock with summary CRC | **no** |
 
 The typed confirm on `prov lock` is the command line itself: the handlers

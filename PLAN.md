@@ -241,9 +241,13 @@ A single config struct drives init; everything else is a small, stable set.
       `atecc608_prov.h`):** UseLock enforcement is not modeled (keep
       `use_lock_en=false` until an auth flow exists); UpdateExtra is
       strictly one-shot in the mock (verify same-value behavior on a real
-      chip); factory KeyConfig words are assumed 0 (verify on the real
-      chip); data-zone READ requires the data zone to be locked in the mock
-      (fire-and-forget writes until lock); byte 16 is preserved, never
+      chip); factory KeyConfig/SlotConfig words are assumed 0 (the real
+      bench chip ships locked-down factory values, e.g. KeyConfig
+      0x0033/0x003C, SlotConfig 0x2083/0x8FAF — recorded in RESUME.md;
+      the prov path overwrites them all); data-zone READ requires the data
+      zone to be locked in the mock (fire-and-forget writes until lock);
+      byte 16 (I2C address) and bytes 88..89 (SlotLocked; factory 0xFFFF,
+      Lock-managed, bit n = 0 -> slot n locked) are preserved, never
       written.
   - **Phase 4B — Chip provisioning (writes only after user approval).**
     **Scenario discussion done 2026-10-22 — config agreed** (see RESUME.md,

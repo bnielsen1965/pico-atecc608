@@ -73,9 +73,12 @@ int main(void)
     printf("ChipOptions [90:92] = %02X %02X (LE16): io_prot_en + kdf_aes_en,"
            " ecdh_prot=1, kdf_prot=1, io key slot 14\n", zone[90], zone[91]);
     printf("Note: bytes 0..15 are the factory region (chip keeps its own);\n");
-    printf("byte 16 (I2C address) is preserved by the prov path from the\n");
-    printf("chip's current value; lock bytes [86:88] read 55 55 on an\n");
-    printf("unlocked chip and are written by the Lock command, not us.\n");
+    printf("byte 16 (I2C address) and bytes 88..89 (SlotLocked, factory\n");
+    printf("0xFFFF) are preserved by the prov path from the chip's current\n");
+    printf("values, so the on-chip planned-image CRC (printed by `prov\n");
+    printf("status` / `prov config`) differs from the CRC above; lock bytes\n");
+    printf("[86:88] read 55 55 on an unlocked chip and are written by the\n");
+    printf("Lock command, not us.\n");
 
     return 0;
 }

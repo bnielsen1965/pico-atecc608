@@ -47,12 +47,23 @@ atecc608_status_t atecc608_provision_config(const atecc608_config_intent_t *cfg)
         return atecc608_map_status(st);
     }
 
-    // The I2C address byte (16) is factory-programmed and is NOT modeled by
-    // the builder (it would emit 0). The library's write covers it, and the
-    // datasheet is explicit: write it with the chip's current address. Always
-    // preserve the chip's value so provisioning can never change (and lose)
-    // the device's bus address.
+    // Bytes the builder does not model (it would emit 0 for both) but the
+    // library's write path DOES cover. Preserve the chip's values so
+    // provisioning can never change them.
+    //
+    // Byte 16 (I2C address, 8-bit on-the-wire form): factory-programmed;
+    // writing anything else would change (and lose) the bus address.
     intent[16] = current[16];
+    //
+    // Bytes 88..89 (SlotLocked): Lock-command-managed; the factory ships
+    // 0xFFFF (verified on the bench chip). Whether the Write command takes
+    // effect on them is not documented, so preserve the chip's value either
+    // way: if the chip honors the write, we write back exactly what it holds
+    // (a no-op); if it ignores the write, the read-back verify below still
+    // sees the same bytes. Writing the builder's 0x0000 instead would fail
+    // the verify (and the lock re-verify) in the ignore case.
+    intent[88] = current[88];
+    intent[89] = current[89];
 
     // Idempotent: if the writable region already matches, no writes at all.
     if (atecc608_config_writable_equal(current, intent, NULL)) {
@@ -110,9 +121,12 @@ atecc608_status_t atecc608_lock_config_zone(const atecc608_config_intent_t *cfg,
         return atecc608_map_status(st);
     }
 
-    // The builder does not model the I2C address byte (16); preserve the
-    // chip's value for the comparison (see atecc608_provision_config).
+    // The builder does not model byte 16 (I2C address) or bytes 88..89
+    // (SlotLocked); preserve the chip's values for the comparison (see
+    // atecc608_provision_config).
     intent[16] = zone[16];
+    intent[88] = zone[88];
+    intent[89] = zone[89];
 
     if (!atecc608_config_writable_equal(zone, intent, NULL)) {
         return ATECC608_ERR_EXEC;

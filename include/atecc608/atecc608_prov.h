@@ -22,6 +22,12 @@
 //   - atecc608_provision_config preserves the chip's I2C address byte
 //     (byte 16), which the builder does not model; provisioning can
 //     never change the device's bus address.
+//   - atecc608_provision_config also preserves the chip's SlotLocked
+//     bytes (88..89; the factory ships 0xFFFF), which the builder does
+//     not model and the Lock command manages. The library's write path
+//     covers these bytes but whether the chip honors the write is not
+//     documented, so preserving the chip's value keeps the read-back
+//     verify correct either way.
 //   - Config bytes 84/85 (UserExtra / UserExtraAdd) are ONE-SHOT on the
 //     chip: once non-zero they can never be changed again. The library's
 //     atcab_write_config_zone() issues 13 Write commands followed by two

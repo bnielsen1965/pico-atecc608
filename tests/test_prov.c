@@ -274,21 +274,23 @@ static void t_lock_data_slot(void)
     cfg.key[15].lockable = true;
     CHECK(ATECC608_OK == atecc608_provision_config(&cfg));
 
+    // SlotLocked polarity: bit n = 1 -> unlocked, 0 -> locked (factory
+    // 0xFFFF = nothing locked; the Lock command clears the bit).
     // Slot not marked lockable: the chip rejects it.
     CHECK(ATECC608_ERR_EXEC == atecc608_lock_data_slot(3, confirm_hook, NULL));
-    CHECK(0x00u == s_chip.config[88]);
-    CHECK(0x00u == s_chip.config[89]);
+    CHECK(0xFFu == s_chip.config[88]);
+    CHECK(0xFFu == s_chip.config[89]);
 
     // Refused without confirm: nothing changes.
     s_confirm_result = false;
     CHECK(ATECC608_ERR_CHIP_STATE == atecc608_lock_data_slot(4, confirm_hook, NULL));
-    CHECK(0x00u == s_chip.config[88]);
-    CHECK(0x00u == s_chip.config[89]);
+    CHECK(0xFFu == s_chip.config[88]);
+    CHECK(0xFFu == s_chip.config[89]);
     s_confirm_result = true;
 
-    // Lockable slot: OK (bit 15 of the SlotLocked word).
+    // Lockable slot: OK (bit 15 of the SlotLocked word is cleared).
     CHECK(ATECC608_OK == atecc608_lock_data_slot(15, confirm_hook, NULL));
-    CHECK((s_chip.config[89] & 0x80u) != 0u);
+    CHECK((s_chip.config[89] & 0x80u) == 0u);
 
     // Re-locking the same slot: the chip rejects it.
     CHECK(ATECC608_ERR_EXEC == atecc608_lock_data_slot(15, confirm_hook, NULL));

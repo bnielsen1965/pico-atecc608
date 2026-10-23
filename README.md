@@ -59,9 +59,9 @@ in [`example/README.md`](example/README.md).
   consumers express intent, never raw bytes.
 - **Guarded provisioning** (`atecc608_prov.h`): idempotent
   `provision_config` (read-back verified, preserves the chip's I2C address
-  byte), `lock_config_zone`, `lock_data_zone`, `lock_data_slot`, `genkey`,
-  `counter_read` / `counter_increment` — every irreversible step is
-  confirm-hook gated.
+  byte and the Lock-managed SlotLocked bytes), `lock_config_zone`,
+  `lock_data_zone`, `lock_data_slot`, `genkey`, `counter_read` /
+  `counter_increment` — every irreversible step is confirm-hook gated.
 - **Crypto pass-through** (KDF / sign / verify / `read_pubkey` wrappers):
   next phase, added as consumers need them.
 
