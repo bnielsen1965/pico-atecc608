@@ -73,6 +73,32 @@ slot 14 is now an unreadable secret slot. Reference:
 cryptoauthlib `app/secure_boot`
 (`bind_host_and_secure_element_with_io_protection`).
 
+**I/O key generation — chip RNG is unavailable before the lock
+(2026-10-22).** The v3.8.0 manual's `atcab_random()` docs: "if the
+configuration zone isn't locked yet (LockConfig) then it will return a
+0xFFFF0000 repeating pattern instead." So the chip TRNG yields a
+deterministic factory pattern on our unlocked chip (the library's basic
+random test only asserts status, so it never exposed this). The I/O key
+therefore comes from **Pico-side entropy (RP2350 hw TRNG)**: 32B random →
+Write slot 14 **while it is still a plain factory slot** → **read-back
+verify** (the last chance to verify it — `is_secret` after the config
+write) → **print the hex on the serial console** (durable record in case
+NVS is wiped by a full-flash reflash; the NVS copy survives app updates)
+→ save NVS copy → config write → lock. Alternative (chip RNG *after* the
+config lock, slot 14 stays writable) is possible but leaves an unverified
+key and a zero-io-key window; not preferred.
+
+**Losing the I/O key is NOT bricking.** It is a transport key (bus
+encryption of KDF/ECDH output), not an input to vault derivation —
+re-keying slot 14 leaves the derived key and all vault data untouched.
+And slot 14 is deliberately **non-lockable** in the agreed config
+(lockable only on 0, 7–10, 11), so its contents are re-writable at any
+time, config-locked or not: lost copy → new random → Write slot 14 →
+re-record. (Had slot 14 been lockable + locked, a lost copy would be
+fatal: is_secret = unreadable, locked = unfreezeable.) The only
+unrecoverable secret is the slot-7 master, which by design never leaves
+the chip — no copy to lose; chip death = vault death.
+
 FIDO2: resident/discoverable — private keys always on-chip; the credential
 DB (credID, user handle, RP ID hash, slot index) lives in Pico flash, so
 chip config is unaffected. **4 slots = 4 discoverable credentials total**
@@ -80,9 +106,12 @@ chip config is unaffected. **4 slots = 4 discoverable credentials total**
 reflash loses the DB only; slots survive and can be re-bound
 (`gen_key=1`).
 
-4B hardware verification items (mock fidelity gaps): GenKey fill size on
-non-ECC slots (16 vs 32 bytes — if 16, accept a 128-bit master or fill via
-Random+Write); KDF from an `is_secret` slot; I/O protection end-to-end incl.
+4B hardware verification items (mock fidelity gaps): factory-zone diff
+before any write (first step); Random command on the unlocked chip
+returns the documented 0xFFFF0000 pattern (confirms the Pico-entropy
+path above); GenKey fill size on non-ECC slots (16 vs 32 bytes — if 16,
+accept a 128-bit master or fill via Pico-entropy+Write); KDF from an
+`is_secret` slot; I/O protection end-to-end incl.
 request direction; `kdf_aes_en`/`kdf_prot` settings; UpdateExtra same-value
 behavior; byte-16 write behavior; factory KeyConfig words (mock assumes all
 0); UseLock enforcement; GenKey/PrivWrite bit 13/14 behavior.
