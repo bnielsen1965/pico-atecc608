@@ -262,8 +262,8 @@ pulls in the mock objects and leaves the HAL symbols unresolved);
   `console/`, `tools/dump_devconfig.c` (the byte-plan host tool),
   `common/` (shared provision-on-first-boot base, to be factored out in
   4B); contract + scenarios + slot layout in `example/README.md`.
-- `pico-command-line/` — submodule (console framework, used by examples
-  only; wired in via `example/CMakeLists.txt`).
+- `example/pico-command-line/` — submodule (console framework, used by
+  examples only; wired in via `example/CMakeLists.txt`).
 - `../cryptoauthlib` — dev-reference clone (NOT part of this repo).
 
 ## Phase 3 — what was built (and why)

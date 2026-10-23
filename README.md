@@ -165,7 +165,9 @@ ctest --test-dir tests/build --output-on-failure
 example/              proof-of-concept examples (NOT part of the library):
                       console/ (bench console: probe/diag + prov commands),
                       tools/ (dump_devconfig host tool), common/ (shared
-                      provision-on-first-boot base); see example/README.md
+                      provision-on-first-boot base), pico-command-line/
+                      (submodule — console/CLI framework, examples only);
+                      see example/README.md
 include/atecc608/     public headers: atecc608.h (core API),
                       atecc608_config.h (config builder),
                       atecc608_prov.h (guarded provisioning),
@@ -174,8 +176,6 @@ src/                  module sources: atecc608.c (core API), hal_rp2350.c/.h
                       (RP2350 I2C HAL), atecc608_config.c, atecc608_prov.c,
                       atecc608_status.c, atecc608_int.h
 tests/                host unit tests (standalone CMake, mock chip HAL)
-pico-command-line/    submodule — minimal console/CLI framework (examples
-                      only; the library does not depend on it)
 CMakeLists.txt        module build (+ examples by default,
                       ATECC608_BUILD_EXAMPLES=OFF to skip); fetches
                       cryptoauthlib at build time

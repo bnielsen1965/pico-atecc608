@@ -12,9 +12,8 @@
 #
 # See example/README.md for the contract and the agreed slot layout.
 
-# Console/CLI framework used by the examples only (submodule at the repo
-# root; the library itself has no dependency on it).
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../pico-command-line
-                 ${CMAKE_CURRENT_BINARY_DIR}/pico-command-line)
+# Console/CLI framework used by the examples only (submodule checked out
+# here, inside example/; the library itself has no dependency on it).
+add_subdirectory(pico-command-line)
 
 add_subdirectory(console)
