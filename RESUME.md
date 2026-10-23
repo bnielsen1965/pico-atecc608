@@ -7,7 +7,7 @@ pause. The forward plan lives in `PLAN.md`; this file captures the exact
 working state and the concrete next steps.
 
 ## ⏸ Where the conversation stopped (read this first on resume)
-HEAD is `6448a0d` (working tree clean). The 4B application-scenario
+HEAD is `d39a65d` (working tree clean). The 4B application-scenario
 discussion is **DONE (2026-10-22)**; the full config is agreed (below) and
 the exact byte plan exists (see "I/O key generation" +
 `example/tools/dump_devconfig.c`, summary CRC **4FE8**). On resume, do NOT
@@ -24,12 +24,14 @@ then run" (shared base in `example/common/`, to be factored out of the
 console in 4B). Pico build + host ctest green after the reorg; the uf2 is
 now at `build/example/console/pico-atecc608.uf2`.
 
-**Done 2026-10-23 (`cc51d2a`, `6448a0d`):** (1) the pico-command-line
-submodule moved from the repo root into `example/` (it is used by the
-examples only, not the library); (2) the `prov` console command set is
-implemented (build-only work, **chip untouched**): `prov status` /
-`randtest` (read-only), `iokey` / `config` / `lock` (writes — gated at the
-bench by the HARD RULE). Details:
+**Done 2026-10-23 (`cc51d2a`, `6448a0d`, `d39a65d`):** (1) the
+pico-command-line submodule moved from the repo root into `example/` (it
+is used by the examples only, not the library); (2) the `prov` console
+command set is implemented (build-only work, **chip untouched**):
+`prov status` / `randtest` (read-only), `iokey` / `config` / `lock`
+(writes — gated at the bench by the HARD RULE); (3) pico-littlefs
+converted from a sibling-project reference into an `example/` submodule.
+Details:
 - littlefs is wired via `add_subdirectory` of the `example/pico-littlefs`
   **submodule** (github.com/bnielsen1965/pico-littlefs, pinned at
   `936c07f` = `origin/main`, the same code the sibling clone had) in
@@ -563,10 +565,11 @@ approves a specific write:
    serial-console commands"); the plan (kept as the record of what was
    built):
    - **Wire pico-littlefs** into `example/console/CMakeLists.txt`:
-     `add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../../pico-littlefs
-     <binary dir>)` (console is at `<repo>/example/console`;
-     pico-littlefs is a *sibling of the repo* at
-     `~/Projects/pico-littlefs` — three levels up), link **`pico-littlefs`**
+     `add_subdirectory(...)` (as built: the `example/pico-littlefs`
+     **submodule** — `../pico-littlefs` from the console dir; originally
+     planned as the *sibling of the repo* at
+     `~/Projects/pico-littlefs`, later converted to a submodule),
+     link **`pico-littlefs`**
      (hyphen — the CMake target; the header is `pico_littlefs.h` with
      underscores) into the console target. Optional `PICO_LFS_USE_FREERTOS`
      stays OFF (bare-metal). LFS_NO_MALLOC (static
