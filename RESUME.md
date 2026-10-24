@@ -1,16 +1,19 @@
 # Resume notes (pico-atecc608)
 
-Pause point: **2026-10-23 — the chip is PROVISIONED: the config zone
-holds the approved planned image and is **LOCKED** (the one-way step
-was executed after explicit user go-ahead); the FIRST I/O key is in
-slot 14 (chip ACKed, printed on the console). ONE OPEN ITEM: the
-littlefs copy of the key was NOT saved — a firmware bug (flash
-lockout never initialized on either core, so every flash write from
-the console's core1 failed); root cause found + fixed (`d1778af`),
-fix not yet flashed. Next: BOOTSEL-reflash the fixed uf2 → `prov
-iokey` (re-keys + saves atomically — **record the newly printed key;
-the old one is void**) → `prov status` (step 7: `config zone:
-LOCKED`, lock bytes 00 00, chip-zone CRC 6F47). Phase 4B is then done.**
+Pause point: **2026-10-23 — Phase 4B is COMPLETE: the chip is fully
+PROVISIONED. The config zone holds the approved planned image and is
+LOCKED (the one-way step ran after explicit user go-ahead); the
+I/O key is in slot 14 (chip ACKed) AND saved to littlefs
+(`/io_key.bin`, read-back verified). The one bug found along the way —
+the littlefs save failed because flash lockout was never initialized
+on either core — was root-caused + fixed (`d1778af`), the fix was
+flashed, and the save now succeeds. Final `prov status` (run-sheet
+step 7): `config zone: LOCKED`, data zone unlocked, lock bytes
+`55 00` (byte 87 = config-zone lock flipped 55→00; byte 86 = data-zone
+lock stays 55), chip-zone CRC **F6DE**. The durable I/O key is
+recorded in the state list below. Next: `PLAN.md` Phases 5–7 — the
+first item is the functional I/O-key verification (an I/O-protected
+transaction), which uses the key below.**
 The byte plan (bytes, CRC 822F) is unchanged and stays approved.
 Original discovery behind the write order: the ATECC608 refuses any
 data-zone write while the config zone is unlocked — so `prov iokey`
@@ -24,21 +27,19 @@ The forward plan lives in `PLAN.md`; this file captures the exact
 working state and the concrete next steps.
 
 ## ⏸ Where the conversation stopped (read this first on resume)
-HEAD is `d1778af` (working tree clean). **The chip is provisioned**
-(config zone written + LOCKED, first I/O key in slot 14 — details
-below) — the ONLY remaining bench work is re-creating the littlefs
-key copy after flashing the fixed firmware. On resume: do NOT
-re-litigate the byte plan (approved 2026-10-23, unchanged). Bench
-procedure: (1) `cmake --build build -j$(nproc)` (the uf2 in
-`build/example/console/` must be from `d1778af`) → BOOTSEL → drag
-`build/example/console/pico-atecc608.uf2` onto **RP2350**; (2) `prov
-iokey` — generates a FRESH key, writes slot 14, prints it, saves
-`/io_key.bin` (read-back verified): **RECORD THE NEWLY PRINTED KEY —
-it is the durable record; the previously printed key (recorded below)
-is void**; (3) `prov status` — expect `config zone: LOCKED`, lock
-bytes 00 00, chip-zone CRC **6F47**, writable region matching the
-planned image. Then Phase 4B is complete — resume `PLAN.md` (Phases
-5–7; the functional I/O-key verification is the first Phase-7 item).
+Working tree is clean; the flashed firmware is `d1778af` (the
+littlefs fix). **Phase 4B is COMPLETE — the chip is fully
+provisioned** (config zone written + LOCKED; I/O key in
+slot 14, chip ACKed, and saved to littlefs `/io_key.bin` read-back
+verified; final `prov status` = run-sheet step 7 confirmed LOCKED /
+lock bytes 55 00 / chip-zone CRC F6DE). On resume: do NOT
+re-provision the chip — the config zone is locked one-way (it can
+never be re-written), and re-running `prov iokey` would re-key slot
+14 (only do that if you deliberately want a fresh key; the previous
+key is then void). The durable I/O key is recorded in the state list
+below (and in `/io_key.bin` on the Pico). Next: `PLAN.md` Phases
+5–7 — the first item is the functional I/O-key verification (an
+I/O-protected transaction that reads the key from `/io_key.bin`).
 Scenario guidance is user-reviewed (2026-10-22) and lives in
 `example/README.md`.
 
@@ -51,28 +52,32 @@ State at the pause:
   zone before committing. The config zone can never change again;
   SlotLocked 88–89 stays FF FF (the DATA zone is NOT locked — contents
   open per the agreed layout); 84/85 (UpdateExtra) are final at 00 00.
-- **FIRST I/O key in slot 14 (2026-10-23, run-sheet step 6, chip
-  ACKed):** printed key
-  `ECE2 A982 5B88 0E69 9C21 CF99 765E E548 C2F1 1362 FBA0 D8A1 F8E8
-  5676 629C D88B` — **VOID once `prov iokey` is re-run** (the re-run
-  re-keys; recorded here for the audit trail only). The durable key is
-  the one printed by the re-run after the fixed firmware is flashed
-  (it will also be in `/io_key.bin` on littlefs).
-- **littlefs save FAILED (2026-10-23) — root cause found + fixed
-  (`d1778af`), fix NOT yet flashed at the bench:** the command
-  handlers run on core1 (core0 runs the stdin loop); littlefs flash
-  program/erase go through `flash_safe_execute()`, which on
-  bare-metal RP2350 requires the OTHER core to have called
+- **DURABLE I/O key in slot 14 + littlefs (2026-10-23, run-sheet
+  step 6, after flashing the `d1778af` littlefs fix):** chip ACKed the
+  write AND the save succeeded — "saved to littlefs: /io_key.bin
+  (read-back verified)". The key (the one Phase 7 uses; also in
+  `/io_key.bin` on the Pico):
+  `FB D2 14 BA F2 76 35 9D  BF 27 71 02 8C C9 A3 8E  DC 5C 25 CB C7 22
+  8F 5C  F1 D7 C4 B4 63 48 C3 99`. An earlier key `ECE2 A982 5B88
+  0E69 … 629C D88B` was written on the first `prov iokey` attempt but
+  is **VOID** — the re-run re-keyed slot 14 (recorded only for the
+  audit trail).
+- **littlefs save bug — found, fixed (`d1778af`), FLASHED + CONFIRMED
+  at the bench (2026-10-23):** the first `prov iokey` wrote the key to
+  the chip (ACKed) but then "saving /io_key.bin FAILED". Root cause:
+  the command handlers run on core1 (core0 runs the stdin loop);
+  littlefs flash program/erase go through `flash_safe_execute()`, which
+  on bare-metal RP2350 requires the OTHER core to have called
   `flash_safe_execute_core_init()` (`multicore_lockout_victim_init()`)
   — neither core did, so every flash write from core1 returned
-  PICO_ERROR_NOT_PERMITTED → LFS_ERR_IO → "saving /io_key.bin FAILED"
-  (reads are XIP and were unaffected; the boot-time format worked
-  because core1 had not started yet —
-  `PICO_MULTICORE_LOCKOUT_BEFORE_CORE1_STARTED`). Fix:
-  `flash_safe_execute_core_init()` on core0 in `main()` (before
+  PICO_ERROR_NOT_PERMITTED → LFS_ERR_IO → the save failed (reads are
+  XIP and were unaffected; the boot-time format worked because core1
+  had not started yet — `PICO_MULTICORE_LOCKOUT_BEFORE_CORE1_STARTED`).
+  Fix: `flash_safe_execute_core_init()` on core0 in `main()` (before
   `multicore_launch_core1`) and on core1 in a `core1_main()` wrapper
-  around the library's `commandProcessor()`. Details: the "littlefs
-  saves from the console fail" section below.
+  around the library's `commandProcessor()`. After flashing `d1778af`
+  the re-run saved successfully ("read-back verified"). Details: the
+  "littlefs saves from the console fail" section below.
 - **The write sequence is RE-ORDERED: config → lock → iokey** (was
   iokey → config → lock). Root cause: the ATECC608 refuses any
   data-zone write while the config zone is unlocked (bench: 32-byte
@@ -143,8 +148,9 @@ every step is idempotent except the lock):**
 - [x] 0. BOOTSEL-reflash `build/example/console/pico-atecc608.uf2`
   (the flashed image predates `48d14cc` — required before step 1;
   littlefs wipe is harmless, nothing is stored on it yet).
-  DONE at the bench 2026-10-23. (A SECOND reflash is still pending:
-  the littlefs fix `d1778af` — see the open item at the top.)
+  DONE at the bench 2026-10-23. (A SECOND reflash — the littlefs fix
+  `d1778af` — was also done at the bench 2026-10-23; it is what made
+  the `prov iokey` save succeed.)
 - [x] 1. `prov status` (read-only) — pin down the chip state before any
   write: factory (36-byte diff vs the planned image, chip-zone CRC
   4AB4) → start at step 2. "writable region: matches the planned
@@ -185,16 +191,20 @@ every step is idempotent except the lock):**
   on littlefs is lost on reflash) + "saved to littlefs: /io_key.bin
   (read-back verified)". If it failed, re-run — the data zone is still
   unlocked and slot 14 still clear-writable (no lock was consumed).
-  DONE 2026-10-23 (chip half): key written + ACKed, printed (recorded
-  in the state list above). littlefs half FAILED ("saving /io_key.bin
-  FAILED") — firmware bug, fixed in `d1778af`. **Re-run `prov iokey`
-  after flashing the fix: it re-keys and saves; record the NEW key —
-  the printed one from this run is void.**
-- [ ] 7. `prov status` — expect: `config zone: LOCKED`, lock bytes 00
-  00. The chip-zone CRC will differ from BOTH earlier values: Lock
-  flips the lock bytes 55 55 → 00 00 (excluded from the compare, inside
-  the CRC). Expected chip-zone CRC after the lock: **6F47**
-  (host-computed). Expected, not a failure.
+  DONE 2026-10-23: key written + ACKed, printed (the durable key is in
+  the state list above), and "saved to littlefs: /io_key.bin (read-back
+  verified)". (The FIRST `prov iokey` attempt — before the `d1778af`
+  fix was flashed — wrote the chip but the littlefs save FAILED; the
+  re-run after the fix re-keyed slot 14 and saved cleanly. The key
+  printed on the first attempt is void.)
+- [x] 7. `prov status` — DONE 2026-10-23: `config zone: LOCKED`, data
+  zone unlocked, "writable region: matches the planned image", lock
+  bytes [86:88] **55 00**, chip-zone CRC **F6DE** (planned image 822F).
+  NOTE (corrected prediction): the config-zone Lock flips only byte 87
+  (the config-zone lock) 55→00; byte 86 (the data-zone lock) STAYS 55
+  because the data zone is not locked — so the post-lock zone is 55 00
+  / F6DE, NOT 00 00 / 6F47 (my original, wrong guess). Both bytes are
+  excluded from the writable compare but inside the CRC.
 
 ### littlefs saves from the console fail — root cause + fixed (`d1778af`)
 - **Symptom (bench, 2026-10-23):** `prov iokey` wrote the key to slot 14
@@ -455,8 +465,11 @@ unchanged; the fields that actually change are:
   **CDC7** (the planned image zeroes the factory region 0–15; the chip
   keeps its own bytes there — bench-confirmed + host-reproduced
   2026-10-23). `prov lock` locks with the chip's actual zone CRC —
-  **CDC7**; after the lock the zone CRC is expected to be **6F47**
-  (lock bytes 55 55 → 00 00).
+  **CDC7**; after the lock the zone CRC is **F6DE** (confirmed at the
+  bench 2026-10-23) — the config-zone Lock flips only byte 87
+  (config-zone lock) 55→00, byte 86 (data-zone lock) stays 55, so the
+  post-lock lock bytes are 55 00, NOT the 00 00 I first guessed (which
+  would have been 6F47).
 
 **I/O key (run AFTER `prov lock CONFIRM` — the data zone is not
 writable before it):** `prov iokey` = 8 × `get_rand_32()` from the
@@ -1002,14 +1015,15 @@ approves a specific write:
   bytes, and whether it is reversible.
 
 ## Next steps (Phase 4B — chip provisioning; STOP BOUNDARY)
-**Status (2026-10-23): PROVISIONING COMPLETE at the bench** — config
-zone written (approved plan, chip-zone CRC CDC7) + LOCKED (one-way
-step, user go-ahead), first I/O key written to slot 14 (chip ACKed,
-printed). Remaining: reflash the littlefs fix (`d1778af`), re-run
-`prov iokey` (re-key + atomic save — record the new key), `prov
-status` (step 7). Scenario discussion complete — config agreed (see
-"Agreed 4B config" above). `use_lock_en=false` until an auth flow
-exists.**
+**Status (2026-10-23): Phase 4B COMPLETE at the bench.** Config zone
+written (approved plan) + LOCKED (one-way step, user go-ahead); I/O
+key written to slot 14 (chip ACKed) AND saved to littlefs
+`/io_key.bin` (read-back verified) after flashing the littlefs fix
+(`d1778af`); final `prov status` = run-sheet step 7 confirmed
+(LOCKED, lock bytes 55 00, chip-zone CRC F6DE). The durable I/O key
+is recorded in the state list at the top. Scenario discussion
+complete — config agreed (see "Agreed 4B config" above).
+`use_lock_en=false` until an auth flow exists.**
 1. ~~Scenario walkthrough~~ — **done 2026-10-22.**
 2. ~~Draft README scenario guidance~~ — **done + user-reviewed 2026-10-22.**
    After the example/ reorg (`4f6b211`) the scenario guidance ("Application
