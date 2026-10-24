@@ -249,8 +249,13 @@ A single config struct drives init; everything else is a small, stable set.
       byte 16 (I2C address) and bytes 88..89 (SlotLocked; factory 0xFFFF,
       Lock-managed, bit n = 0 -> slot n locked) are preserved, never
       written.
-  - **Phase 4B — Chip provisioning (writes only after user approval).**
-    **Scenario discussion done 2026-10-22 — config agreed** (see RESUME.md,
+  - **Phase 4B — Chip provisioning (writes only after user approval) — DONE (2026-10-23).**
+    **Provisioning executed at the bench 2026-10-23** (see RESUME.md): config
+    zone written (approved plan, read-back verified) + LOCKED (one-way, user
+    go-ahead); I/O key in slot 14 (chip ACKed) + saved to littlefs
+    `/io_key.bin` (read-back verified); final `prov status` = LOCKED / lock
+    bytes 55 00 / chip-zone CRC F6DE; data zone still UNLOCKED. **Scenario
+    discussion done 2026-10-22 — config agreed** (see RESUME.md,
     "Agreed 4B config"): one *locked* config usable by all apps — "lock the
     layout, keep the contents open" (all slots `write_config=0`/`req_auth=0`,
     priv slots `gen_key=1`, `lockable=1` where later slot-locks are wanted).
@@ -402,11 +407,16 @@ the Lock command owns bytes 86–87.
 - Transport-level per-payload protection would be a custom, HAL-level
   implementation — **out of scope** unless a consumer specifically needs it.
 
-## Current state (verified on hardware, 2026-10-18)
+## Current state (verified on hardware, 2026-10-23)
 
-- Chip: **ATECC608C**, I2C **0x60**, unprovisioned, config zone **unlocked**.
+- Chip: **ATECC608C**, I2C **0x60**, **PROVISIONED + config zone LOCKED**
+  (Phase 4B, 2026-10-23 — one-way; the config zone can never be re-written).
   Serial `01 23 06 40 AE B6 B9 B7 EE`. INFO `00 00 60 05` (part 0x60, rev 5).
-- RNG streams `FF FF 00 00 ...` pre-provisioning (normal for a fresh chip).
+  Config zone = approved plan (chip-zone CRC F6DE, lock bytes 55 00); I/O key
+  in slot 14 (chip ACKed) + `/io_key.bin` on littlefs; data zone still
+  UNLOCKED (contents open per the agreed layout). See RESUME.md.
+- RNG: the `FF FF 00 00 ...` factory pattern was only pre-provisioning
+  (before the config lock); a locked chip returns real random.
 - Firmware: the **cryptoauthlib v3.8.0 path is live** — `src/hal_rp2350.c`
   (RP2350 I2C HAL, wake handshake incl. full-handshake fallback retries,
   stuck-bus recovery, 10 ms timeouts) + `src/atecc608.c` (the curated
@@ -420,8 +430,11 @@ the Lock command owns bytes 86–87.
   `../cryptoauthlib` is a development reference only.
 - **Phase 4A complete (2026-10-18, dev-only):** config builder + guarded
   provisioning API + host unit tests with a mock chip HAL — `ctest` 2/2
-  green, Pico build warning-clean, **chip still untouched** (4B writes remain
-  gated on user approval; see the 4B verification flags in Phase 4A).
+  green, Pico build warning-clean.
+- **Phase 4B complete (2026-10-23, on-chip):** provisioning executed at the
+  bench — config zone written (read-back verified) + LOCKED, I/O key in slot
+  14 (chip ACKed) + saved to littlefs. See RESUME.md (run sheet, CRC notes,
+  the littlefs flash-lockout fix `d1778af`).
 
 ## Open items (resolve during implementation — not re-opens)
 
