@@ -1,30 +1,42 @@
 # Resume notes (pico-atecc608)
 
-Pause point: **2026-10-23 — the write SEQUENCE was re-ordered by a
-bench discovery and the code is fixed (`48d14cc`); the byte plan
-(bytes, CRC 822F) is unchanged and stays approved; the NEW ORDER
-(reflash → status → config → lock CONFIRM → iokey) must be re-presented
-and approved before the one-way lock step.** Discovery: the ATECC608
-refuses any data-zone write while the config zone is unlocked — so
-`prov iokey` (a data write) can only run AFTER `prov lock CONFIRM`.
+Pause point: **2026-10-23 — EXECUTING the re-ordered write sequence at
+the bench; step 2 (`prov config`) is DONE — the config zone holds the
+approved planned image, read-back verified, chip-zone CRC **CDC7**
+(the planned-image CRC stays 822F — the gap is the zeroed factory
+region 0–15 in the planned image; see the CRC note). Next: `prov
+status` (step 3) → `prov lock` dry (step 4) → **`prov lock CONFIRM`
+(step 5, ONE-WAY — explicit user go-ahead)** → `prov iokey` (step 6,
+record the printed key) → `prov status` (step 7).** The byte plan
+(bytes, CRC 822F) is unchanged and stays approved. Original discovery
+behind the order: the ATECC608 refuses any data-zone write while the
+config zone is unlocked — so `prov iokey` (a data write) can only run
+AFTER `prov lock CONFIRM`.
 The I/O-protection bricking concern is RESOLVED (see the new findings
 section): I/O protection protects the I/O of ECDH/KDF/Verify/SecureBoot,
 not the I2C transport — the chip stays reachable with plain commands
 after the lock, so the approved config needs no change. Every failed
-`prov iokey` was refused by the chip with no commit — **the chip is
-still untouched (factory zone = the backup below)**. This file is a
-continuity snapshot — update it at each pause. The forward plan lives in
-`PLAN.md`; this file captures the exact working state and the concrete
-next steps.
+`prov iokey` (pre-re-order) was refused by the chip with no commit —
+the factory-zone backup below is the pre-write record. **The chip is
+no longer factory-fresh: `prov config` has written the planned image
+to the config zone (step 2); the zone stays re-writable until `prov
+lock CONFIRM`.** This file is a continuity snapshot — update it at
+each pause. The forward plan lives in `PLAN.md`; this file captures
+the exact working state and the concrete next steps.
 
 ## ⏸ Where the conversation stopped (read this first on resume)
-HEAD is `48d14cc` (working tree clean). **The chip is still untouched**
-— every failed `prov iokey` was rejected by the chip
-(ATCA_EXECUTION_ERROR, no commit). On resume: do NOT re-litigate the
-byte plan (approved 2026-10-23, unchanged, planned image CRC 822F);
-the ONLY open item is the re-ordered write SEQUENCE below — present it
-to the user, get the go-ahead, then execute at the bench. Scenario
-guidance is user-reviewed (2026-10-22) and lives in `example/README.md`.
+HEAD is `45cb322` (working tree clean). **The config zone has been
+written + verified at the bench (run-sheet step 2, 2026-10-23) but is
+NOT locked** — the one-way step is still ahead. On resume: do NOT
+re-litigate the byte plan (approved 2026-10-23, unchanged, planned
+image CRC 822F); continue the run sheet below: `prov status` (step 3 —
+expect chip-zone CRC CDC7, no writable-region diff) → `prov lock`
+(step 4 — dry, aborts without CONFIRM, prints the CRC it will use:
+CDC7) → **`prov lock CONFIRM` (step 5, ONE-WAY — explicit user
+go-ahead)** → `prov iokey` (step 6 — **RECORD the printed 64-hex key**)
+→ `prov status` (step 7 — expect `config zone: LOCKED`, lock bytes 00
+00, chip-zone CRC 6F47). Scenario guidance is user-reviewed (2026-10-22)
+and lives in `example/README.md`.
 
 State at the pause:
 - **The write sequence is RE-ORDERED: config → lock → iokey** (was
@@ -53,17 +65,29 @@ State at the pause:
   individually locked slots refuse writes); `t_iokey` restructured,
   `t_lock_data_zone` / `t_lock_data_slot` updated; console messages +
   help updated. Pico build green, host ctest 2/2.
-- The console uf2 on the bench **predates `48d14cc` — reflash
-  `build/example/console/pico-atecc608.uf2` first** (manual BOOTSEL
-  drag; drive label **RP2350** on the Pico 2; littlefs wipe is
-  harmless — nothing is stored on it yet, the I/O key has not been
-  generated).
+- ~~The console uf2 on the bench predates `48d14cc` — reflash
+  `build/example/console/pico-atecc608.uf2` first~~ **DONE at the bench
+  2026-10-23** (manual BOOTSEL drag; drive label **RP2350** on the
+  Pico 2; the littlefs wipe was harmless — nothing was stored on it,
+  the I/O key had not been generated).
 - Read-only bench steps done: probe / info / serial / lock +
   `prov status`. The factory-zone dump below is the recorded output;
   **verified** — its CRC-16 = 4AB4 = the device's own print, and the
   device's 38-byte diff list matches a recomputation from the dump + the
-  builder image exactly. It is the pre-write backup; the zone stays
-  re-writable until Lock.
+  builder image exactly. It is the pre-write backup (the config zone
+  has since been re-written by `prov config` — step 2; the zone stays
+  re-writable until Lock).
+- **`prov config` done at the bench (2026-10-23, run-sheet step 2):**
+  output = planned image CRC 822F → one write pass → "verified: chip
+  zone matches the planned image" → chip-zone CRC **CDC7**. The CDC7
+  vs 822F gap is EXPECTED and host-reproduced the same day (4AB4 /
+  4FE8 / 822F / CDC7 all match the bench prints): the planned image
+  zeroes the factory region 0–15 (the builder does not model it) while
+  the chip keeps its real factory bytes there; the read-back verify
+  (`writable_equal`) skips 0–15 and 86–87, both CRCs cover all 128
+  bytes. `prov lock` will lock with **CDC7** — the chip re-verifies
+  the CRC against its own zone, so a wrong value is rejected by the
+  chip itself.
 - **`prov randtest`: CONFIRMED by the user (2026-10-23)** — it printed
   the 0xFFFF0000 factory pattern, as expected for an unlocked zone (4B
   verification item: resolved).
@@ -83,22 +107,34 @@ State at the pause:
 plan stays approved — the NEW ORDER needs the user's go-ahead before
 the one-way step, step 5). Progress (check off as the bench proceeds;
 every step is idempotent except the lock):**
-- [ ] 0. BOOTSEL-reflash `build/example/console/pico-atecc608.uf2`
+- [x] 0. BOOTSEL-reflash `build/example/console/pico-atecc608.uf2`
   (the flashed image predates `48d14cc` — required before step 1;
   littlefs wipe is harmless, nothing is stored on it yet).
-- [ ] 1. `prov status` (read-only) — pin down the chip state before any
+  DONE at the bench 2026-10-23.
+- [x] 1. `prov status` (read-only) — pin down the chip state before any
   write: factory (36-byte diff vs the planned image, chip-zone CRC
   4AB4) → start at step 2. "writable region: matches the planned
-  image" + chip-zone CRC 822F → a `prov config` already landed → skip
+  image" + chip-zone CRC CDC7 → a `prov config` already landed → skip
   to step 4. Anything else → STOP and report.
-- [ ] 2. `prov config` — expect: "planned image (chip's byte 16 = 0xC0,
+  DONE 2026-10-23: factory state confirmed (dump = pre-write backup,
+  36-byte diff, CRC 4AB4).
+- [x] 2. `prov config` — expect: "planned image (chip's byte 16 = 0xC0,
   bytes 88..89 = FF FF): summary CRC 822F", one write pass, "verified:
-  chip zone matches the planned image", chip-zone CRC 822F.
+  chip zone matches the planned image", chip-zone CRC **CDC7** — NOT
+  822F (the planned image zeroes the factory region 0–15; the chip
+  keeps its real factory bytes there; the read-back verify skips 0–15
+  and 86–87 while the CRC covers all 128 bytes — host-verified
+  2026-10-23: CDC7 = CRC(factory 0–15 + planned 16–127)).
+  DONE 2026-10-23: actual output matches this exactly (822F / verify OK
+  / chip-zone CRC CDC7).
 - [ ] 3. `prov status` — expect: "writable region: matches the planned
-  image", "summary CRC: chip zone 822F  planned image 822F".
+  image", "summary CRC: chip zone CDC7  planned image 822F".
 - [ ] 4. `prov lock` — verifies the zone, then aborts (no confirm typed).
-- [ ] 5. `prov lock CONFIRM` — **ONE-WAY**: Lock with summary CRC 822F
-  → OK. The config zone can never change again (the data zone stays
+  It prints the CRC it will use: CDC7.
+- [ ] 5. `prov lock CONFIRM` — **ONE-WAY**: Lock with summary CRC
+  **CDC7** (the chip's actual zone CRC — the chip re-verifies it
+  against its own zone, so a wrong value is rejected by the chip
+  itself) → OK. The config zone can never change again (the data zone stays
   UNLOCKED — contents open per the agreed layout). After this step the
   data zone becomes writable.
 - [ ] 6. `prov iokey` — expect: "I/O protection key written to slot 14
@@ -108,9 +144,10 @@ every step is idempotent except the lock):**
   (read-back verified)". If it failed, re-run — the data zone is still
   unlocked and slot 14 still clear-writable (no lock was consumed).
 - [ ] 7. `prov status` — expect: `config zone: LOCKED`, lock bytes 00
-  00. The chip-zone CRC will differ from the planned-image CRC: Lock
+  00. The chip-zone CRC will differ from BOTH earlier values: Lock
   flips the lock bytes 55 55 → 00 00 (excluded from the compare, inside
-  the CRC). Expected, not a failure.
+  the CRC). Expected chip-zone CRC after the lock: **6F47**
+  (host-computed). Expected, not a failure.
 
 ### The SlotLocked (88–89) issue — found + fixed (`d6cf44d`)
 - The factory zone holds **FF FF** at 88–89 (SlotLocked); the builder
@@ -140,9 +177,16 @@ every step is idempotent except the lock):**
   the write, the verify still sees the same bytes.
 - **CRCs:** host tool (zeroed variant) = **4FE8** (unchanged); on-device
   planned image (chip's byte 16 = C0 + 88–89 = FF FF) = **822F** — what
-  `prov status` / `prov config` now print and what `prov lock` uses
-  (Lock takes the chip's actual zone CRC; after `prov config` that is
-  822F). (AA8F was the pre-fix on-device value — obsolete.)
+  `prov status` / `prov config` print as the *planned image's* CRC. The
+  chip's **actual zone** CRC after `prov config` is **CDC7, not 822F**:
+  the planned image zeroes the factory region 0–15 (the builder does
+  not model it) while the chip keeps its real factory bytes there, and
+  the read-back verify (`writable_equal`) skips 0–15 and 86–87, so
+  "verified: matches" and the two CRCs differ simultaneously — both
+  true. `prov lock` locks with the chip's actual zone CRC (**CDC7**).
+  All four values (4AB4 / 4FE8 / 822F / CDC7) host-reproduced
+  2026-10-23 against the bench output. (AA8F was the pre-fix on-device
+  value — obsolete.)
 
 ### Data-zone reads while unlocked — impossible (found at the bench 2026-10-23, fixed `009df06`)
 - **Symptom:** first `prov iokey` attempt printed "slot 14 is not
@@ -315,8 +359,12 @@ unchanged; the fields that actually change are:
   (this is the post-fix `prov status` diff; the pre-fix firmware listed
   38 bytes incl. 0x58/0x59 and CRC AA8F)
 - **Planned image summary CRC (on-device, with the preserved bytes):
-  822F.** `prov lock` locks with the CRC of the chip's actual zone,
-  which equals 822F after `prov config`.
+  822F.** The chip's **actual zone** CRC after `prov config` is
+  **CDC7** (the planned image zeroes the factory region 0–15; the chip
+  keeps its own bytes there — bench-confirmed + host-reproduced
+  2026-10-23). `prov lock` locks with the chip's actual zone CRC —
+  **CDC7**; after the lock the zone CRC is expected to be **6F47**
+  (lock bytes 55 55 → 00 00).
 
 **I/O key (run AFTER `prov lock CONFIRM` — the data zone is not
 writable before it):** `prov iokey` = 8 × `get_rand_32()` from the
