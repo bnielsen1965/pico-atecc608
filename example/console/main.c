@@ -32,6 +32,11 @@
 //                    possible — data slots are unreadable while the data
 //                    zone is unlocked) -> print 64 hex chars -> save
 //                    /io_key.bin (littlefs)
+//   prov iokeytest - READ-ONLY: functional check that slot 14's I/O key
+//                    matches /io_key.bin, via an I/O-protected KDF
+//                    round-trip (clear KDF vs decrypted output-encrypted
+//                    KDF). Safe any time after `prov iokey`; it writes
+//                    nothing and locks nothing.
 //   prov config    - WRITE: agreed intent -> config zone (byte 16 +
 //                    SlotLocked 88..89 preserved), read-back verified;
 //                    idempotent
@@ -64,6 +69,19 @@
 #include "atecc608/atecc608_config.h"
 #include "atecc608/atecc608_prov.h"
 #include "dev_config.h"
+// The I/O-key functional test (prov iokeytest) uses the raw KDF command and
+// the host-side I/O decrypt. The module API has no KDF wrapper yet (Phase 5
+// is "on demand"), so this example reaches into cryptoauthlib directly —
+// fine here because it is a diagnostic, not a library feature.
+//
+// Note: including cryptoauthlib.h (via atca_basic.h) re-surfaces the known
+// cosmetic `ATCA_TA_SUPPORT redefined` warning that the cryptoauth_core build
+// already emits — our generated atca_config.h defines it as `0`
+// (#cmakedefine01) and cryptoauthlib's atca_config_check.h redefines it as
+// `DEFAULT_DISABLED` (same value, different tokens; GCC has no flag to
+// silence an ordinary macro redefinition). It is harmless and unchanged.
+#include "atca_basic.h"
+#include "atca_host.h"
 
 #define I2C_BUS     i2c0
 #define I2C_SDA_PIN 20
@@ -147,6 +165,8 @@ static void commandHelp(char *cmdLine)
     printf("prov status   - chip state + config zone + diff vs planned image\n");
     printf("prov randtest - chip RNG x2 (0xFFFF0000 pattern while unlocked)\n");
     printf("prov iokey    - Pico TRNG -> slot 14 (after prov lock) -> print -> save\n");
+    printf("prov iokeytest- verify slot 14's I/O key via an I/O-protected KDF\n");
+    printf("                (read-only; uses the key saved in /io_key.bin)\n");
     printf("prov config   - write the agreed config zone (idempotent)\n");
     printf("prov lock     - LOCK the config zone (IRREVERSIBLE; add CONFIRM)\n");
 }
@@ -512,6 +532,147 @@ static void provIokey(void)
     printf("saved to littlefs: %s (read-back verified)\n", PROV_IOKEY_PATH);
 }
 
+// prov iokeytest — READ-ONLY functional verification of the I/O-protection
+// key in slot 14, against the copy saved in /io_key.bin. The chip's write ACK
+// alone cannot prove the key is usable (a read-back verify is impossible —
+// data slots are unreadable while the data zone is unlocked, and slot 14 is
+// is_secret), so this runs an I/O-protected KDF round-trip:
+//   1. read the I/O key from /io_key.bin (magic/len/CRC-32 checked)
+//   2. clear KDF (PRF, source=tempkey, target=output)      -> out_clear
+//   3. enc   KDF (PRF, source=tempkey, target=output_enc)  -> out_enc, nonce
+//   4. atcah_io_decrypt(out_enc, nonce, key-from-file)     (in place)
+//   5. PASS iff out_clear == the decrypted out_enc: the key in slot 14
+//      (chip) matches the saved key, and I/O protection works end-to-end.
+// It issues no data-zone READ/WRITE and no write/lock — safe to run any time
+// after `prov iokey`. Same pattern as cryptoauthlib's own
+// kdf_prf_output_encrypted, but the key comes from littlefs instead of a
+// hard-coded global. CAVEAT: that test runs against a config with the data
+// zone LOCKED; if this chip's KDF (target=output) is also gated on the data
+// zone / key lock, the KDF call fails and we print the exact ATCA_STATUS so
+// that case is distinguishable from a key mismatch.
+static void provIokeyTest(void)
+{
+    // 1. Load the saved I/O key.
+    iokey_file_t f;
+    int rd = pico_lfs_read_file(PROV_IOKEY_PATH, (uint8_t *)&f, sizeof(f));
+    if ((int)sizeof(f) != rd
+        || PROV_IOKEY_MAGIC != f.magic
+        || PROV_IOKEY_LEN != f.len) {
+        printf("cannot load the I/O key: %s is missing or corrupt — run\n"
+               "`prov iokey` first.\n", PROV_IOKEY_PATH);
+        return;
+    }
+    if (crc32_buf((const uint8_t *)&f, offsetof(iokey_file_t, crc32)) != f.crc32) {
+        printf("cannot load the I/O key: %s CRC-32 mismatch — run\n"
+               "`prov iokey` first.\n", PROV_IOKEY_PATH);
+        return;
+    }
+
+    // Chip lock state, printed for context if a KDF below is refused (see the
+    // data-zone/key-lock caveat in the failure message). I/O protection is
+    // active only with the config zone locked; the data zone and slot 14's
+    // individual lock are the states cryptoauthlib's own I/O-protected KDF
+    // test keeps locked.
+    {
+        bool locked = false;
+        atecc608_status_t st;
+        st = atecc608_is_locked(ATECC608_ZONE_CONFIG, &locked);
+        if (ATECC608_OK != st) {
+            report_fail("IS_LOCKED (config)", st);
+            return;
+        }
+        printf("config zone: %s\n", locked ? "LOCKED" : "unlocked");
+        st = atecc608_is_locked(ATECC608_ZONE_DATA, &locked);
+        if (ATECC608_OK != st) {
+            report_fail("IS_LOCKED (data)", st);
+            return;
+        }
+        printf("data zone:   %s\n", locked ? "LOCKED" : "unlocked");
+    }
+
+    // 2-3. A fixed, deterministic input shared by both KDF runs: a 32-byte
+    // nonce (the PRF source, loaded into tempkey) and a 16-byte message.
+    uint8_t nonce[32];
+    for (int i = 0; i < 32; i++) {
+        nonce[i] = (uint8_t)i;
+    }
+    uint8_t msg[16];
+    for (int i = 0; i < 16; i++) {
+        msg[i] = (uint8_t)i;
+    }
+    uint8_t out_clear[64];
+    uint8_t out_enc[64];
+    uint8_t out_nonce[32];
+    // PRF, 32-byte source key, 64-byte target, no AEAD processing, 16-byte
+    // message (its length lives in bits 24..31 of the details word).
+    uint32_t details = KDF_DETAILS_PRF_KEY_LEN_32
+                     | KDF_DETAILS_PRF_TARGET_LEN_64
+                     | KDF_DETAILS_PRF_AEAD_MODE0
+                     | ((uint32_t)sizeof(msg) << 24);
+    const uint8_t mode = KDF_MODE_ALG_PRF | KDF_MODE_SOURCE_TEMPKEY;
+    ATCA_STATUS atca;
+
+    atca = atcab_nonce(nonce);
+    if (ATCA_SUCCESS != atca) {
+        printf("NONCE (clear) failed: ATCA_STATUS %d\n", (int)atca);
+        return;
+    }
+    atca = atcab_kdf(mode | KDF_MODE_TARGET_OUTPUT, 0x1234, details,
+                     msg, out_clear, NULL);
+    if (ATCA_SUCCESS != atca) {
+        printf("clear KDF failed: ATCA_STATUS %d\n", (int)atca);
+        printf("if ATCA_STATUS is -12 (execution error), the KDF is likely\n"
+               "gated on the data-zone/key lock: cryptoauthlib's own\n"
+               "I/O-protected KDF test runs against a data-zone-LOCKED config.\n"
+               "The key is still on the chip — re-test after locking the data\n"
+               "zone (or slot 14). This is NOT a key mismatch.\n");
+        return;
+    }
+
+    atca = atcab_nonce(nonce);
+    if (ATCA_SUCCESS != atca) {
+        printf("NONCE (enc) failed: ATCA_STATUS %d\n", (int)atca);
+        return;
+    }
+    atca = atcab_kdf(mode | KDF_MODE_TARGET_OUTPUT_ENC, 0x1234, details,
+                     msg, out_enc, out_nonce);
+    if (ATCA_SUCCESS != atca) {
+        printf("encrypted KDF failed: ATCA_STATUS %d\n", (int)atca);
+        printf("(same data-zone/key-lock caveat as above if this is -12)\n");
+        return;
+    }
+
+    // 4. Decrypt the encrypted output with the saved key (in place).
+    atca_io_decrypt_in_out_t dec = {
+        .io_key    = f.key,
+        .out_nonce = out_nonce,
+        .data      = out_enc,
+        .data_size = sizeof(out_enc),
+    };
+    atca = atcah_io_decrypt(&dec);
+    if (ATCA_SUCCESS != atca) {
+        printf("I/O decrypt failed: ATCA_STATUS %d\n", (int)atca);
+        return;
+    }
+
+    // 5. Compare the clear result with the decrypted encrypted result.
+    if (0 == memcmp(out_clear, out_enc, sizeof(out_clear))) {
+        printf("I/O key test PASSED: slot 14 matches %s and the I/O-\n"
+               "protection path works (clear KDF == decrypted KDF).\n", PROV_IOKEY_PATH);
+        printf("clear KDF (64 B): ");
+        atecc608_print_hex(out_clear, sizeof(out_clear));
+    } else {
+        printf("I/O key test FAILED: the decrypted KDF does not match the clear\n"
+               "KDF — the key in slot 14 does NOT match %s.\n", PROV_IOKEY_PATH);
+        printf("clear KDF:     ");
+        atecc608_print_hex(out_clear, sizeof(out_clear));
+        printf("decrypted KDF: ");
+        atecc608_print_hex(out_enc, sizeof(out_enc));
+        printf("re-run `prov iokey` to re-key slot 14 (safe: the data zone is\n"
+               "still unlocked).\n");
+    }
+}
+
 // prov config — WRITE (reversible while the zone is unlocked): build the
 // agreed intent, provision (unlocked check -> read -> preserve byte 16 and
 // SlotLocked 88..89 -> write -> read-back verify), report the result + the
@@ -654,13 +815,15 @@ static void commandProv(char *cmdLine)
         provRandtest();
     } else if (take_word(&rest, "iokey")) {
         provIokey();
+    } else if (take_word(&rest, "iokeytest")) {
+        provIokeyTest();
     } else if (take_word(&rest, "config")) {
         provConfig();
     } else if (take_word(&rest, "lock")) {
         provLock(rest);
     } else {
-        printf("usage: prov status | prov randtest | prov iokey | prov config"
-               " | prov lock [CONFIRM]\n");
+        printf("usage: prov status | prov randtest | prov iokey | prov iokeytest"
+               " | prov config | prov lock [CONFIRM]\n");
     }
 }
 
