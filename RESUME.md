@@ -11,9 +11,12 @@ flashed, and the save now succeeds. Final `prov status` (run-sheet
 step 7): `config zone: LOCKED`, data zone unlocked, lock bytes
 `55 00` (byte 87 = config-zone lock flipped 55→00; byte 86 = data-zone
 lock stays 55), chip-zone CRC **F6DE**. The durable I/O key is
-recorded in the state list below. Next: `PLAN.md` Phases 5–7 — the
-first item is the functional I/O-key verification (an I/O-protected
-transaction), which uses the key below.**
+recorded in the state list below. Next (2026-10-24): the functional
+I/O-key verification command `prov iokeytest` is **BUILT (`8aa8922`)
+but not yet flashed** — flash the new uf2 and run it (read-only; see
+the "⏸ Where the conversation stopped" section for the expected result
+and the data-zone/key-lock risk). The chip RNG now returns real random
+(config zone locked), resolving that 4B verification item.**
 The byte plan (bytes, CRC 822F) is unchanged and stays approved.
 Original discovery behind the write order: the ATECC608 refuses any
 data-zone write while the config zone is unlocked — so `prov iokey`
@@ -27,8 +30,7 @@ The forward plan lives in `PLAN.md`; this file captures the exact
 working state and the concrete next steps.
 
 ## ⏸ Where the conversation stopped (read this first on resume)
-Working tree is clean; the flashed firmware is `d1778af` (the
-littlefs fix). **Phase 4B is COMPLETE — the chip is fully
+Working tree is clean. **Phase 4B is COMPLETE — the chip is fully
 provisioned** (config zone written + LOCKED; I/O key in
 slot 14, chip ACKed, and saved to littlefs `/io_key.bin` read-back
 verified; final `prov status` = run-sheet step 7 confirmed LOCKED /
@@ -37,9 +39,28 @@ re-provision the chip — the config zone is locked one-way (it can
 never be re-written), and re-running `prov iokey` would re-key slot
 14 (only do that if you deliberately want a fresh key; the previous
 key is then void). The durable I/O key is recorded in the state list
-below (and in `/io_key.bin` on the Pico). Next: `PLAN.md` Phases
-5–7 — the first item is the functional I/O-key verification (an
-I/O-protected transaction that reads the key from `/io_key.bin`).
+below (and in `/io_key.bin` on the Pico).
+
+**Next (2026-10-24): flash the new uf2, then run `prov iokeytest`.**
+The functional I/O-key verification command is **BUILT (commit
+`8aa8922`) but NOT yet flashed** — the flashed firmware is still
+`d1778af`. `prov iokeytest` is **READ-ONLY**: an I/O-protected KDF
+round-trip (clear KDF vs the decrypted output-encrypted KDF, key read
+from `/io_key.bin`); it issues no data-zone READ/WRITE and no write/
+lock, so it is safe to run any time. Expected: "I/O key test PASSED".
+**KNOWN RISK (flagged by the user):** if this ATECC608 gates the KDF
+(target=output) on the data-zone/key lock, the KDF fails with an
+execution error and the command prints the ATCA_STATUS plus a note that
+this is **NOT a key mismatch** (re-test after locking the data zone).
+cryptoauthlib's own I/O-protected KDF test runs against a
+data-zone-LOCKED config, so the bench settles whether the unlocked data
+zone is an obstacle.
+
+**RNG (user-reported 2026-10-24):** with the config zone now LOCKED,
+`random` / `prov randtest` return real random numbers (the 0xFFFF0000
+factory pattern is gone) — the documented behavior (the pattern appears
+only while the config zone is unlocked). This resolves the 4B
+hardware-verification item "Random command on the (now) locked chip".
 Scenario guidance is user-reviewed (2026-10-22) and lives in
 `example/README.md`.
 
