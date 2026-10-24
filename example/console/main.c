@@ -53,6 +53,7 @@
 
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
+#include "pico/flash.h"
 #include "pico/bootrom.h"
 #include "pico/rand.h"
 #include "hardware/gpio.h"
@@ -682,8 +683,28 @@ static struct command_t commands[] = {
     {"prov", commandProv},
 };
 
+// core1 entry point: the command handlers (and their littlefs writes) run
+// on this core. Both cores must be initialized as flash lockout "victims"
+// so that a core inside flash_safe_execute() can stop the other one
+// during program/erase — required whenever multicore_launch_core1() is
+// used (SDK: pico/flash.h). Without it, flash_safe_execute() on the
+// calling core returns PICO_ERROR_NOT_PERMITTED, which surfaces as
+// LFS_ERR_IO from littlefs: every flash-backed write from the console
+// (e.g. `prov iokey` saving /io_key.bin) fails while reads still work.
+static void core1_main(void)
+{
+    flash_safe_execute_core_init();
+    commandProcessor();
+}
+
 int main(void) {
     initPicoStdio();
+
+    // See core1_main: make core0 a flash lockout victim too. Called before
+    // multicore_launch_core1() so core1's first flash_safe_execute() finds
+    // core0 ready (the boot-time littlefs format below works even without
+    // it — core1 is not running yet — but keep the standard order).
+    flash_safe_execute_core_init();
 
     atecc608_status_t st = atecc608_init(&s_cfg);
     if (ATECC608_OK == st) {
@@ -723,6 +744,6 @@ int main(void) {
     // The command processor (core1) blocks on a semaphore, so it must be
     // initialized before the core is launched.
     initCommandProcessor(commands, sizeof(commands) / sizeof(commands[0]));
-    multicore_launch_core1(commandProcessor);
+    multicore_launch_core1(core1_main);
     picoConsole();
 }
