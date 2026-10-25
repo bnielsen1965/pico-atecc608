@@ -302,15 +302,64 @@ A single config struct drives init; everything else is a small, stable set.
     requires the data zone LOCKED — the ATECC608 gates the KDF target=output
     on the data-zone lock (confirmed: −12 with the data zone unlocked). But
     GenKey generates a fresh ECC private key only while the data zone is
-    UNLOCKED (locked → public-key recompute only, on a first-gen 608). So the
-    on-chip ECC pairs (slot 1 identity, slots 3–6 FIDO2, slot 12 spare) must
-    be GenKey'd **BEFORE** the data zone is locked. This revises the Phase 4B
-    "data zone left UNLOCKED" layout (the vault needs it locked). Sequence:
+    UNLOCKED (locked → public-key recompute only). So the on-chip ECC pairs
+    (slot 1 identity, slots 3–6 FIDO2, slot 12 spare) must be GenKey'd
+    **BEFORE** the data zone is locked. This revises the Phase 4B "data zone
+    left UNLOCKED" layout (the vault needs it locked). Sequence:
     GenKey the ECC pairs (data zone still unlocked) → lock the data zone
     (byte 86, one-way, typed confirm) → run `prov iokeytest` (the built,
     byte-for-byte cryptoauthlib-reference I/O-key round-trip — passes once the
     data zone is locked) → (production) slot-lock slot 14 (after the
     verification, so it stays re-keyable until proven).
+  - **Chip memory-layout findings (2026-10-24, datasheet-verified,
+    DS40002138A / DS40002515B):** the ATECC608 data zone is NOT 16×32 bytes —
+    it is 1,208 bytes with VARIABLE slot sizes: slots 0–7 = 36 B, slot 8 =
+    416 B, slots 9–15 = 72 B (identical across A/B/C). The repo's 32-byte
+    read/write convention addresses the first 32 bytes of a slot and works
+    for every slot we use (bench-verified: the 32-B I/O-key write to 72-B
+    slot 14 committed). Consequences: (a) a STORED public key (an off-chip
+    signer key for on-chip Verify) is 72 B (4 pad + 32 X + 4 pad + 32 Y) and
+    fits only in the 72-B slots 9–15 — the agreed config's slot 0 (36 B,
+    "firmware validation primary") CANNOT hold one, so on-chip firmware
+    Verify must use slot 11 (72 B) or verification moves Pico-side (decision
+    deferred to the firmware-signing phase); (b) the public key of an on-chip
+    ECC PRIVATE key slot is NOT stored in any data slot — it comes from the
+    GenKey command: mode 0x04 (fresh private key, data zone must be UNLOCKED,
+    64-B public key returned on the bus) or mode 0x00 (recompute from the
+    stored private key, works at any time, even locked).
+    `atecc608_read_pubkey` wraps `atcab_read_pubkey` — a slot READ of a 72-B
+    stored public key (slots 8–15 only) — the wrong primitive for "public key
+    of the private key in slot N"; Phase 5+ adds `atecc608_get_pubkey(slot,
+    pub)` wrapping `atcab_get_pubkey` (GenKey mode 0x00), with mock support
+    (the mock models GenKey mode 0x04 only today) + a host test. Chip
+    identity: part 0x60 rev 5 maps to ATECC608B (CA2) in cryptoauthlib's
+    part/rev table (pkcs11_token.c) — the earlier "first-gen" note was a
+    misread; the CA2 data-zone gates (KDF target=output needs the lock, fresh
+    GenKey needs it unlocked) apply to this chip and match every bench
+    observation.
+  - **Phase 5+ command design (sketch, 2026-10-24):** console adds
+    `prov genkey <slot>` (allowlist 1, 3–6, 12 — the ECC private slots;
+    guards: data zone UNLOCKED, else refuse — a locked zone would not create
+    a fresh key — plus a config-zone check that the slot is ECC private with
+    the GenKey bit; prints the 64-B public key in hex; warns that re-running
+    REPLACES the key and voids any DB binding to it), `prov lockdata` (typed
+    CONFIRM, wraps the existing `atecc608_lock_data_zone`; one-way), and
+    `prov lockslot <slot>` (typed CONFIRM, wraps `atecc608_lock_data_slot`;
+    the chip enforces the slot's Lockable flag). All three are thin console
+    wrappers over the existing Phase 4A prov API — no new library code except
+    `atecc608_get_pubkey`.
+  - **FIDO2 pre-generation (2026-10-24 sketch):** fresh GenKey is only
+    possible before the data-zone lock, so the four FIDO2 credential keys
+    (slots 3–6) are pre-generated at provisioning. `MakeCredential` ASSIGNS
+    the next unused pre-generated slot (a littlefs DB tracks credID + user
+    handle + RP ID hash + slot index) and returns the slot's public key via
+    `atecc608_get_pubkey`; `GetAssertion` looks the slot up by RP ID hash and
+    signs on-chip (ext_sig is enabled for slots 3–6 in the locked config).
+    Constraints: max 4 resident credentials; no new credential keys after the
+    lock; a compromised credential is remediated by RP-side revocation. This
+    deviates from the usual FIDO2 "fresh key per MakeCredential" (the keys
+    are fresh but created at provisioning) — document it in the conformance
+    notes.
   - **Done when:** at least a KDF round-trip is validated on hardware — the
     `prov iokeytest` I/O-key round-trip is the first such validation, and it
     lands after the data-zone lock in the sequence above.
@@ -441,7 +490,11 @@ the Lock command owns bytes 86–87.
   byte-for-byte the cryptoauthlib reference) is deferred to the Phase 5+ flow:
   GenKey ECC pairs → lock data zone (byte 86, one-way) → run `prov iokeytest`
   → slot-lock slot 14. For now the I/O key is verified to the extent the chip
-  allows (write ACK + littlefs read-back). See RESUME.md.
+  allows (write ACK + littlefs read-back). See RESUME.md. The concrete Phase
+  5+ design (new `prov genkey` / `prov lockdata` / `prov lockslot` commands,
+  the `atecc608_get_pubkey` wrapper, the FIDO2 pre-generation scheme, and the
+  datasheet memory-map findings) is recorded in the Phase 5 section above
+  (2026-10-24).
 - RNG: the `FF FF 00 00 ...` factory pattern was only pre-provisioning
   (before the config lock); a locked chip returns real random.
 - Firmware: the **cryptoauthlib v3.8.0 path is live** — `src/hal_rp2350.c`

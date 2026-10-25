@@ -90,6 +90,48 @@ proven). The I/O-key verification is DEFERRED to that flow; for now the I/O
 key is verified to the extent the chip allows (write ACK + littlefs
 read-back).
 
+**2026-10-24 (this session):**
+(1) **The "a Pico reflash wipes the littlefs copy" warning was WRONG —
+verified against the flash layout.** The app uf2 covers only the app region
+(flash 0x0..~0x19000, ~100 KB) and the littlefs volume is
+0x80000..0x200000 (384 × 4 KB blocks, `PICO_LFS_FLASH_OFFSET = 0x80000`);
+a normal BOOTSEL reflash writes only the app's uf2 blocks, so the volume —
+and `/io_key.bin` — SURVIVE a reflash. Only a full-flash erase (or an app
+growing past 0x80000) wipes it. `f52eb35` fixes the two misleading messages
+(`prov iokey` output + the boot warning) and adds the test: `prov status`
+now reports the littlefs volume state (existing = survived the last reflash,
+recorded at boot from `pico_lfs_mount_existing()` success/failure, vs fresh
+= formatted at boot) and the `/io_key.bin` state (present+valid / present
+but corrupt / missing). **The next flash loads `f52eb35` — and that flash is
+itself the first live test**: afterwards `prov status` should say "mounted
+existing" + "present and valid".
+(2) **The Phase 5+ sketch is recorded in PLAN.md (Phase 5 section):**
+`prov genkey <slot>` / `prov lockdata` / `prov lockslot <slot>` — thin
+console wrappers over the existing Phase 4A prov API — plus a new library
+`atecc608_get_pubkey(slot, pub)` wrapping `atcab_get_pubkey` (GenKey mode
+0x00: the public key of an on-chip ECC private key slot is NOT stored in any
+data slot; the existing `atecc608_read_pubkey` wraps `atcab_read_pubkey`, a
+72-B stored-key slot read for slots 8–15 — the wrong primitive), and the
+FIDO2 pre-generation design (slots 3–6 generated before the data-zone lock;
+`MakeCredential` assigns pre-generated slots; littlefs DB tracks
+credID/handle/RP-hash/slot).
+(3) **Datasheet memory-map finding (recorded in PLAN.md):** the ATECC608
+data zone is 1,208 bytes with VARIABLE slot sizes — slots 0–7 = 36 B,
+slot 8 = 416 B, slots 9–15 = 72 B (DS40002138A / DS40002515B; identical
+across A/B/C) — NOT 16×32. The repo's 32-byte read/write convention
+(first 32 bytes of a slot) works for all our slots (bench-verified: the
+32-B I/O-key write to 72-B slot 14 committed). A stored 72-B public key
+(4 pad + 32 X + 4 pad + 32 Y) fits only in the 72-B slots 9–15, so slot 0
+(36 B, "firmware validation primary") cannot hold the firmware-validation
+public key — on-chip Verify must use slot 11 (72 B) or verification moves
+Pico-side (decision deferred to the firmware-signing phase).
+(4) **Chip identity correction:** part 0x60 rev 5 maps to **ATECC608B
+(CA2, second-gen)** in cryptoauthlib's part/rev table
+(`lib/pkcs11/pkcs11_token.c`: part 0x60, rev > 2 → 608B) — the "first-gen"
+note above was a misread. It changes nothing operationally: the CA2
+data-zone gates (KDF target=output needs the data zone locked; fresh GenKey
+needs it unlocked) apply to this chip and match every bench observation.
+
 **RNG (user-reported 2026-10-24):** with the config zone now LOCKED,
 `random` / `prov randtest` return real random numbers (the 0xFFFF0000
 factory pattern is gone) — the documented behavior (the pattern appears
