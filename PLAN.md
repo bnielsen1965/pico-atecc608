@@ -297,7 +297,23 @@ A single config struct drives init; everything else is a small, stable set.
       committed.
 - **Phase 5 — Crypto pass-through (on demand).** `kdf` / `sign` / `verify` /
   `genkey` / `read_pubkey` wrappers, added as consumers need them.
-  - **Done when:** at least a KDF round-trip is validated on hardware.
+  - **Data-zone lock + ECC-key ordering (2026-10-24 finding, from
+    `prov iokeytest` at the bench):** the vault's KDF (target=output)
+    requires the data zone LOCKED — the ATECC608 gates the KDF target=output
+    on the data-zone lock (confirmed: −12 with the data zone unlocked). But
+    GenKey generates a fresh ECC private key only while the data zone is
+    UNLOCKED (locked → public-key recompute only, on a first-gen 608). So the
+    on-chip ECC pairs (slot 1 identity, slots 3–6 FIDO2, slot 12 spare) must
+    be GenKey'd **BEFORE** the data zone is locked. This revises the Phase 4B
+    "data zone left UNLOCKED" layout (the vault needs it locked). Sequence:
+    GenKey the ECC pairs (data zone still unlocked) → lock the data zone
+    (byte 86, one-way, typed confirm) → run `prov iokeytest` (the built,
+    byte-for-byte cryptoauthlib-reference I/O-key round-trip — passes once the
+    data zone is locked) → (production) slot-lock slot 14 (after the
+    verification, so it stays re-keyable until proven).
+  - **Done when:** at least a KDF round-trip is validated on hardware — the
+    `prov iokeytest` I/O-key round-trip is the first such validation, and it
+    lands after the data-zone lock in the sequence above.
 - **Phase 6 — Sample / diagnostic app.** The `example/console/` console
   exercises the library API (probe/info/serial/random were wired in Phase 3;
   add a config read-back demo) — it uses the module, not the raw driver.
@@ -415,6 +431,17 @@ the Lock command owns bytes 86–87.
   Config zone = approved plan (chip-zone CRC F6DE, lock bytes 55 00); I/O key
   in slot 14 (chip ACKed) + `/io_key.bin` on littlefs; data zone still
   UNLOCKED (contents open per the agreed layout). See RESUME.md.
+- **Data-zone lock required (2026-10-24 finding):** the vault's KDF
+  (target=output) requires the data zone LOCKED — the ATECC608 gates the KDF
+  target=output on the data-zone lock (`prov iokeytest` returned −12 with the
+  data zone unlocked; every cryptoauthlib KDF test asserts the data zone
+  locked). But GenKey makes a fresh ECC private key only while the data zone
+  is UNLOCKED, so the ECC pairs (1, 3–6, 12) must be generated before the
+  data-zone lock. The I/O-key verification (`prov iokeytest`, built and
+  byte-for-byte the cryptoauthlib reference) is deferred to the Phase 5+ flow:
+  GenKey ECC pairs → lock data zone (byte 86, one-way) → run `prov iokeytest`
+  → slot-lock slot 14. For now the I/O key is verified to the extent the chip
+  allows (write ACK + littlefs read-back). See RESUME.md.
 - RNG: the `FF FF 00 00 ...` factory pattern was only pre-provisioning
   (before the config lock); a locked chip returns real random.
 - Firmware: the **cryptoauthlib v3.8.0 path is live** — `src/hal_rp2350.c`

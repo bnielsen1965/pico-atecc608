@@ -11,12 +11,23 @@ flashed, and the save now succeeds. Final `prov status` (run-sheet
 step 7): `config zone: LOCKED`, data zone unlocked, lock bytes
 `55 00` (byte 87 = config-zone lock flipped 55→00; byte 86 = data-zone
 lock stays 55), chip-zone CRC **F6DE**. The durable I/O key is
-recorded in the state list below. Next (2026-10-24): the functional
-I/O-key verification command `prov iokeytest` is **BUILT (`8aa8922`)
-but not yet flashed** — flash the new uf2 and run it (read-only; see
-the "⏸ Where the conversation stopped" section for the expected result
-and the data-zone/key-lock risk). The chip RNG now returns real random
-(config zone locked), resolving that 4B verification item.**
+recorded in the state list below. The chip RNG now returns real random
+(config zone locked), resolving that 4B verification item.
+
+**The functional I/O-key test `prov iokeytest` was BUILT (`8aa8922`),
+flashed, and RUN (2026-10-24): `clear KDF failed: ATCA_STATUS -12`
+(execution error), data zone UNLOCKED — the KNOWN-RISK case, now
+CONFIRMED on the real chip. It is NOT a key mismatch: the ATECC608 gates
+the KDF (target=output) on the data-zone lock. The finding carried
+forward: the VAULT's KDF also uses target=output, so the data zone MUST
+be locked for the password store to work (revising the agreed "data zone
+unlocked" layout); and GenKey makes a fresh ECC private key only while
+the data zone is UNLOCKED, so the ECC pairs (slots 1, 3–6, 12) must be
+generated BEFORE the data zone is locked. The I/O-key verification is
+deferred to the Phase 5+ flow: GenKey the ECC pairs → lock the data zone
+(byte 86, one-way) → run `prov iokeytest` → (production) slot-lock slot
+14. For now the I/O key is verified to the extent the chip allows (write
+ACK + littlefs read-back). See "⏸ Where the conversation stopped".**
 The byte plan (bytes, CRC 822F) is unchanged and stays approved.
 Original discovery behind the write order: the ATECC608 refuses any
 data-zone write while the config zone is unlocked — so `prov iokey`
@@ -41,20 +52,43 @@ never be re-written), and re-running `prov iokey` would re-key slot
 key is then void). The durable I/O key is recorded in the state list
 below (and in `/io_key.bin` on the Pico).
 
-**Next (2026-10-24): flash the new uf2, then run `prov iokeytest`.**
-The functional I/O-key verification command is **BUILT (commit
-`8aa8922`) but NOT yet flashed** — the flashed firmware is still
-`d1778af`. `prov iokeytest` is **READ-ONLY**: an I/O-protected KDF
-round-trip (clear KDF vs the decrypted output-encrypted KDF, key read
-from `/io_key.bin`); it issues no data-zone READ/WRITE and no write/
-lock, so it is safe to run any time. Expected: "I/O key test PASSED".
-**KNOWN RISK (flagged by the user):** if this ATECC608 gates the KDF
-(target=output) on the data-zone/key lock, the KDF fails with an
-execution error and the command prints the ATCA_STATUS plus a note that
-this is **NOT a key mismatch** (re-test after locking the data zone).
-cryptoauthlib's own I/O-protected KDF test runs against a
-data-zone-LOCKED config, so the bench settles whether the unlocked data
-zone is an obstacle.
+**`prov iokeytest` was BUILT (`8aa8922`), flashed, and RUN (2026-10-24)
+— it returned `clear KDF failed: ATCA_STATUS -12` (execution error) with
+the data zone UNLOCKED: the KNOWN-RISK case, now CONFIRMED on the real
+chip.** `prov iokeytest` is **READ-ONLY**: an I/O-protected KDF round-trip
+(clear KDF vs the decrypted output-encrypted KDF, key read from
+`/io_key.bin`); it issues no data-zone READ/WRITE and no write/lock, so it
+is safe to run any time. The −12 is **NOT a key mismatch** — the ATECC608
+gates the KDF (target=output) on the data-zone lock. Evidence:
+(1) this bench result (−12, data zone unlocked); (2) EVERY KDF test in
+cryptoauthlib (PRF/AES/HKDF, plain + I/O-encrypted — all target=output)
+calls `test_assert_data_is_locked()` before the command; (3) `provIokeyTest`
+in `example/console/main.c` is byte-for-byte the cryptoauthlib reference
+(`kdf_prf_output_encrypted`) — same details word, mode, 16-B message, nonce
+reload, out_nonce hand-off, `atcah_io_decrypt` — so it will **PASS** once the
+data zone is locked, provided the key matches.
+
+**The finding to carry forward (2026-10-24):** (1) the VAULT's KDF also uses
+target=output (source = slot 7 → 32-B derived key to the Pico for
+AES-256-GCM), so the **data zone MUST be locked** for the password store to
+work — this REVISes the agreed "data zone unlocked (contents open)" layout,
+which was built before we knew the KDF needed it. (2) On a first-gen
+ATECC608, GenKey generates a fresh ECC private key only while the data zone
+is UNLOCKED; when locked it only recomputes the public key from the existing
+private key (cryptoauthlib genkey test lines 35–38; its `data_is_unlocked`
+assert is gated to CA2/second-gen parts, NOT our 608). So the ECC pairs
+(slot 1 identity, slots 3–6 FIDO2, slot 12 spare) **must be GenKey'd BEFORE
+the data zone is locked**. Slot 7 (vault master) and slot 14 (I/O key) are
+unaffected — both non-ECC, Pico-entropy + Write, no GenKey. Locking the data
+zone does NOT close "the contents open": 32-byte writes to a
+non-individually-locked slot stay allowed (the access matrix below), so slots
+remain re-keyable until individually slot-locked. **Phase 5+ sequence:**
+GenKey the ECC pairs (data zone still unlocked) → lock the data zone (byte 86,
+one-way, typed confirm) → run `prov iokeytest` (passes) → (production)
+slot-lock slot 14 (after the verification, so it stays re-keyable until
+proven). The I/O-key verification is DEFERRED to that flow; for now the I/O
+key is verified to the extent the chip allows (write ACK + littlefs
+read-back).
 
 **RNG (user-reported 2026-10-24):** with the config zone now LOCKED,
 `random` / `prov randtest` return real random numbers (the 0xFFFF0000
@@ -538,6 +572,17 @@ rules until a slot is individually locked (slot-lock freezes contents, not
 use — KDF/sign from a locked slot still works). All slots: `write_config=0`,
 `req_auth=0`; priv slots `gen_key=1`; `lockable=1` on 0, 7, 8, 9, 10, 11,
 14; `use_lock_en=false` (no auth flow yet).
+
+**REVISION (2026-10-24, from the `prov iokeytest` bench finding):** the
+"data zone left UNLOCKED (contents open)" part of the layout is being
+revised — the **data zone MUST be locked** for the password store to work,
+because the vault's KDF (and the I/O-key verification KDF) use target=output,
+which the ATECC608 gates on the data-zone lock. Locking the data zone does NOT
+close "the contents open": 32-byte writes to a non-individually-locked slot
+stay allowed (the access matrix), so slots remain re-keyable until individually
+slot-locked. The catch: GenKey generates a fresh ECC private key only while the
+data zone is UNLOCKED, so the ECC pairs (1, 3–6, 12) must be generated BEFORE
+the data zone is locked. See "⏸ Where the conversation stopped".
 
 Slots (16): 0 = EC pub, firmware validation (primary); 1 = EC priv + 2 = EC
 pub, device identity; 3–6 = EC priv ×4, FIDO2 credentials; 7 = non-ECC
