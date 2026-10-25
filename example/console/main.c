@@ -23,7 +23,8 @@
 // Phase 4B provisioning commands (the agreed config is
 // example/common/dev_config.h; scenarios in example/README.md):
 //   prov status    - read-only: chip state + config-zone dump + diff vs
-//                    the planned image
+//                    the planned image + /io_key.bin littlefs persistence
+//                    (did the I/O-key file survive the last reflash?)
 //   prov randtest  - read-only: chip RNG x2; the 0xFFFF0000 factory pattern
 //                    is expected while the config zone is unlocked
 //   prov iokey     - WRITE (AFTER `prov lock CONFIRM` — the chip refuses
@@ -103,6 +104,16 @@ typedef struct {
     uint32_t crc32;
 } iokey_file_t;
 
+// littlefs volume state, recorded at boot in main(). Distinguishes a volume
+// that SURVIVED the last reflash (an existing volume mounted) from one that
+// had to be formatted (first boot, or a full-flash erase). A normal uf2 reflash
+// writes only the app region (flash 0x0..~0x19000) and never touches the
+// littlefs volume (flash offset 0x80000), so the volume — and /io_key.bin —
+// normally survive; only a full-flash erase (or an app that grows past
+// 0x80000) loses them.
+enum { LFS_STATE_NONE = 0, LFS_STATE_EXISTING = 1, LFS_STATE_FRESH = 2 };
+static int s_lfs_state = LFS_STATE_NONE;
+
 // Standard reflected CRC-32 (poly 0xEDB88320, init/xorout 0xFFFFFFFF).
 static uint32_t crc32_buf(const uint8_t *buf, size_t len)
 {
@@ -162,7 +173,7 @@ static void commandHelp(char *cmdLine)
     printf("info    - atecc608_info (part id + silicon revision)\n");
     printf("serial  - atecc608_serial (9-byte factory serial)\n");
     printf("lock    - atecc608_is_locked (config / data zone)\n");
-    printf("prov status   - chip state + config zone + diff vs planned image\n");
+    printf("prov status   - chip state + config zone + diff + /io_key.bin persistence\n");
     printf("prov randtest - chip RNG x2 (0xFFFF0000 pattern while unlocked)\n");
     printf("prov iokey    - Pico TRNG -> slot 14 (after prov lock) -> print -> save\n");
     printf("prov iokeytest- verify slot 14's I/O key via an I/O-protected KDF\n");
@@ -300,6 +311,45 @@ static void print_zone(const char *label, const uint8_t *zone)
     }
 }
 
+// reportIokeyPersistence — the read-only test for "did /io_key.bin survive the
+// last reflash?". Prints the volume state (existing = survived, fresh =
+// formatted at boot) and the file state (present+valid / present but corrupt /
+// missing). No writes. Wired into `prov status`; safe to run after any reflash.
+static void reportIokeyPersistence(void)
+{
+    if (LFS_STATE_NONE == s_lfs_state) {
+        printf("littlefs: not mounted at boot (init or mount FAILED) — cannot check %s\n",
+               PROV_IOKEY_PATH);
+        return;
+    }
+    printf("littlefs volume: %s\n",
+           (LFS_STATE_FRESH == s_lfs_state)
+               ? "formatted fresh at boot (first boot or a full-flash erase)"
+               : "mounted existing (survived the last reflash)");
+
+    struct lfs_info fi;
+    if (0 != pico_lfs_stat(PROV_IOKEY_PATH, &fi)) {
+        printf("  %s: MISSING%s\n", PROV_IOKEY_PATH,
+               (LFS_STATE_FRESH == s_lfs_state)
+                   ? " — expected on a fresh volume"
+                   : " — the volume survived but the file is gone");
+        printf("  if the chip is provisioned, re-run `prov iokey` and re-record the key.\n");
+        return;
+    }
+    iokey_file_t f;
+    int rd = pico_lfs_read_file(PROV_IOKEY_PATH, (uint8_t *)&f, sizeof(f));
+    bool ok = (sizeof(f) == (size_t)rd)
+           && (PROV_IOKEY_MAGIC == f.magic)
+           && (PROV_IOKEY_LEN == f.len)
+           && (crc32_buf((const uint8_t *)&f, offsetof(iokey_file_t, crc32)) == f.crc32);
+    if (!ok) {
+        printf("  %s: present but CORRUPT (size %d, magic/len/CRC mismatch) — re-run `prov iokey`\n",
+               PROV_IOKEY_PATH, rd);
+        return;
+    }
+    printf("  %s: present and valid (%u B key, magic + len + CRC ok)\n", PROV_IOKEY_PATH, f.len);
+}
+
 // prov status — read-only: chip state, the current config zone, and a
 // byte-by-byte diff vs the planned image (the agreed intent, with byte 16
 // patched to the chip's own address, as the prov path does).
@@ -384,6 +434,8 @@ static void provStatus(void)
             zone[87] == ATECC608_CONFIG_UNLOCKED) ? "unlocked" : "locked/other");
     printf("summary CRC: chip zone %04X  planned image %04X\n",
            atecc608_config_crc16(zone), atecc608_config_crc16(plan));
+
+    reportIokeyPersistence();
 }
 
 // The documented factory behavior of the Random command while the config
@@ -509,8 +561,9 @@ static void provIokey(void)
            "while the data zone is unlocked, and `prov config` marks the slot\n"
            "is_secret. The key is verified functionally by an I/O-protected\n"
            "transaction (Phase 7).\n");
-    printf("RECORD THIS — it is the durable backup (a Pico reflash wipes the\n"
-           "littlefs copy):\n");
+    printf("RECORD THIS — it is the durable backup. A normal uf2 reflash PRESERVES\n"
+           "the littlefs volume (it writes only the app region, not flash 0x80000+);\n"
+           "only a full-flash erase loses it. Run `prov status` to confirm it survived:\n");
     atecc608_print_hex(key, sizeof(key));
 
     iokey_file_t f;
@@ -882,22 +935,28 @@ int main(void) {
     // now; /vault.db and /fido2.db later (see example/README.md).
     if (0 == pico_lfs_init(NULL)) {
         // Mount the existing volume first; a failure means the volume is
-        // fresh (first boot, or a full reflash) and pico_lfs_mount()
-        // formats it.
+        // fresh (first boot, or a full-flash erase) and pico_lfs_mount()
+        // formats it. A normal uf2 reflash does NOT reach this branch — the
+        // app region and the littlefs volume (flash 0x80000+) are disjoint, so
+        // the existing volume mounts and /io_key.bin survives.
         if (0 != pico_lfs_mount_existing()) {
             printf("littlefs: no formatted volume — formatting (one-time; can take a while)...\n");
             if (0 != pico_lfs_mount()) {
                 printf("littlefs mount FAILED — %s persistence unavailable.\n", PROV_IOKEY_PATH);
             } else {
+                s_lfs_state = LFS_STATE_FRESH;
                 printf("littlefs: fresh volume formatted.\n");
             }
+        } else {
+            s_lfs_state = LFS_STATE_EXISTING;
         }
         if (pico_lfs_is_mounted()) {
             struct lfs_info fi;
             if (0 != pico_lfs_stat(PROV_IOKEY_PATH, &fi)) {
-                printf("WARNING: %s not found (first boot or reflash). If the chip\n"
-                       "         is already provisioned, re-run `prov iokey` and\n"
-                       "         re-record the key it prints.\n", PROV_IOKEY_PATH);
+                printf("WARNING: %s not found (first boot, or a full-flash erase — a\n"
+                       "         normal uf2 reflash preserves the volume). If the chip is\n"
+                       "         already provisioned, re-run `prov iokey` and re-record the key.\n",
+                       PROV_IOKEY_PATH);
             }
         }
     } else {
