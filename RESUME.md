@@ -1,8 +1,8 @@
 # Resume notes (pico-atecc608)
 
-Pause point: **2026-10-23 — Phase 4B is COMPLETE: the chip is fully
-PROVISIONED. The config zone holds the approved planned image and is
-LOCKED (the one-way step ran after explicit user go-ahead); the
+Pause point: **2026-10-24 — Phase 4B is COMPLETE (2026-10-23): the chip
+is fully PROVISIONED. The config zone holds the approved planned image and
+is LOCKED (the one-way step ran after explicit user go-ahead); the
 I/O key is in slot 14 (chip ACKed) AND saved to littlefs
 (`/io_key.bin`, read-back verified). The one bug found along the way —
 the littlefs save failed because flash lockout was never initialized
@@ -13,6 +13,15 @@ step 7): `config zone: LOCKED`, data zone unlocked, lock bytes
 lock stays 55), chip-zone CRC **F6DE**. The durable I/O key is
 recorded in the state list below. The chip RNG now returns real random
 (config zone locked), resolving that 4B verification item.
+Since then (2026-10-24): `prov iokeytest` was run (−12, the expected
+data-zone-lock gate — NOT a key mismatch); the littlefs persistence
+check landed (`f52eb35`) and PASSED its first live test — after
+flashing `f52eb35`, `prov status` reported the volume "mounted existing
+(survived the last reflash)" and "/io_key.bin: present and valid (32 B
+key, magic + len + CRC ok)", and the config zone was verified
+byte-identical to the approved plan (all 32 SlotConfig/KeyConfig values
+match, CRC F6DE, data zone still unlocked, counters 0/0).
+**`f52eb35` is the firmware live on the chip.**
 
 **The functional I/O-key test `prov iokeytest` was BUILT (`8aa8922`),
 flashed, and RUN (2026-10-24): `clear KDF failed: ATCA_STATUS -12`
@@ -51,6 +60,29 @@ never be re-written), and re-running `prov iokey` would re-key slot
 14 (only do that if you deliberately want a fresh key; the previous
 key is then void). The durable I/O key is recorded in the state list
 below (and in `/io_key.bin` on the Pico).
+
+**Latest state (2026-10-24, after the `f52eb35` reflash + `prov status`
+review):** `f52eb35` is flashed and LIVE on the chip. `prov status` was
+reviewed byte-for-byte the same day: the config zone is byte-identical
+to the approved plan (all 16 SlotConfig + 16 KeyConfig values match;
+factory region, I2C address, UpdateExtra, SlotLocked, ChipOptions and
+counters all as recorded; chip-zone CRC F6DE), the data zone is still
+UNLOCKED, and — the point of the reflash — the NEW littlefs persistence
+check PASSED LIVE: "littlefs volume: mounted existing (survived the last
+reflash)" + "/io_key.bin: present and valid (32 B key, magic + len + CRC
+ok)". The reflash did NOT wipe the volume (the app region
+0x0..~0x19000 and the volume 0x80000..0x200000 are disjoint).
+**Next work (Phase 5+, design recorded in PLAN.md):** implement
+`atecc608_get_pubkey(slot, pub)` (library wrapper over
+`atcab_get_pubkey` — GenKey mode 0x00; the public key of an on-chip ECC
+private key slot is not stored in any data slot) + mock support + host
+test, then the console commands `prov genkey <slot>` / `prov lockdata` /
+`prov lockslot <slot>` (thin wrappers over the existing Phase 4A prov
+API); after that the bench sequence: genkey 1, 3–6, 12 (record the
+public keys) → lockdata CONFIRM (one-way) → iokeytest (must pass) →
+lockslot 14 CONFIRM. The GenKey bit (SlotConfig 0x2000) is confirmed
+SET on slots 1, 3–6, 12 in the locked config, so the GenKey step is
+config-legal.
 
 **`prov iokeytest` was BUILT (`8aa8922`), flashed, and RUN (2026-10-24)
 — it returned `clear KDF failed: ATCA_STATUS -12` (execution error) with
@@ -102,9 +134,10 @@ growing past 0x80000) wipes it. `f52eb35` fixes the two misleading messages
 now reports the littlefs volume state (existing = survived the last reflash,
 recorded at boot from `pico_lfs_mount_existing()` success/failure, vs fresh
 = formatted at boot) and the `/io_key.bin` state (present+valid / present
-but corrupt / missing). **The next flash loads `f52eb35` — and that flash is
-itself the first live test**: afterwards `prov status` should say "mounted
-existing" + "present and valid".
+but corrupt / missing). **DONE + PASSED (2026-10-24):** the flash loaded
+`f52eb35` and `prov status` reported exactly that — "mounted existing" +
+"present and valid" (the check's first live test; the reflash did not
+wipe the volume).
 (2) **The Phase 5+ sketch is recorded in PLAN.md (Phase 5 section):**
 `prov genkey <slot>` / `prov lockdata` / `prov lockslot <slot>` — thin
 console wrappers over the existing Phase 4A prov API — plus a new library
