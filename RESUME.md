@@ -8,12 +8,15 @@ The bench sequence is COMPLETE — including the production-only
 `prov lockslot 14 CONFIRM` (executed 2026-10-26; the chip config is
 now frozen for production). Phase 7 is SCOPED (2026-10-26 — read-only
 `selftest` on-hardware suite + `docs/BRINGUP.md` bring-up checklist;
-scope in PLAN.md). Sub-step 7.1 is BUILT (2026-10-26, `0242df2` — the
-`selftest` console command runs the 8 generic invariants, read-only;
-the I/O-key round-trip core is now shared with `prov iokeytest`); the
+scope in PLAN.md). Sub-steps 7.1–7.3 are ALL BUILT (2026-10-26:
+`0242df2` selftest generic invariants + shared round-trip core;
+`c1708f6` bench-chip goldens + full/generic modes; `0d312a5`
+`docs/BRINGUP.md` bring-up checklist + example/README pointer); the
 current fully-locked config-zone CRC is **C904** (host-computed,
-cross-checked against both recorded CRCs — it is the 7.2 golden; see
-the newest "Latest state" paragraph). Awaiting the 7.4 bench run. Bench record: the ECC slots (1, 3–6, 12) are
+cross-checked against both recorded CRCs — the 7.2 golden; see the
+newest "Latest state" paragraph). The ONLY remaining step is 7.4: the
+bench run (reflash the 238,080 B uf2 → `selftest` — expect 12/12
+green). Bench record: the ECC slots (1, 3–6, 12) are
 GenKey'd
 (all six public keys recorded and verified in the "⏸ Where the
 conversation stopped" section below), the DATA ZONE IS LOCKED (one-way
@@ -492,6 +495,56 @@ bench).**
   (`0242df2`), Pico build warning-clean apart from the known cosmetic
   ATCA_TA_SUPPORT note; host tests 3/3. The 226,304 B build
   (`84edf05`) is still LIVE on the chip until the 7.4 bench reflash.
+
+**Latest state (2026-10-26, Phase 7.2 + 7.3 BUILT): `selftest` full
+mode (bench-chip goldens) and `docs/BRINGUP.md` are in. Only the 7.4
+bench run remains — Phase 7 is one user action from COMPLETE.**
+- 7.2 (`c1708f6`): the `BENCH_*` golden table at the top of the Phase 7
+  section of `example/console/main.c` (dev-only, NOT the library):
+  serial `01 23 06 40 AE B6 B9 B7 EE`, the six recorded ECC public keys
+  (slots 1, 3–6, 12), the slot-7 KDF value `6F FF 7D D6 …`, and the
+  fully-locked config-zone CRC `C904`. `selftest` (full mode) now runs
+  the 8 generic invariants and then 4 golden checks (serial, six
+  pubkeys, KDF value, config CRC) — HARD FAIL on any mismatch: the
+  regression gate proving the chip in front of you IS the recorded
+  bench chip, not just a correctly provisioned one. `selftest generic`
+  runs the invariants only (a fresh chip during bring-up; unknown extra
+  arguments are rejected with a usage line). The golden section reuses
+  data the generic checks already fetched (the zone for the CRC, the
+  first KDF derivation, the six public keys); a failed generic fetch
+  shows up in the golden as its own failure (e.g. a zeroed pubkey slot
+  mismatches), never as a read of uninitialized memory.
+- **Golden transcription verified host-side (2026-10-26):** a script
+  parsed both the `BENCH_*` table in main.c and the RESUME.md
+  record-of-choice entries and compared byte-for-byte — all six 64-B
+  public keys, the 9-B serial, the 32-B KDF value, and the CRC match.
+- 7.3 (`0d312a5`): `docs/BRINGUP.md` — the reusable fresh-chip
+  checklist: wiring table, flashing, first-boot expectations on a
+  factory-fresh chip (the `0xFFFF0000` RNG pattern is EXPECTED while
+  the config is unlocked; `selftest generic` fails by design on a fresh
+  chip — it validates a PROVISIONED chip), the proven provisioning
+  sequence in the exact bench order with the order constraints
+  explained (`prov iokey` after the config lock — data-zone writes are
+  gated on it; `prov genkey` before `prov lockdata` — fresh GenKey is
+  refused once the data zone locks; `prov iokeytest` after — the KDF
+  −12 gate; `prov lockslot 14` LAST and PRODUCTION ONLY), per-chip
+  golden recording (a new chip's CRC differs from C904 — the CRC
+  covers the chip-unique factory region), the known failure modes
+  (wake NACK, the littlefs flash-lockout bug `d1778af`, the KDF −12
+  data-zone gate, the 0xFFFF0000 pattern, the reflash/littlefs
+  interplay — a uf2 reflash never touches the volume at 0x80000, only
+  a full-flash erase does), and the dev-chip note: stop before
+  `lockslot 14` and expect exactly ONE selftest difference
+  (SlotLocked `FF FF` vs `FF BF`). Pointers added to example/README.md
+  (console section + locking-discipline section).
+- Build: uf2 now 238,080 B (`c1708f6`), Pico build warning-clean
+  apart from the known cosmetic ATCA_TA_SUPPORT note; host tests 3/3.
+  The 226,304 B build (`84edf05`) is still LIVE on the chip.
+- **7.4 bench run (user action, closes Phase 7):** flash the 238,080 B
+  uf2 → `selftest` — expect **12/12 PASS** (8 generic + 4 goldens);
+  optionally `selftest generic` (expect 8/8). Read-only throughout —
+  HARD RULE safe. If any check FAILs, the detail line names it; do NOT
+  re-provision — bring the output back.
 
 **`prov iokeytest` was BUILT (`8aa8922`), flashed, and RUN (2026-10-24)
 — it returned `clear KDF failed: ATCA_STATUS -12` (execution error) with
@@ -1244,13 +1297,15 @@ bit 13/14 behavior.
   hardware: the decoded zone matches the agreed plan in every field
   (I2C 0xC0, locks 00 00, SlotLocked FF BF, all 16 slot rows); the
   dev-only `prov iokeyshow` matched the out-of-band dev notes.
-- **Phase 7 in progress (2026-10-26)** — 7.1 BUILT (`0242df2`):
-  `selftest` runs the 8 generic invariants (read-only; the I/O-key
-  round-trip core is shared with `prov iokeytest`); the current
+- **Phase 7 in progress (2026-10-26)** — 7.1–7.3 BUILT
+  (`0242df2` `selftest`'s 8 generic invariants, read-only, shared
+  I/O-key round-trip core; `c1708f6` bench-chip goldens +
+  full/generic modes; `0d312a5` `docs/BRINGUP.md`); the current
   fully-locked config-zone CRC golden **C904** is host-computed and
-  cross-checked (CDC7 + F6DE both reproduced). Remaining: 7.2 bench
-  goldens + full mode, 7.3 `docs/BRINGUP.md`, 7.4 bench run.
-  HARD RULE below applies (the whole suite is read-only).
+  cross-checked (CDC7 + F6DE both reproduced); all goldens verified
+  byte-for-byte against the RESUME.md records. Remaining: 7.4 bench
+  run (reflash + `selftest` green — expect 12/12). HARD RULE below
+  applies (the whole suite is read-only).
 
 ## Build (verified green)
 ```sh
