@@ -10,14 +10,13 @@ PASSED** (2026-10-25, output + host cross-check recorded in the
 functionally VERIFIED end-to-end. The chip ENFORCES I/O protection
 (kdf_prot=1): every target=output KDF returns encrypted output + a
 32-B nonce and must be `atcah_io_decrypt`-ed with the I/O key (Phase 7
-design fact). **Phase 5's KDF wrapper is now IMPLEMENTED + host-tested**
-(2026-10-26, see the newest "Latest state" paragraph): the console has
-read-only `prov kdf <slot>`, the uf2 is rebuilt (218,112 B, NOT yet on
-the chip). NEXT bench step: flash the new uf2 → run `prov kdf 7` TWICE —
-identical 32-B output = determinism + the enforced-mode decrypt with
-/io_key.bin working through the WRAPPER (closes the Phase 5 done
-criterion). REMAINING bench items after that: `prov lockslot 14
-CONFIRM` (PRODUCTION ONLY — user decides when). Phase 4B:
+design fact). **Phase 5's KDF wrapper is IMPLEMENTED, host-tested, and
+VALIDATED ON HARDWARE** (2026-10-26: `prov kdf 7` ran twice with
+IDENTICAL 32-B output — determinism + the enforced-mode decrypt with
+/io_key.bin through the wrapper; the value and a host cross-check note
+are in the newest "Latest state" paragraph; the Phase 5 done criterion
+is met). ONLY REMAINING bench item: `prov lockslot 14 CONFIRM`
+(PRODUCTION ONLY — user decides when). Phase 4B:
 the chip is fully PROVISIONED. The config zone holds the approved
 planned image and
 is LOCKED (the one-way step ran after explicit user go-ahead); the
@@ -152,10 +151,10 @@ printed public key in RESUME.md) → `prov lockdata CONFIRM` (ONE-WAY) →
 (production only) `prov lockslot 14 CONFIRM`. **Progress 2026-10-25:
 flash + status + all six genkeys + `prov lockdata CONFIRM` +
 `prov iokeytest` (PASS, host cross-checked) ALL DONE — records in the
-paragraphs below; remaining (2026-10-26): the `prov kdf 7` wrapper
-round-trip (two identical runs — see the newest "Latest state"
-paragraph) + (production only) `prov lockslot 14 CONFIRM` — the user
-decides when (slot 14 stays re-keyable until then).**
+paragraphs below; the `prov kdf 7` wrapper round-trip is DONE 2026-10-26
+(two identical runs — see the "Latest state (2026-10-26)" paragraph
+below); remaining: (production only) `prov lockslot 14 CONFIRM` — the
+user decides when (slot 14 stays re-keyable until then).**
 
 **Latest state (2026-10-25, bench in progress): flash + GenKey DONE.**
 The Phase 5+ uf2 (215,040 B, `build/example/console/pico-atecc608.uf2`)
@@ -264,10 +263,10 @@ enforces I/O encryption), NOT a key mismatch.**
   **Host cross-check (same H(K,N) recipe): both calls decrypt to the
   SAME true PRF output — PASS independently confirmed:**
   `54 2C B9 5B 04 45 43 7A D3 93 23 19 DC 28 3E 29 0D F9 1F 66 18 71 A0 F7 BF 85 B2 6F 8C E8 0D B1 B4 35 AE A0 40 C4 D7 60 B7 4B BA 95 DE 98 4B 33 6F 89 BF 5C 5C 4B B1 68 32 C2 91 44 E4 4E AC 1A`.
-- **Bench sequence status (as of 2026-10-25): 1–5 of 6 DONE** (flash,
-  status, genkey ×6, lockdata, iokeytest PASS). **Remaining: the
-  `prov kdf 7` wrapper round-trip (added 2026-10-26 — see the next
-  paragraph) and `prov lockslot 14 CONFIRM` — PRODUCTION ONLY, one-way
+- **Bench sequence status: 1–5 of 6 DONE** (flash, status, genkey ×6,
+  lockdata, iokeytest PASS) + the `prov kdf 7` wrapper round-trip DONE
+  2026-10-26 (see the "Latest state (2026-10-26)" paragraph below).
+  **Remaining: `prov lockslot 14 CONFIRM` — PRODUCTION ONLY, one-way
   (SlotLocked byte for slot 14, FF→00); the user decides when to run it
   (now, or at production time). Until then slot 14 stays re-keyable** (a 32-B write to a
   non-individually-locked slot stays allowed with the data zone
@@ -345,15 +344,31 @@ rebuilt — NOT yet on the chip (the `0130207` build is still live).**
   (Pico build green; warning-clean apart from the known cosmetic
   ATCA_TA_SUPPORT note).
 
-**Next, at the bench (read-only — HARD-RULE safe):** flash the new uf2
-→ `prov kdf 7` TWICE: both runs must print the SAME 32 bytes —
-determinism of the fixed nonce+message AND the enforced-mode decrypt
-with /io_key.bin working through the WRAPPER (the Phase 5 done
-criterion "at least a KDF round-trip is validated on hardware", for
-the wrapper). Slot 7 currently holds all zeros (the vault master is
-never written — PRF from a zero key is well-defined), so the check is
-determinism + a successful decrypt, NOT a host-computable value (the
-mock's fake PRF ≠ the chip's SHA-256 PRF).
+**BENCH DONE (2026-10-26): the Phase 5 KDF round-trip is VALIDATED ON
+HARDWARE — the done criterion is met.** The rebuilt uf2 was flashed
+and `prov kdf 7` was run twice — both runs printed the SAME 32 bytes
+(record of choice):
+`6F FF 7D D6 41 75 60 3F  83 05 CE A6 20 F0 B9 32  57 29 50 26 D9 B4 DF 6B  CC 8D 6C 9D C1 31 4C 65`
+What the run proves: (1) the WRAPPER works end-to-end on the real
+chip — command framing (mode/details words), parsing of the 96-byte
+encrypted response (32-B target + 32-B nonce + overhead), the zero-init
+encrypted-detection, and the in-place `atcah_io_decrypt` with the
+/io_key.bin key; (2) DETERMINISM — fixed zero nonce + fixed message →
+identical re-derivation, the vault's core requirement; (3) slot 7 is
+an acceptable KDF source in the locked config. The I/O key used is the
+one iokeytest already functionally verified (wrong-key margin 2^-256).
+**Host cross-check NOTE (why the value is not host-computable):** the
+datasheet names PRF mode = the TLS 1.2 PRF (RFC 5246, P_SHA256), but
+the exact (secret, label, seed) mapping of the command's (key, nonce,
+msg) inputs is NOT public ("contact Microchip Sales"); nine host
+recomputation candidates with slot 7's known-zero key (HMAC-SHA256
+with nonce‖msg / msg‖nonce seeds, SHA-256 concatenation, plus
+role-swapped, counter-byte and unkeyed variants) do NOT match the
+printed value. The verdict therefore rests on
+determinism + the verified I/O key + the exercised wrapper path — NOT
+on a host model of the PRF. Do not "fix" the wrapper to match any such
+model; there is none. **Remaining bench item: `prov lockslot 14
+CONFIRM` (PRODUCTION ONLY — the user decides when).**
 
 **`prov iokeytest` was BUILT (`8aa8922`), flashed, and RUN (2026-10-24)
 — it returned `clear KDF failed: ATCA_STATUS -12` (execution error) with
@@ -1094,11 +1109,14 @@ bit 13/14 behavior.
   protection, host cross-checked — see "⏸ Where the conversation
   stopped"). HARD RULE below applies.
 - **Phase 5 in progress (2026-10-26)** — crypto pass-through, on demand:
-  the KDF wrapper `atecc608_kdf_prf` is implemented + host-tested (mock
-  KDF/NONCE + the enforced I/O-protection output side; ctest 3/3) and the
-  console has read-only `prov kdf <slot>`; the on-hardware round-trip
-  (two identical `prov kdf 7` runs) is the next bench step. `sign` /
-  `verify` wrappers come when Phase 7 needs them. HARD RULE below applies.
+  the KDF wrapper `atecc608_kdf_prf` is implemented, host-tested
+  (mock KDF/NONCE + the enforced I/O-protection output side; ctest 3/3),
+  and VALIDATED ON HARDWARE (2026-10-26: `prov kdf 7` twice → identical
+  32-B output — the Phase 5 done criterion "at least a KDF round-trip
+  validated on hardware" is met; value + host cross-check note in the
+  "Latest state (2026-10-26)" paragraph). The console has read-only
+  `prov kdf <slot>`. `sign` / `verify` wrappers come when Phase 7 needs
+  them. HARD RULE below applies.
 
 ## Build (verified green)
 ```sh

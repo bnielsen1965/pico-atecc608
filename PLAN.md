@@ -389,13 +389,16 @@ A single config struct drives init; everything else is a small, stable set.
     ctest 3/3 green). Console adds read-only `prov kdf <slot>` (fixed zero
     nonce + fixed 16-B message 0x00..0x0F → two runs must print the SAME
     32 B; I/O key from /io_key.bin) — the on-hardware KDF round-trip through
-    the wrapper. `sign` / `verify` wrappers come when Phase 7 needs them.
-  - **Done when:** at least a KDF round-trip is validated on hardware — the
-    `prov iokeytest` I/O-key round-trip was the first such validation
-    (landed after the data-zone lock in the sequence above; PASSED
-    2026-10-25), and the `prov kdf <slot>` wrapper round-trip (two identical
-    runs) closes the wrapper part (bench step 2026-10-26: flash the rebuilt
-    uf2 → `prov kdf 7` twice → identical 32-B output).
+    the wrapper (BENCH 2026-10-26: two identical 32-B outputs — validated;
+    value + host cross-check note in RESUME.md). `sign` / `verify` wrappers
+    come when Phase 7 needs them.
+  - **Done when: MET 2026-10-26** — at least a KDF round-trip is validated
+    on hardware: the `prov iokeytest` I/O-key round-trip (PASSED 2026-10-25,
+    landed after the data-zone lock in the sequence above) and the
+    `prov kdf <slot>` wrapper round-trip (2026-10-26: `prov kdf 7` twice →
+    identical 32-B output — determinism + enforced-mode decrypt through the
+    wrapper; value + host cross-check note in RESUME.md). The `sign` /
+    `verify` wrappers remain on demand (Phase 7).
 - **Phase 6 — Sample / diagnostic app.** The `example/console/` console
   exercises the library API (probe/info/serial/random were wired in Phase 3;
   add a config read-back demo) — it uses the module, not the raw driver.
