@@ -6,8 +6,10 @@ Phase 6 is COMPLETE (2026-10-26: the `config` read-back demo ran on
 hardware; the decoded zone matches the agreed plan, SlotLocked FF BF).
 The bench sequence is COMPLETE — including the production-only
 `prov lockslot 14 CONFIRM` (executed 2026-10-26; the chip config is
-now frozen for production). Bench record: the ECC slots (1, 3–6, 12)
-are GenKey'd
+now frozen for production). Phase 7 is SCOPED (2026-10-26 — read-only
+`selftest` on-hardware suite + `docs/BRINGUP.md` bring-up checklist;
+scope in PLAN.md). Bench record: the ECC slots (1, 3–6, 12) are
+GenKey'd
 (all six public keys recorded and verified in the "⏸ Where the
 conversation stopped" section below), the DATA ZONE IS LOCKED (one-way
 step executed 2026-10-25, verified by re-read), and **`prov iokeytest`
@@ -436,10 +438,10 @@ criterion is MET; the chip config is frozen for production.**
   pub-info, 15 plain non-ECC). The demo works end-to-end on the real
   chip through the module API.
 - The 226,304 B uf2 (`84edf05`) is the firmware LIVE on the chip.
-- (The user did not paste the `prov iokeyshow` output — the out-of-band
-  I/O key record remains the `prov iokey` console print in the state
-  list above + the key itself in slot 14; log it if the dev-notes
-  comparison is confirmed.)
+- `prov iokeyshow` output CONFIRMED to match the user's out-of-band
+  dev notes (2026-10-26, confirmed in chat): the littlefs copy, the
+  console print in the state list above, the dev notes, and slot 14 on
+  the chip are all the same key.
 
 **`prov iokeytest` was BUILT (`8aa8922`), flashed, and RUN (2026-10-24)
 — it returned `clear KDF failed: ATCA_STATUS -12` (execution error) with
@@ -1661,5 +1663,6 @@ Phase 6 (config read-back console demo) — COMPLETE 2026-10-26
 hardware run 2026-10-26, decoded zone matches the agreed plan,
 SlotLocked FF BF) together with the final bench step `prov lockslot 14
 CONFIRM` (EXECUTED 2026-10-26 — the chip config is frozen for
-production); next is Phase 7 (on-hardware validation + bring-up
-checklist).
+production); next is Phase 7 — SCOPED 2026-10-26 (read-only `selftest`
+suite: generic invariants + bench goldens; `docs/BRINGUP.md`
+bring-up checklist; scope in PLAN.md Phase 7).

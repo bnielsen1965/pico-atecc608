@@ -414,9 +414,63 @@ A single config struct drives init; everything else is a small, stable set.
     (build: MET 2026-10-26; hardware run: MET 2026-10-26 — first
     `config` run on the chip, decoded zone matches the agreed plan,
     SlotLocked FF BF; recorded in RESUME.md). **Phase 6: COMPLETE.**
-- **Phase 7 — On-hardware validation + regression + bring-up checklist.**
-  Full on-hardware suite; a documented, reusable bring-up checklist.
-  - **Done when:** suite green; checklist written.
+- **Phase 7 — On-hardware validation + regression + bring-up
+  checklist. (Scoped 2026-10-26.)** A read-only `selftest` console
+  command runs the full on-hardware suite; a documented, reusable
+  bring-up checklist covers a fresh chip + board. Every suite check is
+  READ-ONLY (ground rule 0; the bench chip is fully locked anyway).
+  **Deliverable 1 — `selftest` console command.** Ordered checks,
+  `[PASS]/[FAIL]` + one detail line each, final verdict
+  (`SELFTEST: n/n PASS` or the failure list). Two sub-modes:
+  `selftest` — generic invariants + the bench chip's golden values
+  (hard FAIL on mismatch: the regression gate); `selftest generic` —
+  invariants only (a fresh chip during bring-up).
+  - **Generic invariants** (any chip carrying the agreed config):
+    (1) `probe` + `info` — wake handshake, part 0x60 rev 5;
+    (2) `random` ×2 — not the 0xFFFF0000 factory pattern, fetches
+    differ; (3) config zone — `atecc608_config_parse` ok, lock bytes
+    00 00, SlotLocked FF BF, I2C 0xC0, writable region byte-identical
+    to the agreed `dev_config` image (the `prov status` diff is 0);
+    (4) config-zone CRC = F6DE; (5) counters = 0/0;
+    (6) `atecc608_get_pubkey` (mode 0x00) on slots 1, 3–6, 12 — 64 B,
+    non-zero, pairwise distinct (the ECC keys survive the data-zone
+    lock); (7) `atecc608_kdf_prf` (slot 7, zero nonce, fixed msg, key
+    from /io_key.bin) ×2 → identical — the vault's core guarantee
+    (deterministic re-derivation); (8) the `iokeytest` round-trip
+    (clear KDF vs the I/O-protected KDF) — the littlefs I/O key still
+    matches slot 14; (9) littlefs — volume mounted, /io_key.bin
+    present + magic/len/CRC ok.
+  - **Bench-chip goldens** (dev-only, compiled into the console
+    example — NOT part of the library): serial
+    `01 23 06 40 AE B6 B9 B7 EE`, the six recorded ECC public keys
+    (RESUME.md), the recorded KDF derived value `6F FF 7D D6 …`
+    (fixed zero nonce + fixed 00..0F msg), config CRC F6DE,
+    SlotLocked FF BF.
+  **Deliverable 2 — bring-up checklist (`docs/BRINGUP.md`).**
+  Reusable for a fresh ATECC608C + Pico 2: wiring/flash → first-boot
+  expectations (`probe`, `diag`, `info`, `serial`, the factory RNG
+  pattern while the config is unlocked) → the PROVEN provisioning
+  sequence in exact order (`prov status` → `prov config` → `prov lock
+  CONFIRM` → `prov iokey` → `prov genkey 1,3,4,5,6,12` → `prov
+  lockdata CONFIRM` → `prov iokeytest` → `prov lockslot 14 CONFIRM` →
+  final `prov status` → `selftest`) with the order constraints
+  explained (GenKey needs the data zone UNLOCKED; the KDF needs it
+  LOCKED; slot 14 last) → per-chip golden-value recording → known
+  failure modes (wake NACK / stuck bus, the littlefs flash-lockout bug
+  `d1778af`, the KDF −12 data-zone gate, the 0xFFFF0000 RNG pattern,
+  reflash/littlefs interplay).
+  **Out of scope for Phase 7:** the `sign`/`verify` wrappers (PLAN:
+  "added as consumers need them" — the FIDO2 / firmware-validation
+  consumers will pull them in); the vault itself (locked decision:
+  separate repo — Phase 7 validates the *module*, and the KDF path the
+  vault consumes is proven); a host-side mirror of the selftest (the
+  core `atecc608_*` API is not host-testable today, and mirroring
+  against the mock would mostly test the mock — revisit if the suite
+  grows).
+  **Sub-steps:** 7.1 `selftest` generic invariants → 7.2 bench
+  goldens + full mode → 7.3 `docs/BRINGUP.md` (+ pointer from
+  example/README) → 7.4 bench run: `selftest` green on the chip.
+  - **Done when:** suite green on hardware; checklist written.
 
 ## Ground rules (provisioning safeguards)
 
