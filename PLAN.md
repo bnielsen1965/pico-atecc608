@@ -402,8 +402,16 @@ A single config struct drives init; everything else is a small, stable set.
 - **Phase 6 — Sample / diagnostic app.** The `example/console/` console
   exercises the library API (probe/info/serial/random were wired in Phase 3;
   add a config read-back demo) — it uses the module, not the raw driver.
-  It is a demo, **not** a provisioning tool.
-  - **Done when:** the demo builds against the lib and runs on hardware.
+  It is a demo, **not** a provisioning tool. The config read-back demo
+  (top-level `config`: `atecc608_read_config_zone` +
+  `atecc608_config_parse`, decoded fields + per-slot policy table) is
+  BUILT 2026-10-26 (`84edf05`), host-verified against the agreed intent;
+  awaiting its first hardware run (bench step after the Phase 6 reflash).
+  A dev-only `prov iokeyshow` (print the littlefs I/O key for comparison
+  against the out-of-band copy) shipped in the same build; a production
+  application must not expose the key.
+  - **Done when:** the demo builds against the lib and runs on hardware
+    (build: MET 2026-10-26; hardware run: PENDING).
 - **Phase 7 — On-hardware validation + regression + bring-up checklist.**
   Full on-hardware suite; a documented, reusable bring-up checklist.
   - **Done when:** suite green; checklist written.
