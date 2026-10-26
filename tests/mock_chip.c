@@ -34,6 +34,20 @@
 //               UNLOCKED), param2 = slot; response = 64-byte public key
 //   INFO 0x30   param1 = 0 (revision); response = 4 bytes 00 00 60 05
 //   RANDOM 0x1B response = 32 bytes
+//   NONCE 0x16  param1 = 0x03 (pass-through; param2 0 = TempKey target);
+//               payload = the 32 bytes to store in the TempKey (a LOAD —
+//               the contents are stored, not random generation, bench
+//               verified); response = OK
+//   KDF 0x56    param1 = mode (PRF | source | target), param2 = key_id
+//               (source slot in the low byte), payload = 4 details bytes
+//               (LE; message length in the top byte) + the message.
+//               Only the PRF / source-slot / target-output combination is
+//               modeled. Gates: the data zone must be LOCKED (bench
+//               finding 2026-10-24/25) and the source slot must be a key
+//               slot. Fake PRF: out[i] = key[i%32] ^ nonce[i%32]
+//               ^ msg[i%msg_len] ^ i. With the I/O protection model on,
+//               the output is encrypted (atcah_io_decrypt — symmetric
+//               XOR) and a deterministic 32-byte nonce is appended.
 //
 // Lock-state bytes: config locked iff config[87] != 0x55, data locked iff
 // config[86] != 0x55 (calib_is_locked reads the block-2 word 5).
@@ -44,6 +58,7 @@
 
 #include "atecc608/atecc608_types.h"  // ATECC608_PUBKEY_LEN
 #include "cryptoauthlib.h"            // ATCAIface / ATCAIfaceCfg / hal_check_wake / atCRC / opcodes
+#include "atca_host.h"                // atcah_io_decrypt (the KDF I/O-protection model)
 
 // --- helpers --------------------------------------------------------------------
 
@@ -468,6 +483,98 @@ static void mock_handle_genkey(mock_chip_t *chip, uint8_t param1, uint16_t param
     mock_resp_data(chip, pub, sizeof(pub));
 }
 
+// NONCE 0x16: pass-through (mode 0x03, TempKey target, 32-byte input).
+// The payload's CONTENTS become the TempKey — bench-verified 2026-10-25:
+// atcab_nonce is a nonce-LOAD, not random generation.
+static void mock_handle_nonce(mock_chip_t *chip, uint8_t param1, uint16_t param2,
+                              const uint8_t *payload, uint16_t payload_len)
+{
+    if ((NONCE_MODE_PASSTHROUGH != param1) || (0u != param2) || (32u != payload_len)) {
+        mock_resp_exec(chip); // other nonce modes: not modeled
+        return;
+    }
+    memcpy(chip->tempkey, payload, 32u);
+    mock_resp_ok(chip);
+}
+
+// KDF 0x56: PRF, source=slot, target=output only (the combination the
+// module uses). See the header comment for the frame layout, gates and
+// the fake PRF.
+static void mock_handle_kdf(mock_chip_t *chip, uint8_t param1, uint16_t param2,
+                            const uint8_t *payload, uint16_t payload_len)
+{
+    const uint8_t mode = param1;
+    const uint16_t src_slot = (uint16_t)(param2 & 0xFFu);
+    const uint32_t details = (uint32_t)payload[0]
+                           | ((uint32_t)payload[1] << 8)
+                           | ((uint32_t)payload[2] << 16)
+                           | ((uint32_t)payload[3] << 24);
+    const uint8_t msg_len = (uint8_t)(details >> 24);
+    const uint8_t *msg = &payload[4];
+
+    if ((0u == msg_len) || (128u < msg_len) || (payload_len < (uint16_t)(4u + msg_len))) {
+        mock_resp_exec(chip);
+        return;
+    }
+    if ((KDF_MODE_ALG_PRF != (mode & KDF_MODE_ALG_MASK))
+        || (KDF_MODE_SOURCE_SLOT != (mode & KDF_MODE_SOURCE_MASK))
+        || (KDF_MODE_TARGET_OUTPUT != (mode & KDF_MODE_TARGET_MASK))) {
+        mock_resp_exec(chip); // any other mode combination: not modeled
+        return;
+    }
+    // The data-zone gate (bench-verified 2026-10-24/25): a KDF with
+    // target=output is refused while the data zone is unlocked.
+    if (!mock_data_locked(chip)) {
+        mock_resp_exec(chip);
+        return;
+    }
+    if ((15u < src_slot) || (0u == mock_key_cfg(chip, src_slot))) {
+        mock_resp_exec(chip); // not a (configured) key slot
+        return;
+    }
+
+    // Fake PRF (no SHA-256 in the mock): deterministic in (slot contents,
+    // TempKey, message), exactly like the real PRF is in (key, nonce,
+    // message).
+    const bool out64 = (KDF_DETAILS_PRF_TARGET_LEN_64 == (details & KDF_DETAILS_PRF_TARGET_LEN_MASK));
+    const uint16_t out_len = out64 ? 64u : 32u;
+    uint8_t out[64];
+    const uint8_t *key = &chip->data[src_slot * MOCK_DATA_SLOT_LEN];
+    for (uint16_t i = 0; i < out_len; i++) {
+        out[i] = (uint8_t)(key[i % MOCK_DATA_SLOT_LEN]
+                           ^ chip->tempkey[i % MOCK_DATA_SLOT_LEN]
+                           ^ msg[i % msg_len]
+                           ^ (uint8_t)i);
+    }
+    if (chip->kdf_io_prot) {
+        // kdf_prot=1 (bench-verified on this chip): the output arrives
+        // ENCRYPTED with a 32-byte response nonce appended. atcah_io_
+        // decrypt is a symmetric XOR keystream, so it doubles as the
+        // encryption. The response nonce is deterministic (and never
+        // all-zero, matching the library's no-nonce detection).
+        uint8_t rsp[96];
+        uint8_t nonce[32];
+        for (int i = 0; i < 32; i++) {
+            nonce[i] = (uint8_t)(0x5Au + (uint16_t)i);
+        }
+        atca_io_decrypt_in_out_t enc = {
+            .io_key    = chip->kdf_io_key,
+            .out_nonce = nonce,
+            .data      = out,
+            .data_size = out_len,
+        };
+        if (ATCA_SUCCESS != atcah_io_decrypt(&enc)) {
+            mock_resp_exec(chip);
+            return;
+        }
+        memcpy(rsp, out, out_len);
+        memcpy(&rsp[out_len], nonce, 32u);
+        mock_resp_data(chip, rsp, (uint16_t)(out_len + 32u));
+    } else {
+        mock_resp_data(chip, out, out_len);
+    }
+}
+
 // One command frame arrives with word address 0x03; the chip replies are
 // staged in chip->resp for the read-token / two-read sequence.
 static void mock_process_command(mock_chip_t *chip, const uint8_t *frame, uint16_t count)
@@ -504,6 +611,12 @@ static void mock_process_command(mock_chip_t *chip, const uint8_t *frame, uint16
         break;
     case ATCA_GENKEY:
         mock_handle_genkey(chip, param1, param2);
+        break;
+    case ATCA_NONCE:
+        mock_handle_nonce(chip, param1, param2, payload, payload_len);
+        break;
+    case ATCA_KDF:
+        mock_handle_kdf(chip, param1, param2, payload, payload_len);
         break;
     case ATCA_INFO:
         if (param1 == 0x00u) { // INFO_MODE_REVISION
@@ -564,6 +677,18 @@ void mock_chip_reset(mock_chip_t *chip)
     chip->config[89] = 0xFF;
 
     chip->present = true;
+}
+
+void mock_chip_set_kdf_io_prot(mock_chip_t *chip, const uint8_t io_key[32])
+{
+    memcpy(chip->kdf_io_key, io_key, sizeof(chip->kdf_io_key));
+    chip->kdf_io_prot = true;
+}
+
+void mock_chip_clear_kdf_io_prot(mock_chip_t *chip)
+{
+    chip->kdf_io_prot = false;
+    memset(chip->kdf_io_key, 0, sizeof(chip->kdf_io_key));
 }
 
 // --- the HAL (the symbols cryptoauthlib v3.8.0 expects) --------------------------------

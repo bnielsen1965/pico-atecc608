@@ -143,11 +143,14 @@ target_include_directories(cryptoauth_core PUBLIC
 # cryptoauthlib; the RP2350 I2C HAL (src/hal_rp2350.*) is module-internal
 # and lives in the cryptoauth_core target (see above).
 # Phase 4A adds the pure-logic config-zone builder (atecc608_config.c) and
-# the guarded provisioning API (atecc608_prov.c); both are HAL-agnostic and
-# are unit-tested on the host in tests/ (mock chip, no Pico).
+# the guarded provisioning API (atecc608_prov.c); Phase 5 adds the crypto
+# pass-through API (atecc608_crypto.c, KDF PRF with the enforced I/O-
+# protection decrypt path). All three are HAL-agnostic and are
+# unit-tested on the host in tests/ (mock chip, no Pico).
 add_library(atecc608 STATIC
     src/atecc608.c
     src/atecc608_config.c
+    src/atecc608_crypto.c
     src/atecc608_prov.c
     src/atecc608_status.c
 )

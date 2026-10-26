@@ -38,6 +38,11 @@
 //                    round-trip (clear KDF vs decrypted output-encrypted
 //                    KDF). Safe any time after `prov iokey`; it writes
 //                    nothing and locks nothing.
+//   prov kdf <slot> - READ-ONLY: 32-B KDF (PRF, source = data slot) via
+//                    the Phase 5 wrapper (atecc608_kdf_prf); fixed nonce
+//                    and message, so two runs print the SAME value — the
+//                    on-hardware KDF round-trip that closes PLAN.md
+//                    Phase 5. I/O key from /io_key.bin.
 //   prov config    - WRITE: agreed intent -> config zone (byte 16 +
 //                    SlotLocked 88..89 preserved), read-back verified;
 //                    idempotent
@@ -86,12 +91,14 @@
 
 #include "atecc608/atecc608.h"
 #include "atecc608/atecc608_config.h"
+#include "atecc608/atecc608_crypto.h"
 #include "atecc608/atecc608_prov.h"
 #include "dev_config.h"
 // The I/O-key functional test (prov iokeytest) uses the raw KDF command and
-// the host-side I/O decrypt. The module API has no KDF wrapper yet (Phase 5
-// is "on demand"), so this example reaches into cryptoauthlib directly —
-// fine here because it is a diagnostic, not a library feature.
+// the host-side I/O decrypt directly: it needs the 64-byte target length and
+// the opt-in output-encrypted variant, which the module's curated 32-byte
+// KDF wrapper (atecc608_kdf_prf, used by `prov kdf`) does not cover — fine
+// here because it is a diagnostic, not a library feature.
 //
 // Note: including cryptoauthlib.h (via atca_basic.h) re-surfaces the known
 // cosmetic `ATCA_TA_SUPPORT redefined` warning that the cryptoauth_core build
@@ -143,6 +150,28 @@ static uint32_t crc32_buf(const uint8_t *buf, size_t len)
         }
     }
     return crc ^ 0xFFFFFFFFu;
+}
+
+// Load the I/O key saved in /io_key.bin (magic/len/CRC-32 checked). Prints
+// the reason and returns false if the file is missing or corrupt.
+static bool load_io_key_file(uint8_t key[PROV_IOKEY_LEN])
+{
+    iokey_file_t f;
+    int rd = pico_lfs_read_file(PROV_IOKEY_PATH, (uint8_t *)&f, sizeof(f));
+    if ((int)sizeof(f) != rd
+        || PROV_IOKEY_MAGIC != f.magic
+        || PROV_IOKEY_LEN != f.len) {
+        printf("cannot load the I/O key: %s is missing or corrupt — run\n"
+               "`prov iokey` first.\n", PROV_IOKEY_PATH);
+        return false;
+    }
+    if (crc32_buf((const uint8_t *)&f, offsetof(iokey_file_t, crc32)) != f.crc32) {
+        printf("cannot load the I/O key: %s CRC-32 mismatch — run\n"
+               "`prov iokey` first.\n", PROV_IOKEY_PATH);
+        return false;
+    }
+    memcpy(key, f.key, sizeof(f.key));
+    return true;
 }
 
 // The planned config image for this bench chip: the agreed intent, with the
@@ -202,6 +231,7 @@ static void commandHelp(char *cmdLine)
     printf("prov pubkey <slot>  - public key of the slot's private key (read-only; works locked)\n");
     printf("prov lockdata [CONFIRM]    - LOCK the data zone (IRREVERSIBLE)\n");
     printf("prov lockslot <slot> [CONFIRM] - LOCK one data slot (IRREVERSIBLE)\n");
+    printf("prov kdf <slot> - 32-B KDF PRF from the slot (read-only; bench: run twice)\n");
 }
 
 static void commandBootrom(char *cmdLine)
@@ -646,18 +676,8 @@ static void provIokey(void)
 static void provIokeyTest(void)
 {
     // 1. Load the saved I/O key.
-    iokey_file_t f;
-    int rd = pico_lfs_read_file(PROV_IOKEY_PATH, (uint8_t *)&f, sizeof(f));
-    if ((int)sizeof(f) != rd
-        || PROV_IOKEY_MAGIC != f.magic
-        || PROV_IOKEY_LEN != f.len) {
-        printf("cannot load the I/O key: %s is missing or corrupt — run\n"
-               "`prov iokey` first.\n", PROV_IOKEY_PATH);
-        return;
-    }
-    if (crc32_buf((const uint8_t *)&f, offsetof(iokey_file_t, crc32)) != f.crc32) {
-        printf("cannot load the I/O key: %s CRC-32 mismatch — run\n"
-               "`prov iokey` first.\n", PROV_IOKEY_PATH);
+    uint8_t io_key[PROV_IOKEY_LEN];
+    if (!load_io_key_file(io_key)) {
         return;
     }
 
@@ -769,7 +789,7 @@ static void provIokeyTest(void)
 
     // 4. Decrypt the encrypted output with the saved key (in place).
     atca_io_decrypt_in_out_t dec = {
-        .io_key    = f.key,
+        .io_key    = io_key,
         .out_nonce = out_nonce,
         .data      = out_enc,
         .data_size = sizeof(out_enc),
@@ -793,7 +813,7 @@ static void provIokeyTest(void)
     memcpy(ref, out_clear, sizeof(ref));
     if (clear_had_nonce) {
         atca_io_decrypt_in_out_t dec2 = {
-            .io_key    = f.key,
+            .io_key    = io_key,
             .out_nonce = clear_nonce,
             .data      = ref,
             .data_size = sizeof(ref),
@@ -823,7 +843,7 @@ static void provIokeyTest(void)
         printf("decrypted KDF (64 B):  ");
         atecc608_print_hex(out_enc, sizeof(out_enc));
         printf("I/O key from %s (32 B): ", PROV_IOKEY_PATH);
-        atecc608_print_hex(f.key, sizeof(f.key));
+        atecc608_print_hex(io_key, sizeof(io_key));
     }
 }
 
@@ -1250,6 +1270,51 @@ static void provLockSlot(const char *rest)
     }
 }
 
+// prov kdf <slot> — READ-ONLY: derive 32 bytes with the Phase 5 KDF wrapper
+// (PRF, source = data slot, target = output) — the on-hardware KDF
+// round-trip that closes PLAN.md Phase 5 ("at least a KDF round-trip
+// validated on hardware"). A FIXED nonce (32 bytes of zero) and a FIXED
+// 16-byte message (0x00..0x0F, same as prov iokeytest) make the output
+// deterministic: two runs of `prov kdf 7` must print the SAME 32 bytes.
+// The I/O key comes from /io_key.bin because this chip enforces I/O
+// protection on KDF (kdf_prot=1) — the wrapper decrypts the response in
+// place when it carries a nonce. No data-zone reads or writes, no locks —
+// safe any time the data zone is locked (the chip's own gate).
+static void provKdf(const char *rest)
+{
+    uint8_t slot;
+    uint8_t msg[16];
+    uint8_t io_key[PROV_IOKEY_LEN];
+    uint8_t out[ATECC608_KDF_OUT_LEN];
+    atecc608_status_t st;
+
+    if (!parse_slot_arg(rest, &slot)) {
+        printf("usage: prov kdf <slot 0-15>\n");
+        return;
+    }
+    if (!load_io_key_file(io_key)) {
+        return;
+    }
+    for (int i = 0; i < 16; i++) {
+        msg[i] = (uint8_t)i;
+    }
+    st = atecc608_kdf_prf(slot, NULL, msg, sizeof(msg), io_key, out);
+    if (ATECC608_OK != st) {
+        report_fail("KDF", st);
+        if (ATECC608_ERR_EXEC == st) {
+            printf("the chip refused: KDF target=output is unavailable while\n"
+                   "the data zone is unlocked, or the slot is not configured\n"
+                   "as a key slot.\n");
+        }
+        return;
+    }
+    printf("derived value (32 B) from slot %u (fixed zero nonce, msg 00..0F):\n",
+           (unsigned)slot);
+    atecc608_print_hex(out, sizeof(out));
+    printf("run `prov kdf %u` again: identical output = deterministic.\n",
+           (unsigned)slot);
+}
+
 // Consume the whole word w at the start of *pline (it must be followed by
 // a space or end-of-line); advance past it and any following spaces.
 static bool take_word(char **pline, const char *w)
@@ -1293,10 +1358,12 @@ static void commandProv(char *cmdLine)
         provGenkey(rest);
     } else if (take_word(&rest, "pubkey")) {
         provPubkey(rest);
+    } else if (take_word(&rest, "kdf")) {
+        provKdf(rest);
     } else {
         printf("usage: prov status | prov randtest | prov iokey | prov iokeytest"
                " | prov config | prov lock [CONFIRM] | prov genkey <slot>"
-               " | prov pubkey <slot> | prov lockdata [CONFIRM]"
+               " | prov pubkey <slot> | prov kdf <slot> | prov lockdata [CONFIRM]"
                " | prov lockslot <slot> [CONFIRM]\n");
     }
 }

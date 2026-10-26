@@ -104,10 +104,11 @@ target_include_directories(mock_chip PUBLIC
 target_link_libraries(mock_chip PUBLIC ca_host)
 target_compile_options(mock_chip PRIVATE -Wall -Wextra)
 
-# The module under test: the HAL-agnostic Phase 4A sources only. (src/atecc608.c
-# is excluded — it needs the RP2350 HAL / pico-sdk.)
+# The module under test: the HAL-agnostic Phase 4A/5 sources only.
+# (src/atecc608.c is excluded — it needs the RP2350 HAL / pico-sdk.)
 add_library(atecc608_host STATIC
     ${MOD_ROOT}/src/atecc608_config.c
+    ${MOD_ROOT}/src/atecc608_crypto.c
     ${MOD_ROOT}/src/atecc608_prov.c
     ${MOD_ROOT}/src/atecc608_status.c
 )
@@ -138,3 +139,10 @@ target_link_libraries(test_prov PRIVATE
 )
 target_compile_options(test_prov PRIVATE -Wall -Wextra)
 add_test(NAME test_prov COMMAND $<TARGET_FILE:test_prov>)
+
+add_executable(test_crypto test_crypto.c)
+target_link_libraries(test_crypto PRIVATE
+    -Wl,--start-group atecc608_host mock_chip ca_host -Wl,--end-group
+)
+target_compile_options(test_crypto PRIVATE -Wall -Wextra)
+add_test(NAME test_crypto COMMAND $<TARGET_FILE:test_crypto>)
