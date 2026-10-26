@@ -21,6 +21,9 @@
 //   config   - Phase 6 demo: decoded config-zone read-back
 //              (atecc608_read_config_zone + atecc608_config_parse);
 //              read-only
+//   selftest - Phase 7: read-only on-hardware validation suite — the
+//              generic invariants of the agreed (fully locked) config,
+//              [PASS]/[FAIL] per check + a final verdict
 //   prov ... - Phase 4B provisioning command set (see below)
 //
 // Phase 4B provisioning commands (the agreed config is
@@ -86,6 +89,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stddef.h>
+#include <stdarg.h>
 
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
@@ -159,25 +163,42 @@ static uint32_t crc32_buf(const uint8_t *buf, size_t len)
     return crc ^ 0xFFFFFFFFu;
 }
 
-// Load the I/O key saved in /io_key.bin (magic/len/CRC-32 checked). Prints
-// the reason and returns false if the file is missing or corrupt.
-static bool load_io_key_file(uint8_t key[PROV_IOKEY_LEN])
+// Validate the saved I/O key file (present, full size, magic, len, and
+// CRC-32 over the header) and return the key. On failure fills detail
+// (if non-NULL) with the short reason; it prints nothing itself, so the
+// selftest can report the reason inside its own [FAIL] line.
+static bool iokey_file_valid(uint8_t key[PROV_IOKEY_LEN],
+                             char *detail, size_t detail_size)
 {
     iokey_file_t f;
     int rd = pico_lfs_read_file(PROV_IOKEY_PATH, (uint8_t *)&f, sizeof(f));
     if ((int)sizeof(f) != rd
         || PROV_IOKEY_MAGIC != f.magic
         || PROV_IOKEY_LEN != f.len) {
-        printf("cannot load the I/O key: %s is missing or corrupt — run\n"
-               "`prov iokey` first.\n", PROV_IOKEY_PATH);
+        if (detail) {
+            snprintf(detail, detail_size, "%s missing or corrupt", PROV_IOKEY_PATH);
+        }
         return false;
     }
     if (crc32_buf((const uint8_t *)&f, offsetof(iokey_file_t, crc32)) != f.crc32) {
-        printf("cannot load the I/O key: %s CRC-32 mismatch — run\n"
-               "`prov iokey` first.\n", PROV_IOKEY_PATH);
+        if (detail) {
+            snprintf(detail, detail_size, "%s CRC-32 mismatch", PROV_IOKEY_PATH);
+        }
         return false;
     }
     memcpy(key, f.key, sizeof(f.key));
+    return true;
+}
+
+// Load the I/O key saved in /io_key.bin (magic/len/CRC-32 checked). Prints
+// the reason and returns false if the file is missing or corrupt.
+static bool load_io_key_file(uint8_t key[PROV_IOKEY_LEN])
+{
+    char detail[64];
+    if (!iokey_file_valid(key, detail, sizeof(detail))) {
+        printf("cannot load the I/O key: %s — run `prov iokey` first.\n", detail);
+        return false;
+    }
     return true;
 }
 
@@ -228,6 +249,7 @@ static void commandHelp(char *cmdLine)
     printf("serial  - atecc608_serial (9-byte factory serial)\n");
     printf("lock    - atecc608_is_locked (config / data zone)\n");
     printf("config  - decoded config-zone read-back (Phase 6 demo, read-only)\n");
+    printf("selftest- read-only on-hardware validation suite (Phase 7)\n");
     printf("prov status   - chip state + config zone + diff + /io_key.bin persistence\n");
     printf("prov randtest - chip RNG x2 (0xFFFF0000 pattern while unlocked)\n");
     printf("prov iokey    - Pico TRNG -> slot 14 (after prov lock) -> print -> save\n");
@@ -836,43 +858,32 @@ static void provIokey(void)
 // (3) Diagnostic prints kept (tempkey nonce, clear + its resp nonce, raw
 //     enc output, enc resp nonce, and on failure the file key) so any
 //     future disagreement is host-reproducible in one run.
-static void provIokeyTest(void)
+// The I/O-key round-trip, shared by `prov iokeytest` (verbose) and
+// `selftest` (quiet). True iff the key saved in /io_key.bin matches slot
+// 14; on failure detail (if non-NULL) gets the short reason.
+//
+// verbose: prints the intermediate values (tempkey nonce, clear output +
+// its response nonce, raw enc output, enc response nonce, and on failure
+// the decrypted KDF + the file key) so any future disagreement is
+// host-reproducible in one run (the atcah_io_decrypt keystream is
+// SHA256(io_key || 16-B nonce half) XOR per 32-B block).
+static bool iokey_roundtrip(bool verbose, char *detail, size_t detail_size)
 {
     // 1. Load the saved I/O key.
     uint8_t io_key[PROV_IOKEY_LEN];
-    if (!load_io_key_file(io_key)) {
-        return;
-    }
-
-    // Chip lock state, printed for context if a KDF below is refused (see the
-    // data-zone/key-lock caveat in the failure message). I/O protection is
-    // active only with the config zone locked; the data zone and slot 14's
-    // individual lock are the states cryptoauthlib's own I/O-protected KDF
-    // test keeps locked.
-    {
-        bool locked = false;
-        atecc608_status_t st;
-        st = atecc608_is_locked(ATECC608_ZONE_CONFIG, &locked);
-        if (ATECC608_OK != st) {
-            report_fail("IS_LOCKED (config)", st);
-            return;
+    if (!iokey_file_valid(io_key, detail, detail_size)) {
+        if (verbose) {
+            printf("cannot load the I/O key: %s — run `prov iokey` first.\n",
+                   detail);
         }
-        printf("config zone: %s\n", locked ? "LOCKED" : "unlocked");
-        st = atecc608_is_locked(ATECC608_ZONE_DATA, &locked);
-        if (ATECC608_OK != st) {
-            report_fail("IS_LOCKED (data)", st);
-            return;
-        }
-        printf("data zone:   %s\n", locked ? "LOCKED" : "unlocked");
+        return false;
     }
 
     // 2-3. ONE random 32-byte nonce, loaded into tempkey before EACH KDF
     // run (atcab_nonce is a pass-through nonce-load — the buffer's CONTENTS
     // are what tempkey gets), so the underlying PRF input is IDENTICAL for
     // the clear and the enc call — a prerequisite of the comparison in step
-    // 5. The raw encrypted output and both response nonces are printed so
-    // any future disagreement is host-reproducible (atcah_io_decrypt is
-    // SHA256(key || nonce-block) XOR, not AES).
+    // 5.
     uint8_t nonce[32];
     uint8_t msg[16];
     for (int i = 0; i < 16; i++) {
@@ -907,16 +918,24 @@ static void provIokeyTest(void)
     }
     atca = atcab_nonce(nonce);
     if (ATCA_SUCCESS != atca) {
-        printf("NONCE (clear) failed: ATCA_STATUS %d\n", (int)atca);
-        return;
+        snprintf(detail, detail_size, "NONCE (clear) failed: ATCA_STATUS %d", (int)atca);
+        if (verbose) {
+            printf("NONCE (clear) failed: ATCA_STATUS %d\n", (int)atca);
+        }
+        return false;
     }
-    printf("tempkey nonce (32 B):  ");
-    atecc608_print_hex(nonce, sizeof(nonce));
+    if (verbose) {
+        printf("tempkey nonce (32 B):  ");
+        atecc608_print_hex(nonce, sizeof(nonce));
+    }
     atca = atcab_kdf(mode | KDF_MODE_TARGET_OUTPUT, 0x1234, details,
                      msg, out_clear, clear_nonce);
     if (ATCA_SUCCESS != atca) {
-        printf("clear KDF failed: ATCA_STATUS %d\n", (int)atca);
-        return;
+        snprintf(detail, detail_size, "clear KDF failed: ATCA_STATUS %d", (int)atca);
+        if (verbose) {
+            printf("clear KDF failed: ATCA_STATUS %d\n", (int)atca);
+        }
+        return false;
     }
     // ANY non-zero byte means the library copied a nonce from the response
     // (a random 32-B nonce is all-zero with probability 2^-256; the buffer
@@ -925,30 +944,41 @@ static void provIokeyTest(void)
     for (int i = 0; i < 32; i++) {
         clear_had_nonce |= (0 != clear_nonce[i]);
     }
-    printf("clear KDF (64 B):      ");
-    atecc608_print_hex(out_clear, sizeof(out_clear));
-    printf("clear resp nonce:      %s", clear_had_nonce ? "" : "none (64-B response — NOT encrypted)");
-    if (clear_had_nonce) {
-        printf(" ");
-        atecc608_print_hex(clear_nonce, sizeof(clear_nonce));
+    if (verbose) {
+        printf("clear KDF (64 B):      ");
+        atecc608_print_hex(out_clear, sizeof(out_clear));
+        printf("clear resp nonce:      %s",
+               clear_had_nonce ? "" : "none (64-B response — NOT encrypted)");
+        if (clear_had_nonce) {
+            printf(" ");
+            atecc608_print_hex(clear_nonce, sizeof(clear_nonce));
+        }
+        printf("\n");
     }
-    printf("\n");
 
     atca = atcab_nonce(nonce);   // reload the SAME 32 B into tempkey
     if (ATCA_SUCCESS != atca) {
-        printf("NONCE (enc) failed: ATCA_STATUS %d\n", (int)atca);
-        return;
+        snprintf(detail, detail_size, "NONCE (enc) failed: ATCA_STATUS %d", (int)atca);
+        if (verbose) {
+            printf("NONCE (enc) failed: ATCA_STATUS %d\n", (int)atca);
+        }
+        return false;
     }
     atca = atcab_kdf(mode | KDF_MODE_TARGET_OUTPUT_ENC, 0x1234, details,
                      msg, out_enc, out_nonce);
     if (ATCA_SUCCESS != atca) {
-        printf("encrypted KDF failed: ATCA_STATUS %d\n", (int)atca);
-        return;
+        snprintf(detail, detail_size, "encrypted KDF failed: ATCA_STATUS %d", (int)atca);
+        if (verbose) {
+            printf("encrypted KDF failed: ATCA_STATUS %d\n", (int)atca);
+        }
+        return false;
     }
-    printf("enc KDF raw (64 B):    ");
-    atecc608_print_hex(out_enc, sizeof(out_enc));
-    printf("enc resp nonce (32 B): ");
-    atecc608_print_hex(out_nonce, sizeof(out_nonce));
+    if (verbose) {
+        printf("enc KDF raw (64 B):    ");
+        atecc608_print_hex(out_enc, sizeof(out_enc));
+        printf("enc resp nonce (32 B): ");
+        atecc608_print_hex(out_nonce, sizeof(out_nonce));
+    }
 
     // 4. Decrypt the encrypted output with the saved key (in place).
     atca_io_decrypt_in_out_t dec = {
@@ -959,8 +989,11 @@ static void provIokeyTest(void)
     };
     atca = atcah_io_decrypt(&dec);
     if (ATCA_SUCCESS != atca) {
-        printf("I/O decrypt failed: ATCA_STATUS %d\n", (int)atca);
-        return;
+        snprintf(detail, detail_size, "I/O decrypt failed: ATCA_STATUS %d", (int)atca);
+        if (verbose) {
+            printf("I/O decrypt failed: ATCA_STATUS %d\n", (int)atca);
+        }
+        return false;
     }
 
     // 5. Compare the clear result with the decrypted encrypted result.
@@ -983,11 +1016,34 @@ static void provIokeyTest(void)
         };
         atca = atcah_io_decrypt(&dec2);
         if (ATCA_SUCCESS != atca) {
-            printf("I/O decrypt (clear copy) failed: ATCA_STATUS %d\n", (int)atca);
-            return;
+            snprintf(detail, detail_size,
+                     "I/O decrypt (clear copy) failed: ATCA_STATUS %d", (int)atca);
+            if (verbose) {
+                printf("I/O decrypt (clear copy) failed: ATCA_STATUS %d\n", (int)atca);
+            }
+            return false;
         }
     }
-    if (0 == memcmp(ref, out_enc, sizeof(ref))) {
+    if (0 != memcmp(ref, out_enc, sizeof(ref))) {
+        snprintf(detail, detail_size,
+                 "decrypted KDF != clear KDF (the I/O key in %s does not match slot %u)",
+                 PROV_IOKEY_PATH, (unsigned)PROV_IO_KEY_SLOT);
+        if (verbose) {
+            printf("I/O key test FAILED: the decrypted KDF does not match the clear\n"
+                   "KDF (both decrypted with the saved key when the chip enforces\n"
+                   "I/O protection). The printed values let the host side\n"
+                   "recompute the exact keystreams (SHA256(io_key || 16-B nonce\n"
+                   "half) XOR per 32-B block) and identify which key the chip and\n"
+                   "the file each hold — RESUME.md, 2026-10-25 iokeytest recipe.\n"
+                   "Do NOT re-key slot 14 before that verdict.\n");
+            printf("decrypted KDF (64 B):  ");
+            atecc608_print_hex(out_enc, sizeof(out_enc));
+            printf("I/O key from %s (32 B): ", PROV_IOKEY_PATH);
+            atecc608_print_hex(io_key, sizeof(io_key));
+        }
+        return false;
+    }
+    if (verbose) {
         printf("I/O key test PASSED: slot 14 matches %s and the I/O-\n"
                "protection path works end-to-end.\n", PROV_IOKEY_PATH);
         if (clear_had_nonce) {
@@ -995,19 +1051,32 @@ static void provIokeyTest(void)
                    "both KDF outputs arrived encrypted; both were decrypted\n"
                    "with the saved key before comparing.\n");
         }
-    } else {
-        printf("I/O key test FAILED: the decrypted KDF does not match the clear\n"
-               "KDF (both decrypted with the saved key when the chip enforces\n"
-               "I/O protection). The printed values let the host side\n"
-               "recompute the exact keystreams (SHA256(io_key || 16-B nonce\n"
-               "half) XOR per 32-B block) and identify which key the chip and\n"
-               "the file each hold — RESUME.md, 2026-10-25 iokeytest recipe.\n"
-               "Do NOT re-key slot 14 before that verdict.\n");
-        printf("decrypted KDF (64 B):  ");
-        atecc608_print_hex(out_enc, sizeof(out_enc));
-        printf("I/O key from %s (32 B): ", PROV_IOKEY_PATH);
-        atecc608_print_hex(io_key, sizeof(io_key));
     }
+    return true;
+}
+
+// prov iokeytest — the verbose diagnostic form of the round-trip: prints
+// the chip lock state (context if a KDF is refused) and every intermediate
+// value (see iokey_roundtrip).
+static void provIokeyTest(void)
+{
+    bool locked = false;
+    atecc608_status_t st;
+    st = atecc608_is_locked(ATECC608_ZONE_CONFIG, &locked);
+    if (ATECC608_OK != st) {
+        report_fail("IS_LOCKED (config)", st);
+        return;
+    }
+    printf("config zone: %s\n", locked ? "LOCKED" : "unlocked");
+    st = atecc608_is_locked(ATECC608_ZONE_DATA, &locked);
+    if (ATECC608_OK != st) {
+        report_fail("IS_LOCKED (data)", st);
+        return;
+    }
+    printf("data zone:   %s\n", locked ? "LOCKED" : "unlocked");
+
+    char detail[128];
+    (void)iokey_roundtrip(true, detail, sizeof(detail));
 }
 
 // prov iokeyshow — DEV-ONLY diagnostic (a production application must not
@@ -1497,6 +1566,280 @@ static void provKdf(const char *rest)
            (unsigned)slot);
 }
 
+// --- Phase 7: selftest — the read-only on-hardware validation suite -------
+//
+// Runs the GENERIC invariants of a chip carrying the agreed config
+// (example/common/dev_config.h, fully locked: config zone + data zone +
+// slot 14) and prints one [PASS]/[FAIL] line per check plus a final
+// verdict. Strictly READ-ONLY — no chip writes — so it is safe at any
+// time, including on production hardware (HARD RULE). The bench-chip
+// specific goldens (serial, the six public keys, the slot-7 KDF value,
+// the config-zone CRC) are added by `selftest`'s full mode in sub-step
+// 7.2; until then this is the invariants-only suite.
+
+// The factory RNG pattern: 0xFFFF0000 repeated. The chip's Random command
+// returns it while the config zone is unlocked; a provisioned (locked)
+// chip must NOT.
+static bool factory_rng_pattern(const uint8_t r[32])
+{
+    static const uint8_t pat[4] = {0xFF, 0xFF, 0x00, 0x00};
+    for (int i = 0; i < 32; i++) {
+        if (pat[i % 4] != r[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// One suite check: prints [PASS]/[FAIL] + the short detail, tallies.
+typedef struct {
+    int passed;
+    int failed;
+} selftest_t;
+
+static void st_report(selftest_t *st, const char *name, bool ok, const char *detail)
+{
+    if (ok) {
+        st->passed++;
+    } else {
+        st->failed++;
+    }
+    printf("[%s] %-28s%s%s\n", ok ? "PASS" : "FAIL", name,
+           detail ? ": " : "", detail ? detail : "");
+}
+
+// Append a formatted fragment to the running detail string (bounded;
+// returns the new length).
+static size_t st_addf(char *d, size_t size, size_t n, const char *fmt, ...)
+{
+    if (n + 1 < size) {
+        va_list ap;
+        va_start(ap, fmt);
+        int w = vsnprintf(d + n, size - n, fmt, ap);
+        va_end(ap);
+        if (w > 0) {
+            n += (size_t)w;
+        }
+    }
+    return n;
+}
+
+// selftest — run the read-only on-hardware validation suite (Phase 7).
+static void commandSelftest(char *cmdLine)
+{
+    (void)cmdLine; // (sub-step 7.2 adds the optional "generic" sub-mode)
+    selftest_t st = {0, 0};
+    char d[112];
+
+    // (1) probe + info — the wake handshake and part/revision. A dead
+    // chip makes every later check meaningless, so the suite aborts.
+    atecc608_status_t pst = atecc608_probe();
+    if (ATECC608_OK != pst) {
+        st_report(&st, "probe + info", false, "chip not responsive (aborting)");
+        printf("SELFTEST: %d of %d checks passed — ABORTED, no further checks possible\n",
+               st.passed, st.passed + st.failed);
+        return;
+    }
+    atecc608_info_t info = {0, 0};
+    atecc608_status_t ist = atecc608_info(&info);
+    if (ATECC608_OK != ist || 0x60 != info.part || 5 != info.revision) {
+        st_addf(d, sizeof(d), 0, "part 0x%02X rev %u (want part 0x60 rev 5)",
+                (unsigned)info.part, (unsigned)info.revision);
+        st_report(&st, "probe + info", false, d);
+    } else {
+        st_report(&st, "probe + info", true, "wake ok, part 0x60 rev 5");
+    }
+
+    // (2) chip TRNG: two 32-B fetches, not the factory 0xFFFF0000
+    // pattern, not byte-identical to each other.
+    uint8_t r1[32];
+    uint8_t r2[32];
+    atecc608_status_t s1 = atecc608_random(r1, sizeof(r1));
+    atecc608_status_t s2 = ATECC608_OK == s1 ? atecc608_random(r2, sizeof(r2)) : s1;
+    if (ATECC608_OK != s1 || ATECC608_OK != s2) {
+        st_addf(d, sizeof(d), 0, "random call failed: %s",
+                atecc608_status_str(ATECC608_OK == s1 ? s2 : s1));
+        st_report(&st, "random (TRNG)", false, d);
+    } else if (factory_rng_pattern(r1)) {
+        st_report(&st, "random (TRNG)", false,
+                  "factory 0xFFFF0000 pattern (config zone unlocked?)");
+    } else if (0 == memcmp(r1, r2, sizeof(r1))) {
+        st_report(&st, "random (TRNG)", false, "two fetches byte-identical");
+    } else {
+        st_report(&st, "random (TRNG)", true, "32 B, real random, fetches differ");
+    }
+
+    // (3) config zone: parses, fully locked (00 00), slot 14 locked
+    // (FF BF), the agreed I2C address, and byte-identical to the agreed
+    // image over the writable region.
+    uint8_t zone[ATECC608_CONFIG_ZONE_LEN];
+    if (ATECC608_OK != atecc608_read_config_zone(zone)) {
+        st_report(&st, "config zone", false, "zone read failed");
+    } else {
+        atecc608_config_intent_t cfg;
+        if (ATECC608_OK != atecc608_config_parse(zone, &cfg)) {
+            st_report(&st, "config zone", false, "parse rejected the zone");
+        } else {
+            bool ok = true;
+            size_t n = 0;
+            if (0x00 != zone[86] || 0x00 != zone[87]) {
+                ok = false;
+                n = st_addf(d, sizeof(d), n, "lock bytes %02X %02X (want 00 00); ",
+                            zone[86], zone[87]);
+            }
+            if (0xFF != zone[88] || 0xBF != zone[89]) {
+                ok = false;
+                n = st_addf(d, sizeof(d), n, "SlotLocked %02X %02X (want FF BF); ",
+                            zone[88], zone[89]);
+            }
+            if (0xC0 != zone[16]) {
+                ok = false;
+                n = st_addf(d, sizeof(d), n, "I2C byte 0x%02X (want C0); ", zone[16]);
+            }
+            uint8_t plan[ATECC608_CONFIG_ZONE_LEN];
+            uint32_t diff[4] = {0, 0, 0, 0};
+            if (!planned_image(zone, plan)) {
+                ok = false;
+                n = st_addf(d, sizeof(d), n, "planned image build failed");
+            } else if (!atecc608_config_writable_equal(zone, plan, diff)) {
+                ok = false;
+                int first = -1;
+                int last = -1;
+                for (int i = 0; i < ATECC608_CONFIG_ZONE_LEN; i++) {
+                    if (diff[i / 32] & (1u << (i % 32))) {
+                        if (first < 0) {
+                            first = i;
+                        }
+                        last = i;
+                    }
+                }
+                n = st_addf(d, sizeof(d), n,
+                            "differs from the agreed image at bytes %d..%d", first, last);
+            }
+            st_report(&st, "config zone", ok,
+                      ok ? "locked 00 00, SlotLocked FF BF, I2C C0, zero diff vs agreed image"
+                         : d);
+        }
+    }
+
+    // (4) counters: both read 0 via the counter-read API (nothing has
+    // incremented them).
+    uint32_t c0 = 0;
+    uint32_t c1 = 0;
+    atecc608_status_t c0st = atecc608_counter_read(0, &c0);
+    atecc608_status_t c1st = ATECC608_OK == c0st ? atecc608_counter_read(1, &c1) : c0st;
+    if (ATECC608_OK != c0st || ATECC608_OK != c1st) {
+        st_addf(d, sizeof(d), 0, "counter read failed: %s",
+                atecc608_status_str(ATECC608_OK == c0st ? c1st : c0st));
+        st_report(&st, "counters", false, d);
+    } else if (0 != c0 || 0 != c1) {
+        st_addf(d, sizeof(d), 0, "counter 0 = %lu, counter 1 = %lu (want 0 / 0)",
+                (unsigned long)c0, (unsigned long)c1);
+        st_report(&st, "counters", false, d);
+    } else {
+        st_report(&st, "counters", true, "counter 0 = 0, counter 1 = 0");
+    }
+
+    // (5) the six ECC private keys (agreed layout): readable via
+    // get_pubkey (mode 0x00 works after the data-zone lock), 64 B,
+    // non-zero, pairwise distinct. (7.2 compares them against the bench
+    // chip's recorded keys.)
+    static const uint8_t ecc_slots[6] = {1, 3, 4, 5, 6, 12};
+    uint8_t pubs[6][ATECC608_PUBKEY_LEN];
+    {
+        bool ok = true;
+        for (int i = 0; i < 6 && ok; i++) {
+            memset(pubs[i], 0, sizeof(pubs[i]));
+            atecc608_status_t gst = atecc608_get_pubkey(ecc_slots[i], pubs[i]);
+            if (ATECC608_OK != gst) {
+                ok = false;
+                st_addf(d, sizeof(d), 0, "slot %u: %s",
+                        (unsigned)ecc_slots[i], atecc608_status_str(gst));
+            } else {
+                bool zero = true;
+                for (int b = 0; b < ATECC608_PUBKEY_LEN; b++) {
+                    zero = zero && (0 == pubs[i][b]);
+                }
+                if (zero) {
+                    ok = false;
+                    st_addf(d, sizeof(d), 0, "slot %u: all-zero public key",
+                            (unsigned)ecc_slots[i]);
+                } else {
+                    for (int j = 0; j < i; j++) {
+                        if (0 == memcmp(pubs[i], pubs[j], sizeof(pubs[i]))) {
+                            ok = false;
+                            st_addf(d, sizeof(d), 0, "slots %u and %u identical",
+                                    (unsigned)ecc_slots[i], (unsigned)ecc_slots[j]);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        st_report(&st, "ecc pubkeys (1,3,4,5,6,12)", ok,
+                  ok ? "64 B each, non-zero, pairwise distinct" : d);
+    }
+
+    // (6) KDF determinism: two PRF derivations from slot 7 (the vault
+    // master in the agreed layout) with the fixed zero nonce and the
+    // fixed 00..0F message must be identical. (7.2 adds the bench value.)
+    uint8_t io_key[PROV_IOKEY_LEN];
+    bool have_io_key = iokey_file_valid(io_key, d, sizeof(d));
+    uint8_t msg[16];
+    for (int i = 0; i < 16; i++) {
+        msg[i] = (uint8_t)i;
+    }
+    if (!have_io_key) {
+        st_report(&st, "kdf determinism (slot 7)", false, d);
+    } else {
+        uint8_t k1[ATECC608_KDF_OUT_LEN];
+        uint8_t k2[ATECC608_KDF_OUT_LEN];
+        atecc608_status_t k1st = atecc608_kdf_prf(7, NULL, msg, sizeof(msg), io_key, k1);
+        atecc608_status_t k2st = ATECC608_OK == k1st
+                                     ? atecc608_kdf_prf(7, NULL, msg, sizeof(msg), io_key, k2)
+                                     : k1st;
+        if (ATECC608_OK != k1st || ATECC608_OK != k2st) {
+            st_addf(d, sizeof(d), 0, "kdf_prf failed: %s",
+                    atecc608_status_str(ATECC608_OK == k1st ? k2st : k1st));
+            st_report(&st, "kdf determinism (slot 7)", false, d);
+        } else if (0 != memcmp(k1, k2, sizeof(k1))) {
+            st_report(&st, "kdf determinism (slot 7)", false,
+                      "two derivations differ (chip NOT deterministic)");
+        } else {
+            st_report(&st, "kdf determinism (slot 7)", true,
+                      "two derivations identical (zero nonce, msg 00..0F)");
+        }
+    }
+
+    // (7) I/O-key round-trip: /io_key.bin matches slot 14 (the shared
+    // core of `prov iokeytest`, quiet form).
+    char io_d[96];
+    bool ok_io = iokey_roundtrip(false, io_d, sizeof(io_d));
+    st_report(&st, "io key round-trip", ok_io,
+              ok_io ? "clear vs I/O-protected KDF match (slot 14 == /io_key.bin)" : io_d);
+
+    // (8) littlefs: the volume mounted at boot and /io_key.bin intact
+    // (magic, len, CRC-32).
+    if (LFS_STATE_NONE == s_lfs_state) {
+        st_report(&st, "littlefs + /io_key.bin", false, "volume not mounted at boot");
+    } else if (!have_io_key) {
+        st_report(&st, "littlefs + /io_key.bin", false, d);
+    } else {
+        st_report(&st, "littlefs + /io_key.bin", true,
+                  LFS_STATE_FRESH == s_lfs_state
+                      ? "volume fresh, /io_key.bin valid (magic, len, CRC-32)"
+                      : "volume survived the last reflash, /io_key.bin valid");
+    }
+
+    const int total = st.passed + st.failed;
+    if (0 == st.failed) {
+        printf("SELFTEST: %d/%d checks PASSED\n", total, total);
+    } else {
+        printf("SELFTEST: %d of %d checks FAILED (see the [FAIL] lines)\n",
+               st.failed, total);
+    }
+}
+
 // Consume the whole word w at the start of *pline (it must be followed by
 // a space or end-of-line); advance past it and any following spaces.
 static bool take_word(char **pline, const char *w)
@@ -1569,6 +1912,7 @@ static struct command_t commands[] = {
     {"serial", commandSerial},
     {"lock", commandLock},
     {"config", commandConfig},
+    {"selftest", commandSelftest},
     {"prov", commandProv},
 };
 

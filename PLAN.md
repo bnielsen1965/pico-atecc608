@@ -431,21 +431,26 @@ A single config struct drives init; everything else is a small, stable set.
     differ; (3) config zone — `atecc608_config_parse` ok, lock bytes
     00 00, SlotLocked FF BF, I2C 0xC0, writable region byte-identical
     to the agreed `dev_config` image (the `prov status` diff is 0);
-    (4) config-zone CRC = F6DE; (5) counters = 0/0;
-    (6) `atecc608_get_pubkey` (mode 0x00) on slots 1, 3–6, 12 — 64 B,
+    (4) counters = 0/0 (via the counter-read API);
+    (5) `atecc608_get_pubkey` (mode 0x00) on slots 1, 3–6, 12 — 64 B,
     non-zero, pairwise distinct (the ECC keys survive the data-zone
-    lock); (7) `atecc608_kdf_prf` (slot 7, zero nonce, fixed msg, key
+    lock); (6) `atecc608_kdf_prf` (slot 7, zero nonce, fixed msg, key
     from /io_key.bin) ×2 → identical — the vault's core guarantee
-    (deterministic re-derivation); (8) the `iokeytest` round-trip
+    (deterministic re-derivation); (7) the `iokeytest` round-trip
     (clear KDF vs the I/O-protected KDF) — the littlefs I/O key still
-    matches slot 14; (9) littlefs — volume mounted, /io_key.bin
-    present + magic/len/CRC ok.
+    matches slot 14; (8) littlefs — volume mounted, /io_key.bin
+    present + magic/len/CRC ok. (The config-zone CRC was dropped from
+    the generic list 2026-10-26: it covers the chip-unique factory
+    region, so it is a golden, not an invariant.)
   - **Bench-chip goldens** (dev-only, compiled into the console
     example — NOT part of the library): serial
     `01 23 06 40 AE B6 B9 B7 EE`, the six recorded ECC public keys
     (RESUME.md), the recorded KDF derived value `6F FF 7D D6 …`
-    (fixed zero nonce + fixed 00..0F msg), config CRC F6DE,
-    SlotLocked FF BF.
+    (fixed zero nonce + fixed 00..0F msg), the config-zone CRC
+    **C904** (the current fully-locked zone — F6DE was the
+    pre-data-lock value; C904 host-computed 2026-10-26 from the
+    recorded factory bytes + the agreed image, cross-checked against
+    BOTH recorded CRCs CDC7 and F6DE), SlotLocked FF BF.
   **Deliverable 2 — bring-up checklist (`docs/BRINGUP.md`).**
   Reusable for a fresh ATECC608C + Pico 2: wiring/flash → first-boot
   expectations (`probe`, `diag`, `info`, `serial`, the factory RNG
