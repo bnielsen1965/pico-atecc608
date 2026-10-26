@@ -4,11 +4,13 @@ Pause point: **2026-10-25 — Phase 4B is COMPLETE (2026-10-23) and the
 Phase 5+ bench is partway done: the ECC slots (1, 3–6, 12) are GenKey'd
 (all six public keys recorded and verified in the "⏸ Where the
 conversation stopped" section below) and the DATA ZONE IS NOW LOCKED
-(one-way step executed 2026-10-25, verified by re-read). `prov
-iokeytest` then ran for the first time (the −12 gate is gone) and
-FAILED — cause under diagnosis (three candidates; NOT yet proven to be a
-key mismatch); an instrumented READ-ONLY diagnostic build is ready to
-flash (see the "iokeytest FAILED" paragraph in that section). Phase 4B:
+(one-way step executed 2026-10-25, verified by re-read). The first
+`prov iokeytest` run FAILED, but the failure is now DIAGNOSED: the chip
+ENFORCES I/O protection (kdf_prot=1) — it encrypted even the "clear"
+KDF call; the I/O key itself is functionally VERIFIED (chip key ==
+file key == recorded key, host-verified keystream equality). The fixed
+test build is ready to flash and `prov iokeytest` should now PASS (see
+the "Latest state" paragraph in that section). Phase 4B:
 the chip is fully PROVISIONED. The config zone holds the approved
 planned image and
 is LOCKED (the one-way step ran after explicit user go-ahead); the
@@ -140,8 +142,10 @@ printed public key in RESUME.md) → `prov lockdata CONFIRM` (ONE-WAY) →
 `prov iokeytest` (must now PASS — the KDF target=output gate) →
 (production only) `prov lockslot 14 CONFIRM`. **Progress 2026-10-25:
 flash + status + all six genkeys + `prov lockdata CONFIRM` DONE (record
-in the paragraphs below); remaining: `prov iokeytest` (diagnostic run)
-→ (production) `prov lockslot 14 CONFIRM`.**
+in the paragraphs below); the first `prov iokeytest` run FAILED and is
+DIAGNOSED (chip enforces I/O encryption; the I/O key itself is verified)
+— the fixed test build is ready to flash; remaining: `prov iokeytest`
+(now expected to PASS) → (production) `prov lockslot 14 CONFIRM`.**
 
 **Latest state (2026-10-25, bench in progress): flash + GenKey DONE.**
 The Phase 5+ uf2 (215,040 B, `build/example/console/pico-atecc608.uf2`)
@@ -184,65 +188,66 @@ keys on-chip only):**
   `1F BB 53 79 05 9B FD 17  2C 7F 25 A1 6E EC 7E C6  BA EA 85 5F 69 0D 73 E9  A0 93 F2 AB 2B 39 DF 92`
   `25 3F 69 9B 4E E2 50 BE  AF 24 5C 5A A7 7E CA 6A  EA 9E BB 6B 1F FF 7F 3A  EC 43 59 7A 21 0F 93 63`
 
-**Next bench step: `prov lockdata CONFIRM` (ONE-WAY, byte 86).** After
-it: fresh GenKey (mode 0x04) is refused, but `prov pubkey <slot>`
-keeps working (mode 0x00) and plain slots stay writable; then
-`prov iokeytest` must PASS (the KDF target=output gate is satisfied by
-the lock).
+**`prov lockdata CONFIRM` was EXECUTED (2026-10-25 — one-way, byte 86;
+outcome in the next paragraph).** After it: fresh GenKey (mode 0x04)
+is permanently refused, but `prov pubkey <slot>` keeps working (mode
+0x00) and plain slots stay writable; the KDF target=output gate is
+satisfied by the lock.
 
-**Latest state (2026-10-25, bench continued): data zone LOCKED;
-`prov iokeytest` FAILED — cause under diagnosis.** `prov lockdata
-CONFIRM` executed at the bench (one-way, byte 86; the command's own
-re-read reported "data zone LOCKED (irreversible)"). `prov iokeytest`
-then ran for the FIRST TIME on the locked chip — the −12 gate is gone,
-the KDF command executes — and FAILED: "the decrypted KDF does not
-match the clear KDF" (it printed both 64-B values). The firmware's
-conclusion ("the key in slot 14 does NOT match /io_key.bin") is NOT
-proven by that symptom alone. Three candidate causes:
-- **(A) key mismatch**: chip slot 14 ≠ /io_key.bin (the message's
-  claim);
-- **(B) the chip did not encrypt the enc call**: our ChipOptions
-  (0xE506) set `kdf_prot=1` — its "enforce vs opt-in" semantics were an
-  OPEN item (never verified against the NDA datasheet; the dump is
-  gone from /tmp). If the per-command ENC flag is ignored, the Pico
-  XOR-decrypted plaintext → same symptom;
-- **(C) the chip ENFORCED encryption on the clear call too**: then the
-  printed "clear KDF" is itself ciphertext and the test's premise
-  (clear call returns clear data) is broken for our config — Microchip's
-  reference test runs with `kdf_prot=0`, where opt-in ENC works.
-Also possible: (E) /io_key.bin holds a key different from the recorded
-durable key (the file's CRC proves integrity, not identity).
-**The scheme is host-reproducible**: `atcah_io_decrypt` is NOT AES —
-per 32-B block it XORs the data with `SHA256(io_key ‖ 16-B nonce half)`
-(2 blocks for 64 B: `SHA256(K‖N[0:16]) ‖ SHA256(K‖N[16:32])`).
-**Diagnostic build (this commit):** `provIokeyTest` now (1) loads ONE
-random nonce into tempkey before BOTH KDF calls (`atcab_nonce` is a
-pass-through nonce-load — identical PRF input for both calls), (2)
-passes a zeroed nonce buffer to the CLEAR call (the library fills it
-only if that response carried a trailing 32-B nonce = that call was
-encrypted against the request → scenario C), (3) prints the tempkey
-nonce, the clear output + "clear resp nonce: none | <32 B>", the RAW
-enc output, the enc resp nonce, and (on failure) the I/O key read from
-/io_key.bin. READ-ONLY: nonce/KDF/lock-status commands only — no chip
-write. **Host analysis from one run** (K_rec = the durable key recorded
-above; K_f = printed file key; N1 = clear resp nonce or absent;
-N2 = enc resp nonce; C/E/D = clear / raw-enc / decrypted KDF;
-`H(K,N) = SHA256(K‖N[0:16]) ‖ SHA256(K‖N[16:32])`):
-- E == C → **(B)** (chip did not encrypt);
-- else, clear resp nonce ABSENT: S = E⊕C is the chip's keystream —
-  S == H(K_rec,N2) ⟺ chip key is K_rec; K_f == K_rec (bytes) decides
-  (A) vs (E) directly;
-- else, clear resp nonce N1 present → **(C)**: C⊕H(K_rec,N1) == D
-  ⟺ keys all match (the failure is purely the enforced-encryption
-  premise; the PASS criterion becomes "decrypt both, compare").
-**Next: flash this uf2 (Pico only — the chip is untouched; littlefs +
-/io_key.bin survive), run `prov iokeytest`, send the full output.**
-Re-keying slot 14 — still POSSIBLE (a 32-B write to a non-individually-
-locked slot stays allowed with the data zone locked; though `prov
-iokey` currently refuses: its precondition still says the data zone
-must be unlocked) — is a CHIP WRITE: only after the verdict, with
-explicit go-ahead, via a new command. `prov lockslot 14 CONFIRM` stays
-production-only, after a PASSING test.
+**Latest state (2026-10-25, bench continued): data zone LOCKED; the
+iokeytest failure is DIAGNOSED — the I/O key is functionally VERIFIED;
+a fixed test build is ready to flash.**
+- `prov lockdata CONFIRM` executed at the bench (one-way, byte 86;
+  re-read-verified: "data zone LOCKED (irreversible)"). The first real
+  `prov iokeytest` run (the −12 gate is gone; the KDF executes) FAILED
+  with "decrypted KDF != clear KDF". The firmware's "key mismatch"
+  conclusion was NOT proven by that symptom — three candidates: (A)
+  chip key ≠ file key; (B) the chip did not encrypt the enc call; (C)
+  the chip ENFORCED encryption on the clear call; plus (E) file key ≠
+  the recorded key (the file's CRC proves integrity, not identity).
+- **Verdict (instrumented run + host keystream reconstruction): (C),
+  and ALL keys match.** The instrumented run (one shared tempkey
+  nonce, raw enc output + both response nonces captured, file key
+  printed) showed: (1) the CLEAR response carried a trailing 32-B
+  nonce — the chip encrypted the clear call AGAINST THE REQUEST; (2)
+  the printed file key is byte-identical to the recorded durable key
+  (E excluded); (3) the host recomputed `atcah_io_decrypt` exactly
+  (per 32-B block: XOR with `SHA256(io_key ‖ 16-B nonce half)` — NOT
+  AES) and BOTH `enc ⊕ H(K_file, N_enc) == decrypted` and
+  `clear ⊕ H(K_file, N_clear) == decrypted` held (accidental equality
+  probability ≈ 2⁻²⁵⁶). Therefore the chip's slot-14 I/O key == the
+  file key == the recorded key, the chip applies it correctly, and the
+  Pico decrypts with the saved key: **the I/O key is functionally
+  verified and the I/O-protection path works end-to-end.** The first
+  failure was ciphertext (the "clear KDF") compared with plaintext.
+- **Open datasheet item RESOLVED by bench evidence: with `kdf_prot=1`
+  this chip ENFORCES I/O protection on KDF — EVERY target=output KDF
+  returns encrypted data + a 32-B response nonce.** (Microchip's
+  reference test only works with `kdf_prot=0`, where the plain call
+  is plain.) Related finding: `atcab_nonce` is a PASS-THROUGH
+  nonce-LOAD (the buffer's CONTENTS are what tempkey gets), not random
+  generation — the reference test's "fresh nonce" is actually its fixed
+  buffer pattern, which is why its two calls share a PRF input.
+- **Fix (this build):** `provIokeyTest`'s PASS criterion now decrypts
+  the clear copy with the saved key when the clear response carries a
+  nonce (enforced mode), then compares; with no nonce it reduces to
+  the original direct compare — correct under BOTH semantics; a true
+  key mismatch still fails with probability 1 − 2⁻²⁵⁶. The tempkey
+  input is Pico-TRNG random, shared by both calls (a prerequisite of
+  the comparison).
+- **Phase 7 consequence:** every KDF with target=output from this chip
+  (including the vault's slot-7 KDF) must be `atcah_io_decrypt`-ed
+  with the I/O key from /io_key.bin before use — the agreed
+  "kdf_prot=1 (derived key never in clear on the bus)" setting is
+  exactly this behavior.
+- **Next: flash this uf2 (Pico only — the chip and littlefs are
+  untouched), run `prov iokeytest` — it should now PASS (plus an
+  enforced-mode NOTE).** Then, production only, after a PASS:
+  `prov lockslot 14 CONFIRM`. (Re-keying slot 14 remains physically
+  possible — a 32-B write to a non-individually-locked slot stays
+  allowed with the data zone locked — but there is no reason to;
+  `prov iokey` would refuse anyway: its precondition still says the
+  data zone must be unlocked.)
 
 **`prov iokeytest` was BUILT (`8aa8922`), flashed, and RUN (2026-10-24)
 — it returned `clear KDF failed: ATCA_STATUS -12` (execution error) with
@@ -855,9 +860,13 @@ checks it). Command-level wire protection, not transport-level. Open for
 the byte plan: whether the request direction (KDF input / PIN) is also
 covered; and `kdf_prot`/`ecdh_prot` enforce(1) vs opt-in(0) — the
 reference config uses 0 and the test opts in per-command via
-`KDF_MODE_TARGET_OUTPUT_ENC`; enforce is our choice, verify 2-bit semantics
-against the NDA datasheet. Mock does NOT model I/O protection → 4B hardware
-verification item. Evidence (2026-10-22, user review of slot-14 type):
+`KDF_MODE_TARGET_OUTPUT_ENC`; enforce is our choice. **Resolved by bench
+evidence 2026-10-25: `kdf_prot=1` = ENFORCE — this chip returns
+encrypted output + a 32-B response nonce for EVERY target=output KDF,
+even a plain `KDF_MODE_TARGET_OUTPUT` call (see the "Latest state"
+paragraph in the stopped-section above).** Mock does NOT model I/O
+protection → 4B hardware verification item (now closed for kdf_prot;
+request-direction coverage still open). Evidence (2026-10-22, user review of slot-14 type):
 the library's locked ATECC608 reference config (manual's
 `ATECC608_DEVICE_CONFIG_VECTOR`, ChipOptions 0x4006 = io_prot_en +
 kdf_aes_en + io key slot 4) keeps its I/O key in a **type-7 non-ECC
@@ -1431,8 +1440,10 @@ complete — config agreed (see "Agreed 4B config" above).
    prov path now preserves the chip's 88–89 like byte 16; UseLock
    enforcement; GenKey/PrivWrite bit 13/14 behavior on real hardware;
    I/O protection coverage of the request direction (mock does NOT
-   model I/O protection at all); kdf_prot/ecdh_prot 2-bit semantics
-   (enforce vs opt-in) per NDA datasheet.
+   model I/O protection at all); ~~kdf_prot/ecdh_prot 2-bit semantics
+   (enforce vs opt-in) per NDA datasheet~~ resolved 2026-10-25 by
+   bench evidence: kdf_prot=1 = ENFORCE (every target=output KDF
+   returns encrypted output + 32-B nonce, even plain calls).
 
 Then per PLAN.md: Phase 5 (crypto pass-through: kdf/sign/verify) and Phase 6
 (config read-back console demo), then Phase 7 (on-hardware validation +
