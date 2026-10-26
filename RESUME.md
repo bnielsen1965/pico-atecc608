@@ -1,7 +1,12 @@
 # Resume notes (pico-atecc608)
 
-Pause point: **2026-10-24 — Phase 4B is COMPLETE (2026-10-23): the chip
-is fully PROVISIONED. The config zone holds the approved planned image and
+Pause point: **2026-10-25 — Phase 4B is COMPLETE (2026-10-23) and the
+Phase 5+ bench is partway done: the new uf2 is FLASHED and the ECC slots
+(1, 3–6, 12) are GenKey'd — all six public keys recorded and verified in
+the "⏸ Where the conversation stopped" section below. The data zone is
+still UNLOCKED; the next bench step is `prov lockdata CONFIRM` (ONE-WAY,
+byte 86). Phase 4B: the chip is fully PROVISIONED. The config zone holds
+the approved planned image and
 is LOCKED (the one-way step ran after explicit user go-ahead); the
 I/O key is in slot 14 (chip ACKed) AND saved to littlefs
 (`/io_key.bin`, read-back verified). The one bug found along the way —
@@ -129,7 +134,57 @@ to pass again) → `prov genkey 1`, `prov genkey 3`, `prov genkey 4`,
 `prov genkey 5`, `prov genkey 6`, `prov genkey 12` (RECORD every
 printed public key in RESUME.md) → `prov lockdata CONFIRM` (ONE-WAY) →
 `prov iokeytest` (must now PASS — the KDF target=output gate) →
-(production only) `prov lockslot 14 CONFIRM`.
+(production only) `prov lockslot 14 CONFIRM`. **Progress 2026-10-25:
+flash + status + all six genkeys DONE (record + verification in the
+next paragraph); remaining: `prov lockdata CONFIRM` → `prov iokeytest`
+→ (production) `prov lockslot 14 CONFIRM`.**
+
+**Latest state (2026-10-25, bench in progress): flash + GenKey DONE.**
+The Phase 5+ uf2 (215,040 B, `build/example/console/pico-atecc608.uf2`)
+was flashed at the bench; `prov status` then confirmed: config zone
+LOCKED + byte-identical to the approved plan (all SlotConfig/KeyConfig
+values match, chip-zone CRC F6DE, lock bytes 55 00, SlotLocked FF FF,
+counters 0/0), data zone UNLOCKED, and the littlefs check passed a
+SECOND time live ("mounted existing (survived the last reflash)" +
+"/io_key.bin: present and valid"). `prov genkey` then succeeded on all
+six ECC slots — 1, 3, 4, 5, 6, 12 — each printing a 64-B public key
+(X || Y big-endian; the private keys never leave the chip). **All six
+public keys were verified host-side as valid, distinct points on the
+P-256 curve** (Y² = X³ − 3X + b mod p, X,Y < p) — a garbled or
+truncated key would fail this with probability ≈ 1 − 2⁻²⁵⁶, so the
+printed values are what the chip holds. They are re-fetchable at any
+time (even after the data-zone lock) with `prov pubkey <slot>`. The
+chip now holds fresh P-256 pairs in every ECC private slot the config
+allows: slot 1 (device identity), slots 3–6 (FIDO2 pre-generation —
+4 resident credentials max; `MakeCredential` assigns the next unused
+one), slot 12 (spare pair).
+
+**ECC public keys generated 2026-10-25 (record of choice; private
+keys on-chip only):**
+- **slot 1 (device identity):**
+  `1E E5 07 EC FC 0D B2 10  35 54 32 BC 2E 63 AB 84  36 C3 04 F8 C9 54 73 95  7F 02 C4 BF 57 A2 C9 4E`
+  `DF B3 A3 A2 2D 3E 00 8E  89 B8 82 BA 28 9D C0 E5  96 2D BE F9 90 79 00 DE  22 41 9F A0 AC 2D 1A DB`
+- **slot 3 (FIDO2 pre-gen 1):**
+  `82 B4 7D 03 D3 11 A5 06  DB E7 7B 00 AD 09 BC 31  DC 54 EF AC 19 0C CB 12  48 C3 25 81 CD 33 02 F6`
+  `D0 B8 C8 8A A9 D8 B3 40  6C 74 FA 4B 76 61 20 5C  F4 54 05 C1 95 D0 CC 8C  3E E0 7A 17 A1 4B 69 00`
+- **slot 4 (FIDO2 pre-gen 2):**
+  `63 1C E7 86 3B 57 38 C4  AA C3 DC F1 D7 51 69 45  BA E5 BE 47 1B D3 91 9C  32 36 81 87 A6 D8 BD 14`
+  `14 A7 25 76 9F FE 6B 96  2B BF 2D CB D6 94 F4 66  46 2B E6 A2 EA 75 38 59  EE 00 2D 3E 0D 83 3C 7E`
+- **slot 5 (FIDO2 pre-gen 3):**
+  `14 C5 66 85 EF 86 E3 2E  60 20 DC 09 9C E1 21 83  2D 0C 95 7C CE A0 C8 4B  7A 52 44 95 89 7D BF A7`
+  `5F A0 76 8E FC 9B 4B DD  AF 6D 45 BF FB FB 6B AE  4B 56 0D 07 1C AB 38 8C  8E 5B 4F 83 77 22 B2 B4`
+- **slot 6 (FIDO2 pre-gen 4):**
+  `23 0A 88 5B 6D 79 44 1A  53 CF 18 3A B2 F5 ED 3E  8D DD D8 F7 7A 6E 0C 92  81 E8 37 0B 05 53 5B F0`
+  `E6 93 23 8C 36 AD 9C 9D  BA 9B AE E0 7F 25 11 73  6F C7 C8 60 46 12 C0 71  3D EE E7 D8 42 0B FD EB`
+- **slot 12 (spare pair):**
+  `1F BB 53 79 05 9B FD 17  2C 7F 25 A1 6E EC 7E C6  BA EA 85 5F 69 0D 73 E9  A0 93 F2 AB 2B 39 DF 92`
+  `25 3F 69 9B 4E E2 50 BE  AF 24 5C 5A A7 7E CA 6A  EA 9E BB 6B 1F FF 7F 3A  EC 43 59 7A 21 0F 93 63`
+
+**Next bench step: `prov lockdata CONFIRM` (ONE-WAY, byte 86).** After
+it: fresh GenKey (mode 0x04) is refused, but `prov pubkey <slot>`
+keeps working (mode 0x00) and plain slots stay writable; then
+`prov iokeytest` must PASS (the KDF target=output gate is satisfied by
+the lock).
 
 **`prov iokeytest` was BUILT (`8aa8922`), flashed, and RUN (2026-10-24)
 — it returned `clear KDF failed: ATCA_STATUS -12` (execution error) with
