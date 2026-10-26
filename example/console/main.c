@@ -18,6 +18,9 @@
 //   serial   - atecc608_serial: 9-byte factory serial
 //   lock     - atecc608_is_locked: config/data zone lock status
 //   diag     - raw I2C bus diagnostics (levels, general call, wake read)
+//   config   - Phase 6 demo: decoded config-zone read-back
+//              (atecc608_read_config_zone + atecc608_config_parse);
+//              read-only
 //   prov ... - Phase 4B provisioning command set (see below)
 //
 // Phase 4B provisioning commands (the agreed config is
@@ -43,6 +46,10 @@
 //                    and message, so two runs print the SAME value — the
 //                    on-hardware KDF round-trip that closes PLAN.md
 //                    Phase 5. I/O key from /io_key.bin.
+//   prov iokeyshow - DEV-ONLY (do not ship in a production application):
+//                    print the I/O key saved in /io_key.bin so it can be
+//                    compared against the out-of-band durable copy.
+//                    Chip-free (littlefs read only).
 //   prov config    - WRITE: agreed intent -> config zone (byte 16 +
 //                    SlotLocked 88..89 preserved), read-back verified;
 //                    idempotent
@@ -220,11 +227,14 @@ static void commandHelp(char *cmdLine)
     printf("info    - atecc608_info (part id + silicon revision)\n");
     printf("serial  - atecc608_serial (9-byte factory serial)\n");
     printf("lock    - atecc608_is_locked (config / data zone)\n");
+    printf("config  - decoded config-zone read-back (Phase 6 demo, read-only)\n");
     printf("prov status   - chip state + config zone + diff + /io_key.bin persistence\n");
     printf("prov randtest - chip RNG x2 (0xFFFF0000 pattern while unlocked)\n");
     printf("prov iokey    - Pico TRNG -> slot 14 (after prov lock) -> print -> save\n");
     printf("prov iokeytest- verify slot 14's I/O key via an I/O-protected KDF\n");
     printf("                (read-only; uses the key saved in /io_key.bin)\n");
+    printf("prov iokeyshow- DEV-ONLY: print the I/O key saved in /io_key.bin\n");
+    printf("                (compare against the out-of-band copy; never ship)\n");
     printf("prov config   - write the agreed config zone (idempotent)\n");
     printf("prov lock     - LOCK the config zone (IRREVERSIBLE; add CONFIRM)\n");
     printf("prov genkey <slot>  - fresh ECC key pair in slot 1/3/4/5/6/12 (data zone unlocked)\n");
@@ -345,6 +355,159 @@ static void commandDiag(char *cmdLine)
             printf(" %02X %02X %02X %02X", r[0], r[1], r[2], r[3]);
         }
         printf("\n");
+    }
+}
+
+// --- Phase 6: config read-back demo (see the top-of-file list) --------------
+
+// Append " flag" to the row text (or "flag" when it is still empty).
+static void add_flag(char *buf, size_t size, size_t *n, const char *flag)
+{
+    *n += (size_t)snprintf(buf + *n, size - *n, (*n > 0) ? " %s" : "%s", flag);
+}
+
+// One table row: the raw words plus the decoded flags, "slot policy |
+// key policy". For an ECC private key slot, SlotConfig bits 0-3 carry the
+// usage flags (not the read-key nibble), so the slot fields are only
+// meaningful under that interpretation.
+static void print_slot_row(int n, const uint8_t zone[ATECC608_CONFIG_ZONE_LEN],
+                           const atecc608_config_intent_t *cfg)
+{
+    const atecc608_slot_cfg_t *s = &cfg->slot[n];
+    const atecc608_key_cfg_t *k = &cfg->key[n];
+    char slotpol[80];
+    char keypol[80];
+    size_t sn = 0, kn = 0;
+    char t[24];
+
+    const uint16_t sw = (uint16_t)zone[20 + 2 * n] | ((uint16_t)zone[21 + 2 * n] << 8);
+    const uint16_t kw = (uint16_t)zone[96 + 2 * n] | ((uint16_t)zone[97 + 2 * n] << 8);
+
+    if (k->private_key) {
+        if (s->is_secret)    { add_flag(slotpol, sizeof(slotpol), &sn, "secret"); }
+        if (s->ext_sig)      { add_flag(slotpol, sizeof(slotpol), &sn, "ext-sig"); }
+        if (s->int_sig)      { add_flag(slotpol, sizeof(slotpol), &sn, "int-sig"); }
+        if (s->ecdh)         { add_flag(slotpol, sizeof(slotpol), &sn, "ecdh"); }
+        if (s->ecdh_to_next) { add_flag(slotpol, sizeof(slotpol), &sn, "ecdh-to-next"); }
+        if (s->gen_key)      { add_flag(slotpol, sizeof(slotpol), &sn, "gen-key"); }
+        if (s->priv_write)   { add_flag(slotpol, sizeof(slotpol), &sn, "priv-write"); }
+    } else {
+        if (s->is_secret)    { add_flag(slotpol, sizeof(slotpol), &sn, "secret"); }
+        if (s->enc_read)     { add_flag(slotpol, sizeof(slotpol), &sn, "enc-read"); }
+        if (s->no_mac)       { add_flag(slotpol, sizeof(slotpol), &sn, "no-mac"); }
+        if (s->limited_use)  { add_flag(slotpol, sizeof(slotpol), &sn, "limited-use"); }
+        if (s->read_key)     { snprintf(t, sizeof(t), "read-key=%u", s->read_key);
+                               add_flag(slotpol, sizeof(slotpol), &sn, t); }
+        if (s->write_key)    { snprintf(t, sizeof(t), "write-key=%u", s->write_key);
+                               add_flag(slotpol, sizeof(slotpol), &sn, t); }
+        if (s->write_config) { snprintf(t, sizeof(t), "write-config=%u", s->write_config);
+                               add_flag(slotpol, sizeof(slotpol), &sn, t); }
+    }
+    if (sn == 0) {
+        snprintf(slotpol, sizeof(slotpol), "plain");
+    }
+
+    add_flag(keypol, sizeof(keypol), &kn, k->private_key ? "ECC-priv"
+             : (ATECC608_KEY_TYPE_ECC == k->key_type) ? "ECC-pub" : "non-ECC");
+    if (k->pub_info)    { add_flag(keypol, sizeof(keypol), &kn, "pub-info"); }
+    if (k->lockable)    { add_flag(keypol, sizeof(keypol), &kn, "lockable"); }
+    if (k->req_random)  { add_flag(keypol, sizeof(keypol), &kn, "req-random"); }
+    if (k->req_auth)    { snprintf(t, sizeof(t), "req-auth(key=%u)", k->auth_key);
+                           add_flag(keypol, sizeof(keypol), &kn, t); }
+    if (k->persist_dis) { add_flag(keypol, sizeof(keypol), &kn, "persist-dis"); }
+    if (k->x509_id)     { snprintf(t, sizeof(t), "x509=%u", k->x509_id);
+                           add_flag(keypol, sizeof(keypol), &kn, t); }
+
+    printf("%4d  0x%04X  0x%04X  %-42s | %s\n", n, sw, kw, slotpol, keypol);
+}
+
+// config — Phase 6 demo: decoded read-back of the config zone. Reads the
+// zone with the module API (atecc608_read_config_zone) and decodes it with
+// the Phase 4A config builder (atecc608_config_parse), printing every
+// field in human form — including the per-slot policy table. READ-ONLY; a
+// demo of the module API, not a provisioning tool (`prov status` keeps the
+// raw byte dump, the planned-image diff and the littlefs persistence state).
+static void commandConfig(char *cmdLine)
+{
+    (void)cmdLine;
+    uint8_t zone[ATECC608_CONFIG_ZONE_LEN];
+    atecc608_config_intent_t cfg;
+    atecc608_status_t st;
+
+    st = atecc608_read_config_zone(zone);
+    if (ATECC608_OK != st) {
+        report_fail("READ CONFIG ZONE", st);
+        return;
+    }
+    if (ATECC608_OK != atecc608_config_parse(zone, &cfg)) {
+        printf("config zone parse FAILED (unexpected raw values)\n");
+        return;
+    }
+
+    char locked[64];
+    size_t ln = 0;
+    char d[8];
+    for (int n = 0; n <= ATECC608_MAX_DATA_SLOT; n++) {
+        if ((cfg.slot_locked & (1u << n)) == 0u) {
+            snprintf(d, sizeof(d), "%d", n);
+            add_flag(locked, sizeof(locked), &ln, d);
+        }
+    }
+    if (ln == 0) {
+        snprintf(locked, sizeof(locked), "none");
+    }
+
+    printf("config zone — decoded (atecc608_config_parse):\n");
+    printf("  I2C address (byte 16):    0x%02X (7-bit 0x%02X)\n",
+           zone[16], zone[16] >> 1);
+    printf("  lock bytes [86:88]:       %02X %02X  (byte 86 data zone, byte 87 config zone; 00 = locked)\n",
+           zone[86], zone[87]);
+    printf("  SlotLocked (88..89):      %02X %02X  (bit n = 0 -> slot n locked: %s)\n",
+           zone[88], zone[89], locked);
+    printf("  ChipOptions:              I/O protection %s (key slot %u), KDF AES %s, "
+           "ecdh_prot=%u (%s), kdf_prot=%u (%s), POST %s\n",
+           cfg.io_prot_en ? "ON" : "off", cfg.io_prot_key,
+           cfg.kdf_aes_en ? "on" : "off",
+           cfg.ecdh_prot, cfg.ecdh_prot ? "encrypted forced" : "clear ok",
+           cfg.kdf_prot, cfg.kdf_prot ? "encrypted forced" : "clear ok",
+           cfg.post_en ? "on" : "off");
+    if (cfg.count_match_en) {
+        printf("  CountMatch:               on (key %u)\n", cfg.count_match_key);
+    } else {
+        printf("  CountMatch:               off\n");
+    }
+    printf("  ChipMode:                 i2c-extra %s, TTL %s, watchdog %s, clk-div %u\n",
+           cfg.i2c_extra ? "on" : "off", cfg.ttl_en ? "on" : "off",
+           cfg.wd_long ? "10 s" : "1.3 s", cfg.clk_div);
+    if (cfg.use_lock_en) {
+        printf("  UseLock:                  on (key %u)\n", cfg.use_lock_key);
+    } else {
+        printf("  UseLock:                  off\n");
+    }
+    printf("  VolKeyPerm:               %s (slot %u)\n",
+           cfg.vol_key_perm_en ? "on" : "off", cfg.vol_key_perm_slot);
+    if (ATECC608_SB_MODE_OFF == cfg.sb_mode) {
+        printf("  SecureBoot:               off\n");
+    } else {
+        printf("  SecureBoot:               %s (persist %s, rand-nonce %s, "
+               "pubkey slot %u, digest slot %u)\n",
+               (ATECC608_SB_MODE_FULL_COPY == cfg.sb_mode) ? "full-copy" : "full-store",
+               cfg.sb_persist ? "on" : "off", cfg.sb_rand_nonce ? "on" : "off",
+               cfg.sb_pubkey_slot, cfg.sb_digest_slot);
+    }
+    printf("  KDF IV source:            location %u, slot %u\n",
+           cfg.kdf_lv_loc, cfg.kdf_lv_slot);
+    printf("  UserExtra / UserExtraAdd: 0x%02X / 0x%02X\n",
+           cfg.user_extra, cfg.user_extra_add);
+    printf("  X509 format:              %02X %02X %02X %02X\n",
+           cfg.x509_format[0], cfg.x509_format[1],
+           cfg.x509_format[2], cfg.x509_format[3]);
+    printf("  counters (decoded):       counter 0 = %lu, counter 1 = %lu\n",
+           (unsigned long)cfg.counter[0].value, (unsigned long)cfg.counter[1].value);
+
+    printf("\n  slot  SlotConfig  KeyConfig   decoded (slot policy | key policy)\n");
+    for (int n = 0; n <= ATECC608_MAX_DATA_SLOT; n++) {
+        print_slot_row(n, zone, &cfg);
     }
 }
 
@@ -847,6 +1010,25 @@ static void provIokeyTest(void)
     }
 }
 
+// prov iokeyshow — DEV-ONLY diagnostic (a production application must not
+// ship this): print the I/O key saved in /io_key.bin (magic/len/CRC-32
+// checked) so the operator can compare it against the out-of-band durable
+// copy (the console print from `prov iokey`, the dev notes). The I/O key
+// is the bus key of the I/O-protected KDF/ECDH paths; exposing it on a
+// production console would defeat keeping it secret on the chip.
+// READ-ONLY and chip-free: a littlefs read only, no chip commands.
+static void provIokeyShow(void)
+{
+    uint8_t io_key[PROV_IOKEY_LEN];
+    if (!load_io_key_file(io_key)) {
+        return;
+    }
+    printf("I/O key saved in %s (32 B):\n", PROV_IOKEY_PATH);
+    atecc608_print_hex(io_key, sizeof(io_key));
+    printf("DEV-ONLY print: compare against the out-of-band copy. A\n"
+           "production application must not expose this key.\n");
+}
+
 // prov config — WRITE (reversible while the zone is unlocked): build the
 // agreed intent, provision (unlocked check -> read -> preserve byte 16 and
 // SlotLocked 88..89 -> write -> read-back verify), report the result + the
@@ -1346,6 +1528,8 @@ static void commandProv(char *cmdLine)
         provIokey();
     } else if (take_word(&rest, "iokeytest")) {
         provIokeyTest();
+    } else if (take_word(&rest, "iokeyshow")) {
+        provIokeyShow();
     } else if (take_word(&rest, "config")) {
         provConfig();
     } else if (take_word(&rest, "lock")) {
@@ -1362,7 +1546,7 @@ static void commandProv(char *cmdLine)
         provKdf(rest);
     } else {
         printf("usage: prov status | prov randtest | prov iokey | prov iokeytest"
-               " | prov config | prov lock [CONFIRM] | prov genkey <slot>"
+               " | prov iokeyshow | prov config | prov lock [CONFIRM] | prov genkey <slot>"
                " | prov pubkey <slot> | prov kdf <slot> | prov lockdata [CONFIRM]"
                " | prov lockslot <slot> [CONFIRM]\n");
     }
@@ -1384,6 +1568,7 @@ static struct command_t commands[] = {
     {"info", commandInfo},
     {"serial", commandSerial},
     {"lock", commandLock},
+    {"config", commandConfig},
     {"prov", commandProv},
 };
 
