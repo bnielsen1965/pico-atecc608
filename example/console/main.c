@@ -44,6 +44,24 @@
 //   prov lock      - WRITE, IRREVERSIBLE: verify zone vs intent -> typed
 //                    confirm -> Lock with the summary CRC
 //
+// Phase 5+ commands (the on-chip ECC key lifecycle, see PLAN.md):
+//   prov genkey <slot> - WRITE: fresh ECC P-256 key pair in slot 1/3/4/5/6/12
+//                    (data zone must be UNLOCKED; prints the 64-B public
+//                    key; re-running REPLACES the key and voids any binding
+//                    to the previous one)
+//   prov pubkey <slot> - READ-ONLY: public key of the slot's stored ECC
+//                    private key (GenKey mode 0x00; works at any time,
+//                    even after the data-zone lock)
+//   prov lockdata      - WRITE, IRREVERSIBLE: lock the data zone (typed
+//                    CONFIRM); afterwards no fresh keys, and
+//                    `prov iokeytest` should pass
+//   prov lockslot <slot> - WRITE, IRREVERSIBLE: lock one data slot (typed
+//                    CONFIRM); the chip enforces the slot's Lockable flag
+//
+// The agreed Phase 5+ bench order: prov genkey 1; prov genkey 3..6;
+// prov genkey 12 (RECORD every printed public key) -> prov lockdata
+// CONFIRM -> prov iokeytest (must PASS) -> prov lockslot 14 CONFIRM.
+//
 // Typed confirm on lock: the command handlers run on core1 while the
 // console's stdin loop runs on core0, so an interactive "type yes" prompt
 // inside a command would have its keystrokes split between the two cores.
@@ -180,6 +198,10 @@ static void commandHelp(char *cmdLine)
     printf("                (read-only; uses the key saved in /io_key.bin)\n");
     printf("prov config   - write the agreed config zone (idempotent)\n");
     printf("prov lock     - LOCK the config zone (IRREVERSIBLE; add CONFIRM)\n");
+    printf("prov genkey <slot>  - fresh ECC key pair in slot 1/3/4/5/6/12 (data zone unlocked)\n");
+    printf("prov pubkey <slot>  - public key of the slot's private key (read-only; works locked)\n");
+    printf("prov lockdata [CONFIRM]    - LOCK the data zone (IRREVERSIBLE)\n");
+    printf("prov lockslot <slot> [CONFIRM] - LOCK one data slot (IRREVERSIBLE)\n");
 }
 
 static void commandBootrom(char *cmdLine)
@@ -839,6 +861,316 @@ static void provLock(const char *rest)
     }
 }
 
+// --- Phase 5+: the on-chip ECC key lifecycle (see the top-of-file list) ----
+
+// Parse a slot number (0..15) from the whole argument string; report on
+// failure. (A manual parse: the argument is at most two digits.)
+static bool parse_slot_arg(const char *text, uint8_t *slot)
+{
+    uint32_t v = 0;
+    int digits = 0;
+
+    while (('0' <= *text) && (*text <= '9')) {
+        v = (10u * v) + (uint32_t)(*text - '0');
+        text++;
+        digits++;
+    }
+    if ((0 == digits) || (v > ATECC608_MAX_DATA_SLOT) || ('\0' != *text)) {
+        printf("expected a slot number 0..15, got \"%s\"\n", text);
+        return false;
+    }
+    *slot = (uint8_t)v;
+    return true;
+}
+
+// The ECC private key slots of the agreed config (dev_config.h): 1 =
+// identity, 3-6 = FIDO2 credential keys (pre-generated), 12 = spare. The
+// chip's config check below is authoritative; this allowlist only keeps a
+// fat-fingered slot (e.g. the I/O key's 14) out of the command.
+static bool is_genkey_slot(uint8_t slot)
+{
+    return ((1u == slot) || ((3u <= slot) && (slot <= 6u)) || (12u == slot));
+}
+
+// prov genkey <slot> — WRITE: generate a fresh ECC P-256 key pair in the
+// slot (GenKey mode 0x04; the data zone must be UNLOCKED — a locked CA2
+// chip would only recompute the existing public key, so this command
+// refuses instead of silently lying). Guards: the slot allowlist (1,
+// 3-6, 12) and the chip's actual config (ECC private slot with the
+// GenKey bit). Prints the 64-byte public key (re-fetchable any time via
+// `prov pubkey <slot>`); the private key never leaves the chip.
+static void provGenkey(const char *rest)
+{
+    uint8_t slot;
+    uint8_t pub[ATECC608_PUBKEY_LEN];
+    uint8_t zone[ATECC608_CONFIG_ZONE_LEN];
+    atecc608_config_intent_t cfg;
+    bool locked = false;
+    atecc608_status_t st;
+
+    if (!parse_slot_arg(rest, &slot)) {
+        printf("usage: prov genkey <slot 0-15>\n");
+        return;
+    }
+    if (!is_genkey_slot(slot)) {
+        printf("slot %u is not one of the agreed ECC private key slots\n"
+               "(1, 3, 4, 5, 6, 12) — no key generated.\n", (unsigned)slot);
+        return;
+    }
+    st = atecc608_is_locked(ATECC608_ZONE_DATA, &locked);
+    if (ATECC608_OK != st) {
+        report_fail("IS_LOCKED (data)", st);
+        return;
+    }
+    if (locked) {
+        printf("data zone is LOCKED — a fresh key can no longer be generated.\n"
+               "(On this CA2 chip, GenKey mode 0x04 on a locked zone would\n"
+               "only recompute the existing public key; this command\n"
+               "refuses instead of doing that silently.)\n");
+        return;
+    }
+    // The slot must be an ECC private key slot with the GenKey bit in the
+    // chip's ACTUAL config (readable even when locked).
+    st = atecc608_read_config_zone(zone);
+    if (ATECC608_OK != st) {
+        report_fail("READ CONFIG ZONE", st);
+        return;
+    }
+    st = atecc608_config_parse(zone, &cfg);
+    if (ATECC608_OK != st) {
+        report_fail("PARSE CONFIG ZONE", st);
+        return;
+    }
+    if (!cfg.key[slot].private_key || !cfg.slot[slot].gen_key) {
+        printf("slot %u is not an ECC private key slot with the GenKey bit\n"
+               "in the current config — no key generated.\n", (unsigned)slot);
+        return;
+    }
+
+    printf("WARNING: if slot %u already holds a key, this REPLACES it and\n"
+           "voids everything (e.g. a FIDO2 credential record) bound to the\n"
+           "previous public key.\n", (unsigned)slot);
+    st = atecc608_genkey(slot, pub);
+    if (ATECC608_OK != st) {
+        report_fail("GENKEY", st);
+        return;
+    }
+    printf("slot %u: fresh ECC P-256 key pair generated.\n", (unsigned)slot);
+    printf("RECORD THIS — the public key (64 B, X || Y big-endian). The\n"
+           "private key never leaves the chip. The public key can be\n"
+           "re-fetched any time (even after `prov lockdata`) with\n"
+           "`prov pubkey %u`.\n", (unsigned)slot);
+    atecc608_print_hex(pub, sizeof(pub));
+}
+
+// prov pubkey <slot> — READ-ONLY: the 64-byte public key of the ECC
+// private key currently in the slot (GenKey mode 0x00 — recomputed from
+// the stored private key; works at any time, even with the data zone
+// locked). Use it to re-fetch a recorded public key or to verify one
+// before `prov lockdata`. (Not `atecc608_read_pubkey`, which reads a
+// STORED 72-byte public key from slots 8-15.)
+static void provPubkey(const char *rest)
+{
+    uint8_t slot;
+    uint8_t pub[ATECC608_PUBKEY_LEN];
+    atecc608_status_t st;
+
+    if (!parse_slot_arg(rest, &slot)) {
+        printf("usage: prov pubkey <slot 0-15>\n");
+        return;
+    }
+    st = atecc608_get_pubkey(slot, pub);
+    if (ATECC608_OK != st) {
+        report_fail("GET PUBKEY", st);
+        printf("(the slot must be an ECC private key slot in the current config)\n");
+        return;
+    }
+    printf("slot %u public key (64 B, X || Y big-endian):\n", (unsigned)slot);
+    atecc608_print_hex(pub, sizeof(pub));
+}
+
+// The module's confirm gate for `prov lockdata` (same pattern as
+// provLockConfirm: the command line itself carries the typed confirm).
+struct prov_data_lock_ctx {
+    bool confirmed;
+};
+
+static bool provLockDataConfirm(const char *prompt, void *vctx)
+{
+    struct prov_data_lock_ctx *ctx = (struct prov_data_lock_ctx *)vctx;
+    printf("about to: %s\n", prompt);
+    if (!ctx->confirmed) {
+        printf("NOT locked. To proceed, type the full command:\n\n"
+               "    prov lockdata %s\n", PROV_LOCK_TOKEN);
+        return false;
+    }
+    return true;
+}
+
+// prov lockdata [CONFIRM] — WRITE, IRREVERSIBLE: locks the data zone
+// (all 16 slots + OTP). Consequences: no more fresh key generation
+// (GenKey mode 0x04 needs the zone unlocked), and `prov iokeytest`
+// should now PASS (the I/O-protected KDF is gated on this lock).
+// Without the token: reports the state and aborts. With CONFIRM: the
+// module's guards (config zone locked, data zone unlocked, confirm)
+// run, then the lock; the new state is verified by re-reading it.
+static void provLockData(const char *rest)
+{
+    struct prov_data_lock_ctx ctx = {
+        .confirmed = (0 == strcmp(rest, PROV_LOCK_TOKEN)),
+    };
+    bool locked = false;
+    atecc608_status_t st;
+
+    if ((rest[0] != '\0') && !ctx.confirmed) {
+        printf("usage: prov lockdata [CONFIRM]\n");
+        return;
+    }
+    st = atecc608_is_locked(ATECC608_ZONE_DATA, &locked);
+    if (ATECC608_OK != st) {
+        report_fail("IS_LOCKED (data)", st);
+        return;
+    }
+    if (locked) {
+        printf("data zone is already LOCKED — nothing to do.\n");
+        return;
+    }
+    printf("data zone is UNLOCKED. Re-fetch the public keys of all ECC\n"
+           "slots first (`prov pubkey <slot>`): after the lock no fresh\n"
+           "keys can be created (existing ones stay re-fetchable).\n");
+    st = atecc608_lock_data_zone(provLockDataConfirm, &ctx);
+    if (ATECC608_OK == st) {
+        st = atecc608_is_locked(ATECC608_ZONE_DATA, &locked);
+        if ((ATECC608_OK == st) && locked) {
+            printf("data zone LOCKED (irreversible; verified by re-read).\n"
+                   "Next: `prov iokeytest` should now PASS (the KDF\n"
+                   "target=output is gated on this lock).\n");
+        } else {
+            printf("the lock command succeeded, but the re-read does NOT show\n"
+                   "the data zone locked — investigate before proceeding.\n");
+        }
+        return;
+    }
+    if (ATECC608_ERR_CHIP_STATE == st) {
+        // Typed-confirm abort (or a guard the pre-checks above could not
+        // see, e.g. the config zone being unlocked): nothing was locked.
+        printf("lock aborted — nothing was locked.\n");
+    } else {
+        report_fail("LOCK DATA ZONE", st);
+    }
+}
+
+// The module's confirm gate for `prov lockslot <slot>`.
+struct prov_slot_lock_ctx {
+    bool confirmed;
+    uint8_t slot;
+};
+
+static bool provLockSlotConfirm(const char *prompt, void *vctx)
+{
+    struct prov_slot_lock_ctx *ctx = (struct prov_slot_lock_ctx *)vctx;
+    printf("about to: %s (slot %u)\n", prompt, (unsigned)ctx->slot);
+    if (!ctx->confirmed) {
+        printf("NOT locked. To proceed, type the full command:\n\n"
+               "    prov lockslot %u %s\n", (unsigned)ctx->slot, PROV_LOCK_TOKEN);
+        return false;
+    }
+    return true;
+}
+
+// Parse "slot [CONFIRM]": a slot number (0..15) followed by either
+// nothing or exactly the CONFIRM token; report usage on anything else.
+static bool parse_lockslot_args(const char *text, uint8_t *slot, bool *confirmed)
+{
+    uint32_t v = 0;
+    int digits = 0;
+
+    while (('0' <= *text) && (*text <= '9')) {
+        v = (10u * v) + (uint32_t)(*text - '0');
+        text++;
+        digits++;
+    }
+    while (' ' == *text) {
+        text++;
+    }
+    if ((0 == digits) || (v > ATECC608_MAX_DATA_SLOT)
+        || ((text[0] != '\0') && (0 != strcmp(text, PROV_LOCK_TOKEN)))) {
+        printf("usage: prov lockslot <slot 0-15> [CONFIRM]\n");
+        return false;
+    }
+    *slot = (uint8_t)v;
+    *confirmed = (0 == strcmp(text, PROV_LOCK_TOKEN));
+    return true;
+}
+
+// prov lockslot <slot> [CONFIRM] — WRITE, IRREVERSIBLE for that slot:
+// locks a single data slot. The chip enforces that the slot is marked
+// Lockable in the (locked) config; the pre-checks below only make the
+// refusal readable. Production use: slot 14 (the I/O key) — run it only
+// AFTER `prov iokeytest` passes, so the key stays re-keyable until it is
+// proven.
+static void provLockSlot(const char *rest)
+{
+    struct prov_slot_lock_ctx ctx = { 0 };
+    uint8_t zone[ATECC608_CONFIG_ZONE_LEN];
+    atecc608_config_intent_t cfg;
+    atecc608_status_t st;
+
+    if (!parse_lockslot_args(rest, &ctx.slot, &ctx.confirmed)) {
+        return;
+    }
+    st = atecc608_read_config_zone(zone);
+    if (ATECC608_OK != st) {
+        report_fail("READ CONFIG ZONE", st);
+        return;
+    }
+    st = atecc608_config_parse(zone, &cfg);
+    if (ATECC608_OK != st) {
+        report_fail("PARSE CONFIG ZONE", st);
+        return;
+    }
+    // SlotLocked polarity: bit n = 1 -> slot n UNLOCKED, 0 -> locked.
+    if ((cfg.slot_locked & (uint16_t)(1u << ctx.slot)) == 0u) {
+        printf("slot %u is already individually locked — nothing to do.\n",
+               (unsigned)ctx.slot);
+        return;
+    }
+    if (!cfg.key[ctx.slot].lockable) {
+        printf("slot %u is not marked Lockable in the current config — the\n"
+               "chip will refuse the lock. No command issued.\n",
+               (unsigned)ctx.slot);
+        return;
+    }
+    st = atecc608_lock_data_slot(ctx.slot, provLockSlotConfirm, &ctx);
+    if (ATECC608_OK == st) {
+        // Verify by re-reading the SlotLocked word.
+        st = atecc608_read_config_zone(zone);
+        if ((ATECC608_OK == st)
+            && (ATECC608_OK == atecc608_config_parse(zone, &cfg))
+            && ((cfg.slot_locked & (uint16_t)(1u << ctx.slot)) == 0u)) {
+            printf("slot %u LOCKED (irreversible; verified by re-reading SlotLocked).\n",
+                   (unsigned)ctx.slot);
+            if (PROV_IO_KEY_SLOT == ctx.slot) {
+                printf("the I/O key slot: it can no longer be re-keyed.\n");
+            }
+        } else {
+            printf("the lock command succeeded, but the re-read does NOT show\n"
+                   "slot %u locked — investigate before proceeding.\n",
+                   (unsigned)ctx.slot);
+        }
+        return;
+    }
+    if (ATECC608_ERR_CHIP_STATE == st) {
+        printf("lock aborted — nothing was locked.\n");
+    } else {
+        report_fail("LOCK SLOT", st);
+        if (ATECC608_ERR_EXEC == st) {
+            printf("the chip refused: the slot must be marked Lockable in the\n"
+                   "config and not already locked.\n");
+        }
+    }
+}
+
 // Consume the whole word w at the start of *pline (it must be followed by
 // a space or end-of-line); advance past it and any following spaces.
 static bool take_word(char **pline, const char *w)
@@ -874,9 +1206,19 @@ static void commandProv(char *cmdLine)
         provConfig();
     } else if (take_word(&rest, "lock")) {
         provLock(rest);
+    } else if (take_word(&rest, "lockdata")) {
+        provLockData(rest);
+    } else if (take_word(&rest, "lockslot")) {
+        provLockSlot(rest);
+    } else if (take_word(&rest, "genkey")) {
+        provGenkey(rest);
+    } else if (take_word(&rest, "pubkey")) {
+        provPubkey(rest);
     } else {
         printf("usage: prov status | prov randtest | prov iokey | prov iokeytest"
-               " | prov config | prov lock [CONFIRM]\n");
+               " | prov config | prov lock [CONFIRM] | prov genkey <slot>"
+               " | prov pubkey <slot> | prov lockdata [CONFIRM]"
+               " | prov lockslot <slot> [CONFIRM]\n");
     }
 }
 

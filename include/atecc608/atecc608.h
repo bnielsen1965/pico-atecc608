@@ -114,8 +114,13 @@ atecc608_status_t atecc608_read_slot(uint8_t slot, uint8_t data[ATECC608_DATA_SL
 // unlocked (and the slot's SlotConfig permits writes).
 atecc608_status_t atecc608_write_slot(uint8_t slot, const uint8_t data[ATECC608_DATA_SLOT_LEN]);
 
-// Read the 64-byte ECC P-256 public key of a slot (slot configured for
-// clear reads).
+// Read the 64-byte ECC P-256 public key STORED in a slot via a data-zone
+// READ (slots 8-15 only — the only ones large enough for a 72-byte stored
+// key; the slot must permit a clear read in the current config). For
+// "the public key of the ECC private key in slot N" use
+// atecc608_get_pubkey() from atecc608_prov.h instead: the public key of
+// an on-chip private key is never stored in a data slot and comes from
+// the GenKey command.
 atecc608_status_t atecc608_read_pubkey(uint8_t slot, uint8_t pub[ATECC608_PUBKEY_LEN]);
 
 // --- status --------------------------------------------------------------------

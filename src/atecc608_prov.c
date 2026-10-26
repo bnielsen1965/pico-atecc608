@@ -205,6 +205,21 @@ atecc608_status_t atecc608_genkey(uint8_t slot, uint8_t pub[ATECC608_PUBKEY_LEN]
     return atecc608_map_status(st);
 }
 
+atecc608_status_t atecc608_get_pubkey(uint8_t slot, uint8_t pub[ATECC608_PUBKEY_LEN])
+{
+    ATCA_STATUS st;
+
+    if ((slot > ATECC608_MAX_DATA_SLOT) || (NULL == pub)) {
+        return ATECC608_ERR_BAD_PARAM;
+    }
+
+    // GenKey mode 0x00: recompute the public key from the stored private
+    // key. Read-only (the chip changes nothing), so no confirm gate, and
+    // it works even with the data zone locked — the point of the mode.
+    st = atcab_get_pubkey(slot, pub);
+    return atecc608_map_status(st);
+}
+
 atecc608_status_t atecc608_write_iokey(uint8_t slot,
                                        const uint8_t key[ATECC608_DATA_SLOT_LEN])
 {

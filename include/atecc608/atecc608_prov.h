@@ -96,6 +96,19 @@ atecc608_status_t atecc608_lock_data_slot(uint8_t slot,
 // generated again, so this is re-runnable and is not confirm-gated.
 atecc608_status_t atecc608_genkey(uint8_t slot, uint8_t pub[ATECC608_PUBKEY_LEN]);
 
+// Compute the 64-byte ECC P-256 public key of the private key currently
+// stored in an ECC private key slot (GenKey mode 0x00). READ-ONLY: it
+// recomputes the public key from the stored private key and changes
+// nothing, so it works at any time — even with the data zone locked —
+// and is not confirm-gated. The public key of an on-chip ECC private key
+// slot is never stored in a data slot, so this (or the response of
+// atecc608_genkey) is the only way to obtain it. NOT the same as
+// atecc608_read_pubkey() (atecc608.h): that one is a data-zone READ of a
+// 72-byte STORED public key (slots 8-15 only, for off-chip signers).
+// The slot must be configured as an ECC private key slot in the current
+// config; anything else is rejected by the chip (ATECC608_ERR_EXEC).
+atecc608_status_t atecc608_get_pubkey(uint8_t slot, uint8_t pub[ATECC608_PUBKEY_LEN]);
+
 // Write a 32-byte I/O protection key to a plain data slot (Phase 4B).
 // Preconditions (ATECC608_ERR_CHIP_STATE, no write issued if violated):
 // the config zone is LOCKED (the chip refuses any data-zone write while

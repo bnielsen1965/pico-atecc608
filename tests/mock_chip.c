@@ -27,8 +27,11 @@
 //               4-byte binary value
 //   UPDATE_EXTRA 0x20 param1 = 0 UserExtra (byte 84) / 1 Selector (85),
 //               param2 = new value; one-shot per byte
-//   GENKEY 0x40 param1 = 0x04 (private), param2 = slot; response = 64-byte
-//               public key
+//   GENKEY 0x40 param1 = 0x00 (public key from the stored private key;
+//               works at any time, even data-zone-locked, and does not
+//               need the SlotConfig GenKey bit) or 0x04 (fresh private
+//               key; needs the SlotConfig GenKey bit and the data zone
+//               UNLOCKED), param2 = slot; response = 64-byte public key
 //   INFO 0x30   param1 = 0 (revision); response = 4 bytes 00 00 60 05
 //   RANDOM 0x1B response = 32 bytes
 //
@@ -421,13 +424,10 @@ static void mock_handle_update_extra(mock_chip_t *chip, uint8_t param1, uint16_t
 
 static void mock_handle_genkey(mock_chip_t *chip, uint8_t param1, uint16_t param2)
 {
+    const uint8_t mode = (uint8_t)(param1 & GENKEY_MODE_MASK);
     const uint16_t slot = param2;
     uint8_t pub[ATECC608_PUBKEY_LEN];
 
-    if ((param1 & 0x1Cu) != 0x04u) { // GENKEY_MODE_PRIVATE
-        mock_resp_exec(chip);
-        return;
-    }
     if (slot > 15u) {
         mock_resp_exec(chip);
         return;
@@ -436,17 +436,32 @@ static void mock_handle_genkey(mock_chip_t *chip, uint8_t param1, uint16_t param
         mock_resp_exec(chip); // not a private key slot
         return;
     }
-    if ((mock_slot_cfg(chip, slot) & 0x2000u) == 0u) {
-        // Datasheet Table 2-10: private key regeneration requires the
-        // SlotConfig GenKey bit (bit 13).
-        mock_resp_exec(chip);
-        return;
+    if (GENKEY_MODE_PRIVATE == mode) {
+        // A fresh private key may only be generated while the data zone
+        // is unlocked (key material cannot change in a locked zone), and
+        // the slot needs the SlotConfig GenKey bit (bit 13; datasheet
+        // Table 2-10).
+        if ((mock_slot_cfg(chip, slot) & 0x2000u) == 0u) {
+            mock_resp_exec(chip);
+            return;
+        }
+        if (mock_data_locked(chip)) {
+            mock_resp_exec(chip);
+            return;
+        }
     }
-    if (mock_data_locked(chip)) {
-        mock_resp_exec(chip); // key material cannot change in a locked zone
-        return;
-    }
-    // Fake, deterministic "public key" (no P-256 math in the mock).
+    // GENKEY_MODE_PUBLIC (0x00): recompute the public key from the stored
+    // private key. Works at any time — including with the data zone
+    // locked — and does not require the SlotConfig GenKey bit (that bit
+    // gates private key REGENERATION only; the 608A-TFLXTLS fixed config
+    // lists "GenKey - Public Key Generation" as valid for slots without
+    // it).
+    //
+    // Fake, deterministic "public key" (no P-256 math in the mock): the
+    // same function of the slot in both modes, so mode 0x00 "recomputes"
+    // exactly the key mode 0x04 just generated. (The mock does not track
+    // whether a private key was ever generated in the slot; on a real
+    // chip a slot with no valid key would behave differently.)
     for (int i = 0; i < ATECC608_PUBKEY_LEN; i++) {
         pub[i] = (uint8_t)((slot * 7u + (uint16_t)i * 3u + 1u) & 0xFFu);
     }

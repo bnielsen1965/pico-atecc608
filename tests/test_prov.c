@@ -343,6 +343,46 @@ static void t_genkey(void)
     CHECK(ATECC608_ERR_BAD_PARAM == atecc608_genkey(16, pub));
 }
 
+static void t_get_pubkey(void)
+{
+    atecc608_config_intent_t cfg;
+    uint8_t pub[ATECC608_PUBKEY_LEN];
+    uint8_t pub2[ATECC608_PUBKEY_LEN];
+
+    printf("t_get_pubkey\n");
+    setup();
+    fill_golden_config(&cfg);
+    CHECK(ATECC608_OK == atecc608_provision_config(&cfg));
+
+    // Golden slot 0: ECC private. The public key is never stored in a
+    // data slot; mode 0x00 recomputes it from the stored private key.
+    CHECK(ATECC608_OK == atecc608_get_pubkey(0, pub));
+    CHECK(0x01u == pub[0]);  // mock: pub[i] = slot*7 + i*3 + 1
+    CHECK(0x04u == pub[1]);
+    CHECK(0x07u == pub[2]);
+
+    // Consistency: mode 0x00 "recomputes" exactly the key that mode 0x04
+    // just generated for the same slot.
+    CHECK(ATECC608_OK == atecc608_genkey(0, pub2));
+    CHECK(0 == memcmp(pub, pub2, sizeof(pub)));
+
+    // The point of mode 0x00: it keeps working after the data-zone lock,
+    // when mode 0x04 is gone.
+    CHECK(ATECC608_OK == atecc608_lock_config_zone(&cfg, confirm_hook, NULL));
+    CHECK(ATECC608_OK == atecc608_lock_data_zone(confirm_hook, NULL));
+    CHECK(ATECC608_OK == atecc608_get_pubkey(0, pub2));
+    CHECK(0 == memcmp(pub, pub2, sizeof(pub)));
+    // ...and mode 0x04 is really refused once the data zone is locked.
+    CHECK(ATECC608_ERR_EXEC == atecc608_genkey(0, pub2));
+
+    // Slot 1 is not a private key slot: the chip rejects it.
+    CHECK(ATECC608_ERR_EXEC == atecc608_get_pubkey(1, pub));
+
+    // Invalid arguments: rejected before any chip command.
+    CHECK(ATECC608_ERR_BAD_PARAM == atecc608_get_pubkey(0, NULL));
+    CHECK(ATECC608_ERR_BAD_PARAM == atecc608_get_pubkey(16, pub));
+}
+
 static void t_iokey(void)
 {
     atecc608_config_intent_t cfg;
@@ -492,6 +532,7 @@ int main(void)
     t_lock_data_zone();
     t_lock_data_slot();
     t_genkey();
+    t_get_pubkey();
     t_iokey();
     t_counters();
     t_counter_max();
