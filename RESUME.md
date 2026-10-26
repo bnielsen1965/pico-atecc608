@@ -8,7 +8,12 @@ The bench sequence is COMPLETE — including the production-only
 `prov lockslot 14 CONFIRM` (executed 2026-10-26; the chip config is
 now frozen for production). Phase 7 is SCOPED (2026-10-26 — read-only
 `selftest` on-hardware suite + `docs/BRINGUP.md` bring-up checklist;
-scope in PLAN.md). Bench record: the ECC slots (1, 3–6, 12) are
+scope in PLAN.md). Sub-step 7.1 is BUILT (2026-10-26, `0242df2` — the
+`selftest` console command runs the 8 generic invariants, read-only;
+the I/O-key round-trip core is now shared with `prov iokeytest`); the
+current fully-locked config-zone CRC is **C904** (host-computed,
+cross-checked against both recorded CRCs — it is the 7.2 golden; see
+the newest "Latest state" paragraph). Awaiting the 7.4 bench run. Bench record: the ECC slots (1, 3–6, 12) are
 GenKey'd
 (all six public keys recorded and verified in the "⏸ Where the
 conversation stopped" section below), the DATA ZONE IS LOCKED (one-way
@@ -442,6 +447,51 @@ criterion is MET; the chip config is frozen for production.**
   dev notes (2026-10-26, confirmed in chat): the littlefs copy, the
   console print in the state list above, the dev notes, and slot 14 on
   the chip are all the same key.
+
+**Latest state (2026-10-26, Phase 7.1): the `selftest` command is
+BUILT — the read-only on-hardware validation suite (generic
+invariants, sub-step 7.1). Awaiting its first hardware run (the 7.4
+bench).**
+- `selftest` (top-level console command; READ-ONLY — safe on the
+  frozen production chip, HARD RULE compliant): 8 ordered checks,
+  `[PASS]/[FAIL]` + one detail line each, final verdict (`SELFTEST:
+  n/n checks PASSED` or the failure count): (1) probe + info (wake
+  ok, part 0x60 rev 5 — a dead chip aborts the suite); (2) random ×2
+  (not the 0xFFFF0000 factory pattern, fetches differ); (3) config
+  zone (parse ok, lock bytes 00 00, SlotLocked FF BF, I2C 0xC0,
+  writable region byte-identical to the agreed dev_config image — the
+  planned-image diff is 0); (4) counters 0/0 via
+  `atecc608_counter_read` (first hardware exercise of that API);
+  (5) the six ECC public keys (slots 1, 3–6, 12) via
+  `atecc608_get_pubkey` — 64 B, non-zero, pairwise distinct; (6) two
+  `atecc608_kdf_prf` (slot 7, zero nonce, msg 00..0F) identical;
+  (7) the I/O-key round-trip (slot 14 == /io_key.bin, quiet form);
+  (8) littlefs volume mounted at boot + /io_key.bin valid
+  (magic/len/CRC-32).
+- Refactor (single source of truth for the round-trip procedure): the
+  I/O-key round-trip is now `iokey_roundtrip(verbose, detail, size)`
+  — `prov iokeytest` is its verbose form (same prints as before,
+  including the lock-state context), `selftest` the quiet form. The
+  quiet `iokey_file_valid()` (magic/len/CRC-32, reason in `detail`)
+  backs both `load_io_key_file()` (printing) and the selftest's own
+  [FAIL] detail lines.
+- **Scope fix (PLAN.md, 2026-10-26):** the config-zone CRC is NOT a
+  generic invariant — `atecc608_config_crc16` covers the whole 128-B
+  zone including the chip-unique factory region (serial), so the CRC
+  is chip-specific and moved to the bench-chip goldens. The recorded
+  F6DE was the PRE-DATA-LOCK value (lock bytes 55 00); after
+  lockdata + lockslot 14 the zone changed at byte 86 (55→00) and byte
+  89 (FF→BF). The CURRENT fully-locked zone CRC is **C904**,
+  host-computed 2026-10-26 from the recorded factory bytes (0–15,
+  the pre-write dump above) + the dev_config image + the current lock
+  bytes/SlotLocked. The reconstruction was verified against BOTH
+  recorded CRCs first: post-write (55 55 / FF FF) → **CDC7** ✓ and
+  config-locked-only (55 00 / FF FF) → **F6DE** ✓ — so C904 is
+  byte-exact and is the 7.2 golden.
+- Build: uf2 `build/example/console/pico-atecc608.uf2` 233,984 B
+  (`0242df2`), Pico build warning-clean apart from the known cosmetic
+  ATCA_TA_SUPPORT note; host tests 3/3. The 226,304 B build
+  (`84edf05`) is still LIVE on the chip until the 7.4 bench reflash.
 
 **`prov iokeytest` was BUILT (`8aa8922`), flashed, and RUN (2026-10-24)
 — it returned `clear KDF failed: ATCA_STATUS -12` (execution error) with
@@ -1181,15 +1231,26 @@ bit 13/14 behavior.
   GenKey'd, data zone LOCKED, `prov iokeytest` PASSED (enforced I/O
   protection, host cross-checked — see "⏸ Where the conversation
   stopped"). HARD RULE below applies.
-- **Phase 5 in progress (2026-10-26)** — crypto pass-through, on demand:
+- **Phase 5 DONE (2026-10-26)** — crypto pass-through, on demand:
   the KDF wrapper `atecc608_kdf_prf` is implemented, host-tested
   (mock KDF/NONCE + the enforced I/O-protection output side; ctest 3/3),
   and VALIDATED ON HARDWARE (2026-10-26: `prov kdf 7` twice → identical
   32-B output — the Phase 5 done criterion "at least a KDF round-trip
   validated on hardware" is met; value + host cross-check note in the
   "Latest state (2026-10-26)" paragraph). The console has read-only
-  `prov kdf <slot>`. `sign` / `verify` wrappers come when Phase 7 needs
-  them. HARD RULE below applies.
+  `prov kdf <slot>`. `sign` / `verify` wrappers come on demand.
+  HARD RULE below applies.
+- **Phase 6 DONE (2026-10-26)** — the `config` read-back demo ran on
+  hardware: the decoded zone matches the agreed plan in every field
+  (I2C 0xC0, locks 00 00, SlotLocked FF BF, all 16 slot rows); the
+  dev-only `prov iokeyshow` matched the out-of-band dev notes.
+- **Phase 7 in progress (2026-10-26)** — 7.1 BUILT (`0242df2`):
+  `selftest` runs the 8 generic invariants (read-only; the I/O-key
+  round-trip core is shared with `prov iokeytest`); the current
+  fully-locked config-zone CRC golden **C904** is host-computed and
+  cross-checked (CDC7 + F6DE both reproduced). Remaining: 7.2 bench
+  goldens + full mode, 7.3 `docs/BRINGUP.md`, 7.4 bench run.
+  HARD RULE below applies (the whole suite is read-only).
 
 ## Build (verified green)
 ```sh
