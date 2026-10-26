@@ -10,8 +10,14 @@ PASSED** (2026-10-25, output + host cross-check recorded in the
 functionally VERIFIED end-to-end. The chip ENFORCES I/O protection
 (kdf_prot=1): every target=output KDF returns encrypted output + a
 32-B nonce and must be `atcah_io_decrypt`-ed with the I/O key (Phase 7
-design fact). ONLY REMAINING bench item: `prov lockslot 14 CONFIRM`
-(PRODUCTION ONLY — user decides when). Phase 4B:
+design fact). **Phase 5's KDF wrapper is now IMPLEMENTED + host-tested**
+(2026-10-26, see the newest "Latest state" paragraph): the console has
+read-only `prov kdf <slot>`, the uf2 is rebuilt (218,112 B, NOT yet on
+the chip). NEXT bench step: flash the new uf2 → run `prov kdf 7` TWICE —
+identical 32-B output = determinism + the enforced-mode decrypt with
+/io_key.bin working through the WRAPPER (closes the Phase 5 done
+criterion). REMAINING bench items after that: `prov lockslot 14
+CONFIRM` (PRODUCTION ONLY — user decides when). Phase 4B:
 the chip is fully PROVISIONED. The config zone holds the approved
 planned image and
 is LOCKED (the one-way step ran after explicit user go-ahead); the
@@ -146,9 +152,10 @@ printed public key in RESUME.md) → `prov lockdata CONFIRM` (ONE-WAY) →
 (production only) `prov lockslot 14 CONFIRM`. **Progress 2026-10-25:
 flash + status + all six genkeys + `prov lockdata CONFIRM` +
 `prov iokeytest` (PASS, host cross-checked) ALL DONE — records in the
-paragraphs below; remaining: (production only) `prov lockslot 14
-CONFIRM` — the user decides when (slot 14 stays re-keyable until
-then).**
+paragraphs below; remaining (2026-10-26): the `prov kdf 7` wrapper
+round-trip (two identical runs — see the newest "Latest state"
+paragraph) + (production only) `prov lockslot 14 CONFIRM` — the user
+decides when (slot 14 stays re-keyable until then).**
 
 **Latest state (2026-10-25, bench in progress): flash + GenKey DONE.**
 The Phase 5+ uf2 (215,040 B, `build/example/console/pico-atecc608.uf2`)
@@ -257,17 +264,96 @@ enforces I/O encryption), NOT a key mismatch.**
   **Host cross-check (same H(K,N) recipe): both calls decrypt to the
   SAME true PRF output — PASS independently confirmed:**
   `54 2C B9 5B 04 45 43 7A D3 93 23 19 DC 28 3E 29 0D F9 1F 66 18 71 A0 F7 BF 85 B2 6F 8C E8 0D B1 B4 35 AE A0 40 C4 D7 60 B7 4B BA 95 DE 98 4B 33 6F 89 BF 5C 5C 4B B1 68 32 C2 91 44 E4 4E AC 1A`.
-- **Bench sequence status: 1–5 of 6 DONE** (flash, status, genkey ×6,
-  lockdata, iokeytest PASS). **Remaining: `prov lockslot 14 CONFIRM`
-  — PRODUCTION ONLY, one-way (SlotLocked byte for slot 14,
-  FF→00); the user decides when to run it (now, or at production
-  time). Until then slot 14 stays re-keyable** (a 32-B write to a
+- **Bench sequence status (as of 2026-10-25): 1–5 of 6 DONE** (flash,
+  status, genkey ×6, lockdata, iokeytest PASS). **Remaining: the
+  `prov kdf 7` wrapper round-trip (added 2026-10-26 — see the next
+  paragraph) and `prov lockslot 14 CONFIRM` — PRODUCTION ONLY, one-way
+  (SlotLocked byte for slot 14, FF→00); the user decides when to run it
+  (now, or at production time). Until then slot 14 stays re-keyable** (a 32-B write to a
   non-individually-locked slot stays allowed with the data zone
   locked; `prov iokey` itself would refuse — its precondition still
   says the data zone must be unlocked — so re-keying would need a new
   command). After the slot-14 lock, the chip config is frozen for
   production: no ECC re-gen (data zone locked), no I/O-key change
   (slot 14 locked).
+
+**Latest state (2026-10-26): the Phase 5 KDF wrapper is IMPLEMENTED +
+host-tested; the console gains read-only `prov kdf <slot>`; the uf2 is
+rebuilt — NOT yet on the chip (the `0130207` build is still live).**
+- `atecc608_kdf_prf(slot, nonce, msg, msg_len, io_key, out)` in
+  `include/atecc608/atecc608_crypto.h` + `src/atecc608_crypto.c` (NOT
+  added to atecc608.h, which is not host-testable — the prov-header
+  pattern): PRF mode, source = data slot `slot`, target = output, 32-B
+  derived value; details word = PRF key-len 32 | target-len 32 | AEAD
+  mode 0 | msg_len<<24. The TempKey nonce is loaded (pass-through —
+  the buffer's CONTENTS go into tempkey) right before the KDF; the
+  caller supplies it (NULL = 32 bytes of zero). A FIXED nonce is what
+  makes the output DETERMINISTIC — the vault must re-derive the same
+  key on every unlock, so uniqueness comes from msg (salt ‖ PIN ‖
+  context); a random nonce per call would derive a different key every
+  time.
+- Enforced I/O-protection detection: `resp_nonce` is ZERO-INITIALIZED
+  and the library fills it only if the response carried a trailing
+  nonce (calib_kdf.c copies it out only when the response is long
+  enough); ANY non-zero byte ⇒ the output arrived encrypted ⇒ `io_key`
+  is required (else ATECC608_ERR_BAD_PARAM — the value cannot be
+  recovered) and the 32 B are decrypted IN PLACE with
+  `atcah_io_decrypt` (SHA256 keystream XOR — declared in
+  `lib/host/atca_host.h`, NOT via cryptoauthlib.h; include it
+  explicitly). With a chip that does not enforce I/O protection the
+  response carries no nonce, the data is already clear, and io_key is
+  unused (may be NULL). The zero-init is load-bearing: an
+  uninitialized resp_nonce gave a false "encrypted" detection →
+  spurious ATECC608_ERR_BAD_PARAM (found + fixed while writing the
+  host tests).
+- Mock (`tests/mock_chip.{h,c}`): NONCE (0x16, pass-through load of the
+  32-B payload into tempkey) and KDF (0x56, PRF / source-slot /
+  target-output only; gates: data zone locked + slot ≤ 15 + KeyConfig
+  ≠ 0) handlers; deterministic fake PRF
+  `out[i] = key[i%32] ^ nonce[i%32] ^ msg[i%msg_len] ^ i`; the
+  I/O-protection OUTPUT side (kdf_prot=1: encrypt the 32-B output +
+  append a 32-B response nonce, via the symmetric `atcah_io_decrypt`
+  with a deterministic non-zero nonce) is toggled with
+  `mock_chip_set_kdf_io_prot` / `mock_chip_clear_kdf_io_prot`. The
+  request direction is NOT modeled (documented in mock_chip.h).
+  `MOCK_MAX_RESP` bumped 75 → 99: the KDF response is 32-B target +
+  32-B nonce framed (the real chip does the same; the library buffer
+  CA_MAX_PACKET_SIZE=198 fits; ATCA_RSP_SIZE_MAX=75 only covers
+  GenKey/Verify).
+- New host test `tests/test_crypto.c` (t_kdf_gate / t_kdf_basic /
+  t_kdf_io_prot / t_kdf_source_slot / t_kdf_params — 51 checks, 0
+  failures): gate refusal (data zone unlocked), deterministic
+  re-derivation, enforced mode (decrypts with the right key; refuses
+  without an io_key), source-slot config gate, bad params. The test's
+  `fake_prf` mirrors the mock formula — keep in sync if either
+  changes. ctest 3/3 green (test_config, test_prov, test_crypto).
+- Build wiring: `src/atecc608_crypto.c` added to the `atecc608` lib
+  (top `CMakeLists.txt`) and to `atecc608_host` (+ the new
+  `test_crypto` target) in `tests/CMakeLists.txt`.
+- Console (`example/console/main.c`): `prov kdf <slot>` (READ-ONLY —
+  NONCE + KDF only, safe under the HARD RULE): fixed ZERO nonce, fixed
+  16-B message 0x00..0x0F (same as iokeytest) → the output is
+  deterministic; the I/O key is loaded from /io_key.bin (iokeytest's
+  inline loader was factored into `load_io_key_file()`, now shared by
+  `prov iokeytest` and `prov kdf`); prints the 32-B derived value +
+  "run it again: identical output = deterministic". Help + usage +
+  top-of-file command list updated; the old "the module API has no KDF
+  wrapper yet" comment is updated (iokeytest still uses the raw
+  command — it needs the 64-B target + the opt-in enc variant the
+  curated 32-B wrapper does not cover).
+- uf2 rebuilt: `build/example/console/pico-atecc608.uf2`, 218,112 B
+  (Pico build green; warning-clean apart from the known cosmetic
+  ATCA_TA_SUPPORT note).
+
+**Next, at the bench (read-only — HARD-RULE safe):** flash the new uf2
+→ `prov kdf 7` TWICE: both runs must print the SAME 32 bytes —
+determinism of the fixed nonce+message AND the enforced-mode decrypt
+with /io_key.bin working through the WRAPPER (the Phase 5 done
+criterion "at least a KDF round-trip is validated on hardware", for
+the wrapper). Slot 7 currently holds all zeros (the vault master is
+never written — PRF from a zero key is well-defined), so the check is
+determinism + a successful decrypt, NOT a host-computable value (the
+mock's fake PRF ≠ the chip's SHA-256 PRF).
 
 **`prov iokeytest` was BUILT (`8aa8922`), flashed, and RUN (2026-10-24)
 — it returned `clear KDF failed: ATCA_STATUS -12` (execution error) with
@@ -997,18 +1083,22 @@ bit 13/14 behavior.
 - **Phase 4A DONE** — config builder + guarded provisioning API + host unit
   tests with a mock chip HAL. `ctest` 2/2 green; Pico build warning-clean.
   **Chip untouched.** See "Phase 4A — what was built (and why)" below.
-- **Phase 4B in progress (STOP BOUNDARY: SEQUENCE RE-APPROVAL)** — the
-  actual chip provisioning. Scenario discussion done 2026-10-22; the
-  agreed config is in "Agreed 4B config" above (locked layout / open
-  contents, usable across all apps, I/O protection on). Console uf2
-  flashed; read-only bench steps done (factory zone recorded +
-  verified); SlotLocked (88–89) issue found + fixed (`d6cf44d`). The
-  byte plan was approved 2026-10-23 (bytes unchanged, planned image CRC
-  822F); the write SEQUENCE was re-ordered by a bench discovery (config
-  → lock → iokey — the data zone is unwritable until the config zone is
-  locked) and the code is fixed for it (`48d14cc`). **The new order
-  awaits the user's go-ahead before the one-way lock step.** HARD RULE
-  below applies.
+- **Phase 4B DONE (at the bench 2026-10-23; the Phase 5+ bench 2026-10-25
+  extended it)** — the actual chip provisioning: config zone written
+  (approved plan, CRC 822F) + LOCKED, I/O key in slot 14 + saved to
+  littlefs, final `prov status` verified (LOCKED, lock bytes 55 00,
+  chip-zone CRC F6DE). The write sequence was re-ordered by a bench
+  discovery (config → lock → iokey — the data zone is unwritable until
+  the config zone is locked); then the Phase 5+ bench: six ECC slots
+  GenKey'd, data zone LOCKED, `prov iokeytest` PASSED (enforced I/O
+  protection, host cross-checked — see "⏸ Where the conversation
+  stopped"). HARD RULE below applies.
+- **Phase 5 in progress (2026-10-26)** — crypto pass-through, on demand:
+  the KDF wrapper `atecc608_kdf_prf` is implemented + host-tested (mock
+  KDF/NONCE + the enforced I/O-protection output side; ctest 3/3) and the
+  console has read-only `prov kdf <slot>`; the on-hardware round-trip
+  (two identical `prov kdf 7` runs) is the next bench step. `sign` /
+  `verify` wrappers come when Phase 7 needs them. HARD RULE below applies.
 
 ## Build (verified green)
 ```sh
@@ -1029,13 +1119,14 @@ warning-clean).
 ```sh
 cmake -S tests -B tests/build -DCRYPTOAUTHLIB_SOURCE_DIR=/home/burnin/Projects/cryptoauthlib
 cmake --build tests/build -j
-ctest --test-dir tests/build --output-on-failure   # 2/2: test_config, test_prov
-# or run directly: ./tests/build/test_config  ./tests/build/test_prov
+ctest --test-dir tests/build --output-on-failure   # 3/3: test_config, test_prov, test_crypto
+# or run directly: ./tests/build/test_config  ./tests/build/test_prov  ./tests/build/test_crypto
 ```
 `tests/` is a standalone host CMake project: FetchContent of the same
 v3.8.0, `ca_host` = cryptoauthlib's portable sources (minus
 `hal/hal_rp2350.c` — the mock defines those 8 HAL symbols), `mock_chip`,
-`atecc608_host` (the three Phase-4A module sources). Executables link
+`atecc608_host` (the four HAL-agnostic module sources: config/prov/
+status + the Phase 5 crypto wrapper). Executables link
 `-Wl,--start-group atecc608_host mock_chip ca_host -Wl,--end-group` (plain
 order fails: `test_config` references no mock symbols, so the linker never
 pulls in the mock objects and leaves the HAL symbols unresolved);
@@ -1074,12 +1165,18 @@ pulls in the mock objects and leaves the HAL symbols unresolved);
   provisioning over `atcab_*` (see the header for guarantees + limitations:
   byte-16 preservation, UpdateExtra one-shot, UseLock not modeled, data-zone
   slot 0/3 API restriction).
+- `include/atecc608/atecc608_crypto.h` + `src/atecc608_crypto.c` (Phase 5,
+  2026-10-26) — `atecc608_kdf_prf(slot, nonce, msg, msg_len, io_key, out)`:
+  PRF KDF from a data slot to a 32-B output; caller-supplied TempKey nonce
+  (NULL = zeros → deterministic) and in-place `atcah_io_decrypt` when the
+  response carries a nonce (enforced I/O protection, kdf_prot=1); HAL-
+  agnostic like the prov sources (host-testable).
 - `src/atecc608_status.c` + `src/atecc608_int.h` (4A) — the shared
   `atecc608_map_status` (moved out of `src/atecc608.c` for the host build).
 - `tests/` (4A) — `CMakeLists.txt` (generates its own `atca_config.h` from
   cryptoauthlib's `atca_config.h.in`, same feature set as the top level),
   `mock_chip.{h,c}`, `test_golden.h` (the golden G intent),
-  `test_config.c`, `test_prov.c`.
+  `test_config.c`, `test_prov.c`, `test_crypto.c` (Phase 5 KDF wrapper).
 - `example/console/main.c` + CMakeLists — validation console
   (pico-command-line) over the **module API**: probe/info/serial/lock/
   random (atecc608_*), diag (raw I2C), bootrom, help; Phase 4B adds the

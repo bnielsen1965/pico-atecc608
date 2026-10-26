@@ -369,9 +369,33 @@ A single config struct drives init; everything else is a small, stable set.
     deviates from the usual FIDO2 "fresh key per MakeCredential" (the keys
     are fresh but created at provisioning) — document it in the conformance
     notes.
+  - **KDF wrapper (IMPLEMENTED 2026-10-26, first Phase 5 consumer — the
+    vault):** `atecc608_kdf_prf(slot, nonce, msg, msg_len, io_key, out)` in
+    `include/atecc608/atecc608_crypto.h` + `src/atecc608_crypto.c` (NOT
+    added to atecc608.h, which is not host-testable — the prov-header
+    pattern): PRF mode, source = data slot `slot`, target = output, 32-B
+    derived value. The caller supplies the TempKey nonce (NULL = 32 bytes
+    of zero — DETERMINISTIC re-derivation, which the vault needs, since the
+    derived key must re-derive identically on every unlock; uniqueness comes
+    from msg, e.g. salt ‖ PIN ‖ context) and the I/O key for the enforced
+    I/O-protection path: if the response carries a 32-B nonce (this chip
+    enforces it — kdf_prot=1, bench-verified) the output is decrypted in
+    place with `atcah_io_decrypt` (io_key then required, else
+    ATECC608_ERR_BAD_PARAM); without a nonce the data is already clear and
+    io_key is unused (may be NULL). Mock models NONCE (pass-through load) +
+    KDF (PRF / source-slot / target-output; gates: data zone locked, slot
+    ≤ 15, KeyConfig ≠ 0) + the I/O-protection OUTPUT side; host tests
+    `tests/test_crypto.c` (gate / basic / io_prot / source-slot / params —
+    ctest 3/3 green). Console adds read-only `prov kdf <slot>` (fixed zero
+    nonce + fixed 16-B message 0x00..0x0F → two runs must print the SAME
+    32 B; I/O key from /io_key.bin) — the on-hardware KDF round-trip through
+    the wrapper. `sign` / `verify` wrappers come when Phase 7 needs them.
   - **Done when:** at least a KDF round-trip is validated on hardware — the
-    `prov iokeytest` I/O-key round-trip is the first such validation, and it
-    lands after the data-zone lock in the sequence above.
+    `prov iokeytest` I/O-key round-trip was the first such validation
+    (landed after the data-zone lock in the sequence above; PASSED
+    2026-10-25), and the `prov kdf <slot>` wrapper round-trip (two identical
+    runs) closes the wrapper part (bench step 2026-10-26: flash the rebuilt
+    uf2 → `prov kdf 7` twice → identical 32-B output).
 - **Phase 6 — Sample / diagnostic app.** The `example/console/` console
   exercises the library API (probe/info/serial/random were wired in Phase 3;
   add a config read-back demo) — it uses the module, not the raw driver.
