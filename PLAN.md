@@ -330,24 +330,33 @@ A single config struct drives init; everything else is a small, stable set.
     `atecc608_read_pubkey` wraps `atcab_read_pubkey` — a slot READ of a 72-B
     stored public key (slots 8–15 only) — the wrong primitive for "public key
     of the private key in slot N"; Phase 5+ adds `atecc608_get_pubkey(slot,
-    pub)` wrapping `atcab_get_pubkey` (GenKey mode 0x00), with mock support
-    (the mock models GenKey mode 0x04 only today) + a host test. Chip
+    pub)` wrapping `atcab_get_pubkey` (GenKey mode 0x00), with mock
+    support + a host test (IMPLEMENTED 2026-10-25: the mock now models
+    both GenKey modes — 0x00 works at any time, even data-zone-locked,
+    and needs only the slot to be an ECC private key slot, NOT the
+    GenKey bit; 0x04 keeps the GenKey-bit + data-zone-unlocked gates —
+    and the host test is `t_get_pubkey`). Chip
     identity: part 0x60 rev 5 maps to ATECC608B (CA2) in cryptoauthlib's
     part/rev table (pkcs11_token.c) — the earlier "first-gen" note was a
     misread; the CA2 data-zone gates (KDF target=output needs the lock, fresh
     GenKey needs it unlocked) apply to this chip and match every bench
     observation.
-  - **Phase 5+ command design (sketch, 2026-10-24):** console adds
-    `prov genkey <slot>` (allowlist 1, 3–6, 12 — the ECC private slots;
-    guards: data zone UNLOCKED, else refuse — a locked zone would not create
-    a fresh key — plus a config-zone check that the slot is ECC private with
-    the GenKey bit; prints the 64-B public key in hex; warns that re-running
-    REPLACES the key and voids any DB binding to it), `prov lockdata` (typed
-    CONFIRM, wraps the existing `atecc608_lock_data_zone`; one-way), and
-    `prov lockslot <slot>` (typed CONFIRM, wraps `atecc608_lock_data_slot`;
-    the chip enforces the slot's Lockable flag). All three are thin console
-    wrappers over the existing Phase 4A prov API — no new library code except
-    `atecc608_get_pubkey`.
+  - **Phase 5+ command design (sketch 2026-10-24, IMPLEMENTED
+    2026-10-25):** console adds `prov genkey <slot>` (allowlist 1, 3–6,
+    12 — the ECC private slots; guards: data zone UNLOCKED, else refuse — a
+    locked zone would not create a fresh key — plus a config-zone check
+    that the slot is ECC private with the GenKey bit; prints the 64-B
+    public key in hex; warns that re-running REPLACES the key and voids any
+    DB binding to it), `prov lockdata` (typed CONFIRM, wraps the existing
+    `atecc608_lock_data_zone`; one-way), and `prov lockslot <slot>` (typed
+    CONFIRM, wraps `atecc608_lock_data_slot`; the chip enforces the slot's
+    Lockable flag) — all thin console wrappers over the existing Phase 4A
+    prov API, no new library code except `atecc608_get_pubkey` — plus a
+    small addition made during implementation: read-only `prov pubkey
+    <slot>` (the mode-0x00 path, so it is verifiable on hardware and
+    re-fetches recorded public keys after `prov lockdata`). The
+    irreversible commands verify their new state by re-reading it
+    (lock state / SlotLocked word) before reporting success.
   - **FIDO2 pre-generation (2026-10-24 sketch):** fresh GenKey is only
     possible before the data-zone lock, so the four FIDO2 credential keys
     (slots 3–6) are pre-generated at provisioning. `MakeCredential` ASSIGNS

@@ -72,7 +72,8 @@ check PASSED LIVE: "littlefs volume: mounted existing (survived the last
 reflash)" + "/io_key.bin: present and valid (32 B key, magic + len + CRC
 ok)". The reflash did NOT wipe the volume (the app region
 0x0..~0x19000 and the volume 0x80000..0x200000 are disjoint).
-**Next work (Phase 5+, design recorded in PLAN.md):** implement
+**Next work as of this pause (Phase 5+, design recorded in PLAN.md;
+COMPLETED 2026-10-25 — see the next paragraph):** implement
 `atecc608_get_pubkey(slot, pub)` (library wrapper over
 `atcab_get_pubkey` — GenKey mode 0x00; the public key of an on-chip ECC
 private key slot is not stored in any data slot) + mock support + host
@@ -83,6 +84,52 @@ public keys) → lockdata CONFIRM (one-way) → iokeytest (must pass) →
 lockslot 14 CONFIRM. The GenKey bit (SlotConfig 0x2000) is confirmed
 SET on slots 1, 3–6, 12 in the locked config, so the GenKey step is
 config-legal.
+
+**Latest state (2026-10-25): the Phase 5+ implementation is complete —
+built + host-tested, but NOT yet on the chip** (`f52eb35` is still
+live there). What landed:
+- `atecc608_get_pubkey(slot, pub)` in `atecc608_prov.{h,c}`: wraps
+  `atcab_get_pubkey` (GenKey mode 0x00 — recompute the public key from
+  the stored private key). READ-ONLY, no confirm gate, works at any
+  time including with the data zone locked. Lived in the prov header on
+  purpose: the host build compiles only the HAL-agnostic sources
+  (config/prov/status), so it is testable there, and it is the mode
+  0x00 sibling of `atecc608_genkey`. `atecc608_read_pubkey` (atecc608.h)
+  got a cross-reference comment: it is a data-zone READ of a 72-B
+  STORED public key (slots 8–15, off-chip signers) — the wrong
+  primitive for a private slot's public key.
+- Mock (`tests/mock_chip.c`): `mock_handle_genkey` now models BOTH
+  modes — 0x00 works at any time (even data-zone-locked) and needs only
+  the slot to be an ECC private key slot (NOT the GenKey bit — that bit
+  gates private-key REGENERATION only, per the 608A-TFLXTLS fixed
+  config); 0x04 keeps the GenKey-bit + data-zone-unlocked gates. Same
+  deterministic fake public key in both modes, so 0x00 "recomputes"
+  exactly what 0x04 just generated.
+- New host test `t_get_pubkey` (tests/test_prov.c): recompute,
+  consistency with the genkey response, still works after BOTH zone
+  locks (and mode 0x04 is refused there), non-private-slot refusal,
+  bad params. ctest 2/2 green.
+- Console (`example/console/main.c`): `prov genkey <slot>` (allowlist
+  1, 3–6, 12 + data-zone-UNLOCKED guard + the chip's actual config
+  check: ECC private slot with the GenKey bit; prints the 64-B public
+  key; warns that re-running REPLACES the key), `prov lockdata
+  [CONFIRM]` (typed token; one-way; the new lock state is verified by
+  re-reading it), `prov lockslot <slot> [CONFIRM]` (typed token;
+  pre-checks already-locked / not-Lockable for readable refusals; the
+  chip re-enforces Lockable; verified by re-reading SlotLocked), and —
+  a small ADDITION to the PLAN sketch — read-only `prov pubkey <slot>`
+  (makes mode 0x00 verifiable on hardware and re-fetches recorded
+  public keys after lockdata). Help text + usage line + top-of-file
+  command list updated, including the agreed bench order.
+- uf2 built: `build/example/console/pico-atecc608.uf2`, 215,040 B.
+
+**Next, at the bench (needs the user's go-ahead at each step — ground
+rule 0):** flash the new uf2 → `prov status` (expect the littlefs check
+to pass again) → `prov genkey 1`, `prov genkey 3`, `prov genkey 4`,
+`prov genkey 5`, `prov genkey 6`, `prov genkey 12` (RECORD every
+printed public key in RESUME.md) → `prov lockdata CONFIRM` (ONE-WAY) →
+`prov iokeytest` (must now PASS — the KDF target=output gate) →
+(production only) `prov lockslot 14 CONFIRM`.
 
 **`prov iokeytest` was BUILT (`8aa8922`), flashed, and RUN (2026-10-24)
 — it returned `clear KDF failed: ATCA_STATUS -12` (execution error) with
