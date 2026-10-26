@@ -45,6 +45,12 @@ implementation.)
 Console output is on **both** USB CDC serial (no extra wiring) and UART0
 (GPIO 0 TX / GPIO 1 RX, for a USB-serial adapter).
 
+> **Bringing up a fresh chip?** [`docs/BRINGUP.md`](../docs/BRINGUP.md)
+> is the reusable bring-up checklist: wiring, first-boot expectations on
+> a factory-fresh chip, the proven provisioning sequence in the exact
+> order (with the order constraints), per-chip golden recording, and the
+> known failure modes.
+
 ### Commands
 
 Smoke (read-only, Phase 3):
@@ -217,6 +223,11 @@ Every step is read-back verified; locks come last and are irreversible:
 The provisioning API (`atecc608_prov`) enforces this: write → read-back →
 byte-compare, locks gated behind read-back plus a typed-confirmation hook,
 and idempotent re-runs while the relevant zone is unlocked.
+
+The bench-proven console command sequence in the exact order (with the
+order constraints — GenKey needs the data zone UNLOCKED, the KDF needs it
+LOCKED, slot 14 locked last) is [`docs/BRINGUP.md`](../docs/BRINGUP.md)
+§4.
 
 ## Building
 
