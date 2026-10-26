@@ -22,7 +22,9 @@
 //              (atecc608_read_config_zone + atecc608_config_parse);
 //              read-only
 //   selftest - Phase 7: read-only on-hardware validation suite — the
-//              generic invariants of the agreed (fully locked) config,
+//              generic invariants of the agreed (fully locked) config +
+//              the bench chip's golden values (regression gate);
+//              `selftest generic` = invariants only (fresh chip);
 //              [PASS]/[FAIL] per check + a final verdict
 //   prov ... - Phase 4B provisioning command set (see below)
 //
@@ -249,7 +251,8 @@ static void commandHelp(char *cmdLine)
     printf("serial  - atecc608_serial (9-byte factory serial)\n");
     printf("lock    - atecc608_is_locked (config / data zone)\n");
     printf("config  - decoded config-zone read-back (Phase 6 demo, read-only)\n");
-    printf("selftest- read-only on-hardware validation suite (Phase 7)\n");
+    printf("selftest [generic]- read-only on-hardware validation suite (Phase 7;\n");
+    printf("                    generic = invariants only, no bench goldens)\n");
     printf("prov status   - chip state + config zone + diff + /io_key.bin persistence\n");
     printf("prov randtest - chip RNG x2 (0xFFFF0000 pattern while unlocked)\n");
     printf("prov iokey    - Pico TRNG -> slot 14 (after prov lock) -> print -> save\n");
@@ -1571,11 +1574,81 @@ static void provKdf(const char *rest)
 // Runs the GENERIC invariants of a chip carrying the agreed config
 // (example/common/dev_config.h, fully locked: config zone + data zone +
 // slot 14) and prints one [PASS]/[FAIL] line per check plus a final
-// verdict. Strictly READ-ONLY — no chip writes — so it is safe at any
-// time, including on production hardware (HARD RULE). The bench-chip
-// specific goldens (serial, the six public keys, the slot-7 KDF value,
-// the config-zone CRC) are added by `selftest`'s full mode in sub-step
-// 7.2; until then this is the invariants-only suite.
+// verdict. In full mode it then checks the bench-chip goldens (serial,
+// the six public keys, the slot-7 KDF value, the config-zone CRC — the
+// regression gate); `selftest generic` skips those (a fresh chip during
+// bring-up). Strictly READ-ONLY — no chip writes — so it is safe at any
+// time, including on production hardware (HARD RULE).
+
+// --- bench-chip goldens (sub-step 7.2; dev-only, console example only) --
+//
+// Values recorded from the bench chip (serial 01 23 06 40 AE B6 B9 B7
+// EE) — the RESUME.md "record of choice" entries. The generic invariants
+// above prove a chip carries the AGREED config; the goldens prove it is
+// THE recorded bench chip, and `selftest` (full mode) hard-FAILS on a
+// mismatch: the regression gate. NOT part of the library.
+#define BENCH_CRC16 0xC904u // config zone, fully locked (00 00 / FF BF)
+static const uint8_t BENCH_SERIAL[ATECC608_SERIAL_LEN] = {
+    0x01, 0x23, 0x06, 0x40, 0xAE, 0xB6, 0xB9, 0xB7, 0xEE,
+};
+// kdf_prf(slot 7, zero nonce, msg 00..0F) — the vault master derivation.
+static const uint8_t BENCH_KDF[ATECC608_KDF_OUT_LEN] = {
+    0x6F, 0xFF, 0x7D, 0xD6, 0x41, 0x75, 0x60, 0x3F, 0x83, 0x05, 0xCE, 0xA6, 0x20,
+    0xF0, 0xB9, 0x32, 0x57, 0x29, 0x50, 0x26, 0xD9, 0xB4, 0xDF, 0x6B, 0xCC,
+    0x8D, 0x6C, 0x9D, 0xC1, 0x31, 0x4C, 0x65,
+};
+// The six ECC public keys (slots 1, 3, 4, 5, 6, 12), X || Y big-endian,
+// as printed by `prov genkey` / `prov pubkey` (GenKey mode 0x00).
+static const uint8_t BENCH_PUBKEYS[6][ATECC608_PUBKEY_LEN] = {
+    { /* slot 1 — device identity */
+      0x1E, 0xE5, 0x07, 0xEC, 0xFC, 0x0D, 0xB2, 0x10, 0x35, 0x54, 0x32, 0xBC,
+      0x2E, 0x63, 0xAB, 0x84, 0x36, 0xC3, 0x04, 0xF8, 0xC9, 0x54, 0x73, 0x95,
+      0x7F, 0x02, 0xC4, 0xBF, 0x57, 0xA2, 0xC9, 0x4E, 0xDF, 0xB3, 0xA3, 0xA2,
+      0x2D, 0x3E, 0x00, 0x8E, 0x89, 0xB8, 0x82, 0xBA, 0x28, 0x9D, 0xC0, 0xE5,
+      0x96, 0x2D, 0xBE, 0xF9, 0x90, 0x79, 0x00, 0xDE, 0x22, 0x41, 0x9F, 0xA0,
+      0xAC, 0x2D, 0x1A, 0xDB,
+    },
+    { /* slot 3 — FIDO2 pre-gen 1 */
+      0x82, 0xB4, 0x7D, 0x03, 0xD3, 0x11, 0xA5, 0x06, 0xDB, 0xE7, 0x7B, 0x00,
+      0xAD, 0x09, 0xBC, 0x31, 0xDC, 0x54, 0xEF, 0xAC, 0x19, 0x0C, 0xCB, 0x12,
+      0x48, 0xC3, 0x25, 0x81, 0xCD, 0x33, 0x02, 0xF6, 0xD0, 0xB8, 0xC8, 0x8A,
+      0xA9, 0xD8, 0xB3, 0x40, 0x6C, 0x74, 0xFA, 0x4B, 0x76, 0x61, 0x20, 0x5C,
+      0xF4, 0x54, 0x05, 0xC1, 0x95, 0xD0, 0xCC, 0x8C, 0x3E, 0xE0, 0x7A, 0x17,
+      0xA1, 0x4B, 0x69, 0x00,
+    },
+    { /* slot 4 — FIDO2 pre-gen 2 */
+      0x63, 0x1C, 0xE7, 0x86, 0x3B, 0x57, 0x38, 0xC4, 0xAA, 0xC3, 0xDC, 0xF1,
+      0xD7, 0x51, 0x69, 0x45, 0xBA, 0xE5, 0xBE, 0x47, 0x1B, 0xD3, 0x91, 0x9C,
+      0x32, 0x36, 0x81, 0x87, 0xA6, 0xD8, 0xBD, 0x14, 0x14, 0xA7, 0x25, 0x76,
+      0x9F, 0xFE, 0x6B, 0x96, 0x2B, 0xBF, 0x2D, 0xCB, 0xD6, 0x94, 0xF4, 0x66,
+      0x46, 0x2B, 0xE6, 0xA2, 0xEA, 0x75, 0x38, 0x59, 0xEE, 0x00, 0x2D, 0x3E,
+      0x0D, 0x83, 0x3C, 0x7E,
+    },
+    { /* slot 5 — FIDO2 pre-gen 3 */
+      0x14, 0xC5, 0x66, 0x85, 0xEF, 0x86, 0xE3, 0x2E, 0x60, 0x20, 0xDC, 0x09,
+      0x9C, 0xE1, 0x21, 0x83, 0x2D, 0x0C, 0x95, 0x7C, 0xCE, 0xA0, 0xC8, 0x4B,
+      0x7A, 0x52, 0x44, 0x95, 0x89, 0x7D, 0xBF, 0xA7, 0x5F, 0xA0, 0x76, 0x8E,
+      0xFC, 0x9B, 0x4B, 0xDD, 0xAF, 0x6D, 0x45, 0xBF, 0xFB, 0xFB, 0x6B, 0xAE,
+      0x4B, 0x56, 0x0D, 0x07, 0x1C, 0xAB, 0x38, 0x8C, 0x8E, 0x5B, 0x4F, 0x83,
+      0x77, 0x22, 0xB2, 0xB4,
+    },
+    { /* slot 6 — FIDO2 pre-gen 4 */
+      0x23, 0x0A, 0x88, 0x5B, 0x6D, 0x79, 0x44, 0x1A, 0x53, 0xCF, 0x18, 0x3A,
+      0xB2, 0xF5, 0xED, 0x3E, 0x8D, 0xDD, 0xD8, 0xF7, 0x7A, 0x6E, 0x0C, 0x92,
+      0x81, 0xE8, 0x37, 0x0B, 0x05, 0x53, 0x5B, 0xF0, 0xE6, 0x93, 0x23, 0x8C,
+      0x36, 0xAD, 0x9C, 0x9D, 0xBA, 0x9B, 0xAE, 0xE0, 0x7F, 0x25, 0x11, 0x73,
+      0x6F, 0xC7, 0xC8, 0x60, 0x46, 0x12, 0xC0, 0x71, 0x3D, 0xEE, 0xE7, 0xD8,
+      0x42, 0x0B, 0xFD, 0xEB,
+    },
+    { /* slot 12 — spare pair */
+      0x1F, 0xBB, 0x53, 0x79, 0x05, 0x9B, 0xFD, 0x17, 0x2C, 0x7F, 0x25, 0xA1,
+      0x6E, 0xEC, 0x7E, 0xC6, 0xBA, 0xEA, 0x85, 0x5F, 0x69, 0x0D, 0x73, 0xE9,
+      0xA0, 0x93, 0xF2, 0xAB, 0x2B, 0x39, 0xDF, 0x92, 0x25, 0x3F, 0x69, 0x9B,
+      0x4E, 0xE2, 0x50, 0xBE, 0xAF, 0x24, 0x5C, 0x5A, 0xA7, 0x7E, 0xCA, 0x6A,
+      0xEA, 0x9E, 0xBB, 0x6B, 0x1F, 0xFF, 0x7F, 0x3A, 0xEC, 0x43, 0x59, 0x7A,
+      0x21, 0x0F, 0x93, 0x63,
+    },
+};
 
 // The factory RNG pattern: 0xFFFF0000 repeated. The chip's Random command
 // returns it while the config zone is unlocked; a provisioned (locked)
@@ -1625,11 +1698,39 @@ static size_t st_addf(char *d, size_t size, size_t n, const char *fmt, ...)
 }
 
 // selftest — run the read-only on-hardware validation suite (Phase 7).
+// Full mode (the default) runs the generic invariants and then the
+// bench-chip goldens (the regression gate); `selftest generic` runs the
+// invariants only (a fresh chip during bring-up — see docs/BRINGUP.md).
 static void commandSelftest(char *cmdLine)
 {
-    (void)cmdLine; // (sub-step 7.2 adds the optional "generic" sub-mode)
+    // Optional "generic" sub-mode (invariants only).
+    char *rest = cmdLine + strlen("selftest");
+    while (' ' == *rest) {
+        rest++;
+    }
+    bool generic = (0 == strncmp(rest, "generic", 9))
+                   && ('\0' == rest[9] || ' ' == rest[9]);
+    if (generic) {
+        rest += 9;
+        while (' ' == *rest) {
+            rest++;
+        }
+    }
+    if ('\0' != *rest) {
+        printf("usage: selftest [generic]\n");
+        return;
+    }
+
     selftest_t st = {0, 0};
     char d[112];
+    // Function scope: the golden section reuses the zone, the six public
+    // keys and the first KDF derivation from the generic checks above.
+    static const uint8_t ecc_slots[6] = {1, 3, 4, 5, 6, 12};
+    uint8_t zone[ATECC608_CONFIG_ZONE_LEN];
+    bool have_zone = false;
+    uint8_t pubs[6][ATECC608_PUBKEY_LEN];
+    uint8_t k1[ATECC608_KDF_OUT_LEN];
+    bool have_k1 = false;
 
     // (1) probe + info — the wake handshake and part/revision. A dead
     // chip makes every later check meaningless, so the suite aborts.
@@ -1672,10 +1773,10 @@ static void commandSelftest(char *cmdLine)
     // (3) config zone: parses, fully locked (00 00), slot 14 locked
     // (FF BF), the agreed I2C address, and byte-identical to the agreed
     // image over the writable region.
-    uint8_t zone[ATECC608_CONFIG_ZONE_LEN];
     if (ATECC608_OK != atecc608_read_config_zone(zone)) {
         st_report(&st, "config zone", false, "zone read failed");
     } else {
+        have_zone = true;
         atecc608_config_intent_t cfg;
         if (ATECC608_OK != atecc608_config_parse(zone, &cfg)) {
             st_report(&st, "config zone", false, "parse rejected the zone");
@@ -1742,10 +1843,8 @@ static void commandSelftest(char *cmdLine)
 
     // (5) the six ECC private keys (agreed layout): readable via
     // get_pubkey (mode 0x00 works after the data-zone lock), 64 B,
-    // non-zero, pairwise distinct. (7.2 compares them against the bench
-    // chip's recorded keys.)
-    static const uint8_t ecc_slots[6] = {1, 3, 4, 5, 6, 12};
-    uint8_t pubs[6][ATECC608_PUBKEY_LEN];
+    // non-zero, pairwise distinct. (The golden section below compares
+    // them against the bench chip's recorded keys.)
     {
         bool ok = true;
         for (int i = 0; i < 6 && ok; i++) {
@@ -1792,7 +1891,6 @@ static void commandSelftest(char *cmdLine)
     if (!have_io_key) {
         st_report(&st, "kdf determinism (slot 7)", false, d);
     } else {
-        uint8_t k1[ATECC608_KDF_OUT_LEN];
         uint8_t k2[ATECC608_KDF_OUT_LEN];
         atecc608_status_t k1st = atecc608_kdf_prf(7, NULL, msg, sizeof(msg), io_key, k1);
         atecc608_status_t k2st = ATECC608_OK == k1st
@@ -1806,6 +1904,7 @@ static void commandSelftest(char *cmdLine)
             st_report(&st, "kdf determinism (slot 7)", false,
                       "two derivations differ (chip NOT deterministic)");
         } else {
+            have_k1 = true;
             st_report(&st, "kdf determinism (slot 7)", true,
                       "two derivations identical (zero nonce, msg 00..0F)");
         }
@@ -1831,9 +1930,77 @@ static void commandSelftest(char *cmdLine)
                       : "volume survived the last reflash, /io_key.bin valid");
     }
 
+    // --- bench-chip goldens (full mode only) ------------------------------
+    // The checks above prove the chip carries the AGREED config; the
+    // goldens prove it is THE recorded bench chip. A mismatch hard-FAILs:
+    // this is the regression gate (PLAN.md, Phase 7).
+    if (!generic) {
+        // G1 — the recorded factory serial.
+        uint8_t sn[ATECC608_SERIAL_LEN];
+        if (ATECC608_OK != atecc608_serial(sn)) {
+            st_report(&st, "golden: serial (bench)", false, "serial read failed");
+        } else if (0 != memcmp(sn, BENCH_SERIAL, sizeof(sn))) {
+            st_addf(d, sizeof(d), 0, "serial %02X %02X %02X %02X … (bench %02X %02X %02X %02X …)",
+                    sn[0], sn[1], sn[2], sn[3],
+                    BENCH_SERIAL[0], BENCH_SERIAL[1], BENCH_SERIAL[2], BENCH_SERIAL[3]);
+            st_report(&st, "golden: serial (bench)", false, d);
+        } else {
+            st_report(&st, "golden: serial (bench)", true,
+                      "matches the bench record (01 23 06 40 …)");
+        }
+
+        // G2 — the six recorded ECC public keys (a failed generic read
+        // leaves that slot zeroed and shows up as a mismatch here).
+        bool ok = true;
+        size_t n = 0;
+        for (int i = 0; i < 6; i++) {
+            if (0 != memcmp(pubs[i], BENCH_PUBKEYS[i], ATECC608_PUBKEY_LEN)) {
+                ok = false;
+                n = st_addf(d, sizeof(d), n, "%s%u", 0 == n ? "" : ", ",
+                            (unsigned)ecc_slots[i]);
+            }
+        }
+        st_report(&st, "golden: ecc pubkeys (bench)", ok,
+                  ok ? "all six match the bench record" : d);
+
+        // G3 — the recorded slot-7 KDF derivation value.
+        if (!have_k1) {
+            st_report(&st, "golden: kdf value (bench)", false,
+                      have_io_key ? "derivation failed (see above)" : d);
+        } else if (0 != memcmp(k1, BENCH_KDF, sizeof(k1))) {
+            int first = 0;
+            while (first < ATECC608_KDF_OUT_LEN && k1[first] == BENCH_KDF[first]) {
+                first++;
+            }
+            st_addf(d, sizeof(d), 0,
+                    "differs from the bench value (first diff at byte %d)", first);
+            st_report(&st, "golden: kdf value (bench)", false, d);
+        } else {
+            st_report(&st, "golden: kdf value (bench)", true,
+                      "matches the bench value (6F FF 7D D6 …)");
+        }
+
+        // G4 — the recorded config-zone CRC (the fully-locked zone).
+        if (!have_zone) {
+            st_report(&st, "golden: config CRC (bench)", false,
+                      "zone read failed (see above)");
+        } else {
+            uint16_t crc = atecc608_config_crc16(zone);
+            if (BENCH_CRC16 != crc) {
+                st_addf(d, sizeof(d), 0, "CRC %04X (bench %04X)",
+                        (unsigned)crc, (unsigned)BENCH_CRC16);
+                st_report(&st, "golden: config CRC (bench)", false, d);
+            } else {
+                st_report(&st, "golden: config CRC (bench)", true,
+                          "C904 — matches the bench record");
+            }
+        }
+    }
+
     const int total = st.passed + st.failed;
     if (0 == st.failed) {
-        printf("SELFTEST: %d/%d checks PASSED\n", total, total);
+        printf("SELFTEST: %d/%d checks PASSED%s\n", total, total,
+               generic ? " (generic mode — bench goldens not run)" : "");
     } else {
         printf("SELFTEST: %d of %d checks FAILED (see the [FAIL] lines)\n",
                st.failed, total);

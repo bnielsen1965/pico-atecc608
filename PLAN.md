@@ -475,6 +475,11 @@ A single config struct drives init; everything else is a small, stable set.
   **Sub-steps:** 7.1 `selftest` generic invariants → 7.2 bench
   goldens + full mode → 7.3 `docs/BRINGUP.md` (+ pointer from
   example/README) → 7.4 bench run: `selftest` green on the chip.
+  7.1 BUILT 2026-10-26 (`0242df2`); 7.2 BUILT 2026-10-26 (the `BENCH_*`
+  golden table — serial, six public keys, the slot-7 KDF value, CRC
+  C904 — hard-FAIL in full mode; `selftest generic` skips them) and 7.3
+  BUILT 2026-10-26 (`docs/BRINGUP.md` + the example/README pointer);
+  awaiting the 7.4 bench run (reflash + `selftest` green).
   - **Done when:** suite green on hardware; checklist written.
 
 ## Ground rules (provisioning safeguards)
