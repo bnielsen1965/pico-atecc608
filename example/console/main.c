@@ -621,10 +621,20 @@ static void provIokey(void)
 // It issues no data-zone READ/WRITE and no write/lock — safe to run any time
 // after `prov iokey`. Same pattern as cryptoauthlib's own
 // kdf_prf_output_encrypted, but the key comes from littlefs instead of a
-// hard-coded global. CAVEAT: that test runs against a config with the data
-// zone LOCKED; if this chip's KDF (target=output) is also gated on the data
-// zone / key lock, the KDF call fails and we print the exact ATCA_STATUS so
-// that case is distinguishable from a key mismatch.
+// hard-coded global.
+//
+// DIAGNOSTIC BUILD (2026-10-25, after the data-zone lock): the first bench
+// run FAILED (decrypted != clear). A mismatch of the two keys is only ONE
+// possible cause — "the chip did not encrypt the enc call" and "the chip
+// enforced encryption on the CLEAR call too (kdf_prot semantics)" produce
+// the identical symptom. This build therefore loads ONE random nonce into
+// tempkey before BOTH calls (identical PRF input), and prints: the tempkey
+// nonce, the clear output + whether its response carried a trailing nonce
+// (enforced encryption), the raw encrypted output, the enc response nonce,
+// and (on failure) the I/O key read from /io_key.bin. atcah_io_decrypt is
+// SHA256(io_key || 16-B nonce block) XOR per 32-B block — fully reproducible
+// on the host — so one run of this build identifies exactly which key the
+// chip used and which key the file holds.
 static void provIokeyTest(void)
 {
     // 1. Load the saved I/O key.
@@ -665,12 +675,16 @@ static void provIokeyTest(void)
         printf("data zone:   %s\n", locked ? "LOCKED" : "unlocked");
     }
 
-    // 2-3. A fixed, deterministic input shared by both KDF runs: a 32-byte
-    // nonce (the PRF source, loaded into tempkey) and a 16-byte message.
+    // 2-3. (diagnostic build 2026-10-25) ONE random 32-byte nonce, loaded
+    // into tempkey before EACH KDF run (atcab_nonce is a pass-through
+    // nonce-load), so the underlying PRF input is IDENTICAL for the clear
+    // and the enc call. That, plus printing the raw encrypted output and
+    // both response nonces, lets the host side compute the exact I/O
+    // keystreams (atcah_io_decrypt is SHA256(key || nonce-block) XOR, not
+    // AES) and tell apart: chip key != file key / chip did not encrypt /
+    // chip ENFORCED encryption on the clear call too (kdf_prot semantics)
+    // / file key != the recorded durable key.
     uint8_t nonce[32];
-    for (int i = 0; i < 32; i++) {
-        nonce[i] = (uint8_t)i;
-    }
     uint8_t msg[16];
     for (int i = 0; i < 16; i++) {
         msg[i] = (uint8_t)i;
@@ -678,6 +692,13 @@ static void provIokeyTest(void)
     uint8_t out_clear[64];
     uint8_t out_enc[64];
     uint8_t out_nonce[32];
+    memset(out_nonce, 0, sizeof(out_nonce));  // stays 0 if the response
+    // carried no nonce (64-B response = the call was not encrypted)
+    uint8_t clear_nonce[32];
+    // Zeroed: the library fills it only if the CLEAR response carries a
+    // trailing 32-byte nonce — which it does only if that call was
+    // encrypted AGAINST THE REQUEST (I/O protection enforced, not opt-in).
+    memset(clear_nonce, 0, sizeof(clear_nonce));
     // PRF, 32-byte source key, 64-byte target, no AEAD processing, 16-byte
     // message (its length lives in bits 24..31 of the details word).
     uint32_t details = KDF_DETAILS_PRF_KEY_LEN_32
@@ -687,24 +708,33 @@ static void provIokeyTest(void)
     const uint8_t mode = KDF_MODE_ALG_PRF | KDF_MODE_SOURCE_TEMPKEY;
     ATCA_STATUS atca;
 
-    atca = atcab_nonce(nonce);
+    atca = atcab_nonce(nonce);   // random 32 B, loaded into tempkey
     if (ATCA_SUCCESS != atca) {
         printf("NONCE (clear) failed: ATCA_STATUS %d\n", (int)atca);
         return;
     }
+    printf("tempkey nonce (32 B):  ");
+    atecc608_print_hex(nonce, sizeof(nonce));
     atca = atcab_kdf(mode | KDF_MODE_TARGET_OUTPUT, 0x1234, details,
-                     msg, out_clear, NULL);
+                     msg, out_clear, clear_nonce);
     if (ATCA_SUCCESS != atca) {
         printf("clear KDF failed: ATCA_STATUS %d\n", (int)atca);
-        printf("if ATCA_STATUS is -12 (execution error), the KDF is likely\n"
-               "gated on the data-zone/key lock: cryptoauthlib's own\n"
-               "I/O-protected KDF test runs against a data-zone-LOCKED config.\n"
-               "The key is still on the chip — re-test after locking the data\n"
-               "zone (or slot 14). This is NOT a key mismatch.\n");
         return;
     }
+    bool clear_had_nonce = true;
+    for (int i = 0; i < 32; i++) {
+        clear_had_nonce &= (0 != clear_nonce[i]);
+    }
+    printf("clear KDF (64 B):      ");
+    atecc608_print_hex(out_clear, sizeof(out_clear));
+    printf("clear resp nonce:      %s", clear_had_nonce ? "" : "none (64-B response — NOT encrypted)");
+    if (clear_had_nonce) {
+        printf(" ");
+        atecc608_print_hex(clear_nonce, sizeof(clear_nonce));
+    }
+    printf("\n");
 
-    atca = atcab_nonce(nonce);
+    atca = atcab_nonce(nonce);   // reload the SAME 32 B into tempkey
     if (ATCA_SUCCESS != atca) {
         printf("NONCE (enc) failed: ATCA_STATUS %d\n", (int)atca);
         return;
@@ -713,9 +743,12 @@ static void provIokeyTest(void)
                      msg, out_enc, out_nonce);
     if (ATCA_SUCCESS != atca) {
         printf("encrypted KDF failed: ATCA_STATUS %d\n", (int)atca);
-        printf("(same data-zone/key-lock caveat as above if this is -12)\n");
         return;
     }
+    printf("enc KDF raw (64 B):    ");
+    atecc608_print_hex(out_enc, sizeof(out_enc));
+    printf("enc resp nonce (32 B): ");
+    atecc608_print_hex(out_nonce, sizeof(out_nonce));
 
     // 4. Decrypt the encrypted output with the saved key (in place).
     atca_io_decrypt_in_out_t dec = {
@@ -738,13 +771,15 @@ static void provIokeyTest(void)
         atecc608_print_hex(out_clear, sizeof(out_clear));
     } else {
         printf("I/O key test FAILED: the decrypted KDF does not match the clear\n"
-               "KDF — the key in slot 14 does NOT match %s.\n", PROV_IOKEY_PATH);
-        printf("clear KDF:     ");
-        atecc608_print_hex(out_clear, sizeof(out_clear));
-        printf("decrypted KDF: ");
+               "KDF. The cause is NOT necessarily a key mismatch — with the\n"
+               "diagnostic values above, the host side computes the exact\n"
+               "keystreams and says which key the chip and the file each\n"
+               "hold (RESUME.md, 2026-10-25 iokeytest diagnostic). Do NOT\n"
+               "re-key slot 14 before that verdict.\n");
+        printf("decrypted KDF (64 B):  ");
         atecc608_print_hex(out_enc, sizeof(out_enc));
-        printf("re-run `prov iokey` to re-key slot 14 (safe: the data zone is\n"
-               "still unlocked).\n");
+        printf("I/O key from %s (32 B): ", PROV_IOKEY_PATH);
+        atecc608_print_hex(f.key, sizeof(f.key));
     }
 }
 
