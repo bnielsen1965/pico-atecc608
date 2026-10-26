@@ -1,16 +1,17 @@
 # Resume notes (pico-atecc608)
 
 Pause point: **2026-10-25 — Phase 4B is COMPLETE (2026-10-23) and the
-Phase 5+ bench is partway done: the ECC slots (1, 3–6, 12) are GenKey'd
+Phase 5+ bench is ALMOST DONE: the ECC slots (1, 3–6, 12) are GenKey'd
 (all six public keys recorded and verified in the "⏸ Where the
-conversation stopped" section below) and the DATA ZONE IS NOW LOCKED
-(one-way step executed 2026-10-25, verified by re-read). The first
-`prov iokeytest` run FAILED, but the failure is now DIAGNOSED: the chip
-ENFORCES I/O protection (kdf_prot=1) — it encrypted even the "clear"
-KDF call; the I/O key itself is functionally VERIFIED (chip key ==
-file key == recorded key, host-verified keystream equality). The fixed
-test build is ready to flash and `prov iokeytest` should now PASS (see
-the "Latest state" paragraph in that section). Phase 4B:
+conversation stopped" section below), the DATA ZONE IS LOCKED (one-way
+step executed 2026-10-25, verified by re-read), and **`prov iokeytest`
+PASSED** (2026-10-25, output + host cross-check recorded in the
+"Latest state" paragraph in that section) — the I/O key is
+functionally VERIFIED end-to-end. The chip ENFORCES I/O protection
+(kdf_prot=1): every target=output KDF returns encrypted output + a
+32-B nonce and must be `atcah_io_decrypt`-ed with the I/O key (Phase 7
+design fact). ONLY REMAINING bench item: `prov lockslot 14 CONFIRM`
+(PRODUCTION ONLY — user decides when). Phase 4B:
 the chip is fully PROVISIONED. The config zone holds the approved
 planned image and
 is LOCKED (the one-way step ran after explicit user go-ahead); the
@@ -32,7 +33,9 @@ flashing `f52eb35`, `prov status` reported the volume "mounted existing
 key, magic + len + CRC ok)", and the config zone was verified
 byte-identical to the approved plan (all 32 SlotConfig/KeyConfig values
 match, CRC F6DE, data zone still unlocked, counters 0/0).
-**`f52eb35` is the firmware live on the chip.**
+**`f52eb35` was the firmware live on the chip at that point** (current:
+the iokeytest fixed build `0130207`, the 216,064 B uf2, flashed
+2026-10-25 — see the "Latest state" paragraph below).
 
 **The functional I/O-key test `prov iokeytest` was BUILT (`8aa8922`),
 flashed, and RUN (2026-10-24): `clear KDF failed: ATCA_STATUS -12`
@@ -141,11 +144,11 @@ to pass again) → `prov genkey 1`, `prov genkey 3`, `prov genkey 4`,
 printed public key in RESUME.md) → `prov lockdata CONFIRM` (ONE-WAY) →
 `prov iokeytest` (must now PASS — the KDF target=output gate) →
 (production only) `prov lockslot 14 CONFIRM`. **Progress 2026-10-25:
-flash + status + all six genkeys + `prov lockdata CONFIRM` DONE (record
-in the paragraphs below); the first `prov iokeytest` run FAILED and is
-DIAGNOSED (chip enforces I/O encryption; the I/O key itself is verified)
-— the fixed test build is ready to flash; remaining: `prov iokeytest`
-(now expected to PASS) → (production) `prov lockslot 14 CONFIRM`.**
+flash + status + all six genkeys + `prov lockdata CONFIRM` +
+`prov iokeytest` (PASS, host cross-checked) ALL DONE — records in the
+paragraphs below; remaining: (production only) `prov lockslot 14
+CONFIRM` — the user decides when (slot 14 stays re-keyable until
+then).**
 
 **Latest state (2026-10-25, bench in progress): flash + GenKey DONE.**
 The Phase 5+ uf2 (215,040 B, `build/example/console/pico-atecc608.uf2`)
@@ -194,9 +197,10 @@ is permanently refused, but `prov pubkey <slot>` keeps working (mode
 0x00) and plain slots stay writable; the KDF target=output gate is
 satisfied by the lock.
 
-**Latest state (2026-10-25, bench continued): data zone LOCKED; the
-iokeytest failure is DIAGNOSED — the I/O key is functionally VERIFIED;
-a fixed test build is ready to flash.**
+**Latest state (2026-10-25, bench continued): data zone LOCKED;
+iokeytest PASSED (fixed build flashed) — the I/O key is functionally
+VERIFIED end-to-end; the earlier failure was the test's premise (chip
+enforces I/O encryption), NOT a key mismatch.**
 - `prov lockdata CONFIRM` executed at the bench (one-way, byte 86;
   re-read-verified: "data zone LOCKED (irreversible)"). The first real
   `prov iokeytest` run (the −12 gate is gone; the KDF executes) FAILED
@@ -240,14 +244,30 @@ a fixed test build is ready to flash.**
   with the I/O key from /io_key.bin before use — the agreed
   "kdf_prot=1 (derived key never in clear on the bus)" setting is
   exactly this behavior.
-- **Next: flash this uf2 (Pico only — the chip and littlefs are
-  untouched), run `prov iokeytest` — it should now PASS (plus an
-  enforced-mode NOTE).** Then, production only, after a PASS:
-  `prov lockslot 14 CONFIRM`. (Re-keying slot 14 remains physically
-  possible — a 32-B write to a non-individually-locked slot stays
-  allowed with the data zone locked — but there is no reason to;
-  `prov iokey` would refuse anyway: its precondition still says the
-  data zone must be unlocked.)
+- **`prov iokeytest` PASSED (2026-10-25, fixed build `0130207`
+  flashed):** "I/O key test PASSED: slot 14 matches /io_key.bin and
+  the I/O-protection path works end-to-end" + the enforced-mode NOTE
+  (both KDF outputs arrived encrypted; both decrypted with the saved
+  key). Full run values (record of choice): tempkey nonce
+  `85 6C 17 99 14 FF 11 F9 F4 6C 0E F7 6D AA 90 71 4F 81 3D D4 F7 92 42 51 A5 03 0E 19 38 F1 31 23`;
+  clear KDF `08 A8 6D C4 A1 4F 6C 9F D2 2D 8A 98 6E 71 AF 55 44 55 87 41 31 C0 B4 4F 01 49 A2 84 C9 43 4E B6 EE 47 FC CD 72 25 CC 89 FF 39 1D F6 6E DA 4E 8F E7 ED EE AF F3 E3 86 2E A6 46 9E 53 47 43 AF C3`;
+  clear resp nonce `9D EE F2 6A 92 78 F7 D6 91 95 A4 38 C8 28 24 2D F8 E1 58 D4 DE 5A 8F 0F 33 EF 6C F7 56 C2 37 A4`;
+  enc KDF raw `80 A2 77 67 EA 20 48 87 3B 2F A9 9F 3F AA 2B 50 D8 3B 0D 8E 79 9B 7F 93 40 DD A1 52 59 33 1C 86 5C 82 64 56 2B D0 05 1C 3F 94 7D 9D C2 28 8F 83 77 DE 5E 1F 22 02 A8 3F 60 F4 61 08 E5 16 20 8F`;
+  enc resp nonce `57 B1 B1 3A 03 9A D6 35 1B 46 DD 08 AD 7E D8 CD A1 00 70 2B 5A D2 05 31 5A 80 ED 67 7E CD 4B 29`.
+  **Host cross-check (same H(K,N) recipe): both calls decrypt to the
+  SAME true PRF output — PASS independently confirmed:**
+  `54 2C B9 5B 04 45 43 7A D3 93 23 19 DC 28 3E 29 0D F9 1F 66 18 71 A0 F7 BF 85 B2 6F 8C E8 0D B1 B4 35 AE A0 40 C4 D7 60 B7 4B BA 95 DE 98 4B 33 6F 89 BF 5C 5C 4B B1 68 32 C2 91 44 E4 4E AC 1A`.
+- **Bench sequence status: 1–5 of 6 DONE** (flash, status, genkey ×6,
+  lockdata, iokeytest PASS). **Remaining: `prov lockslot 14 CONFIRM`
+  — PRODUCTION ONLY, one-way (SlotLocked byte for slot 14,
+  FF→00); the user decides when to run it (now, or at production
+  time). Until then slot 14 stays re-keyable** (a 32-B write to a
+  non-individually-locked slot stays allowed with the data zone
+  locked; `prov iokey` itself would refuse — its precondition still
+  says the data zone must be unlocked — so re-keying would need a new
+  command). After the slot-14 lock, the chip config is frozen for
+  production: no ECC re-gen (data zone locked), no I/O-key change
+  (slot 14 locked).
 
 **`prov iokeytest` was BUILT (`8aa8922`), flashed, and RUN (2026-10-24)
 — it returned `clear KDF failed: ATCA_STATUS -12` (execution error) with
@@ -285,7 +305,9 @@ one-way, typed confirm) → run `prov iokeytest` (passes) → (production)
 slot-lock slot 14 (after the verification, so it stays re-keyable until
 proven). The I/O-key verification is DEFERRED to that flow; for now the I/O
 key is verified to the extent the chip allows (write ACK + littlefs
-read-back).
+read-back). → **EXECUTED 2026-10-25: iokeytest PASSED** (enforced
+I/O protection; host cross-checked — see the "Latest state"
+paragraph); slot-14 lock still pending (production only).
 
 **2026-10-24 (this session):**
 (1) **The "a Pico reflash wipes the littlefs copy" warning was WRONG —
