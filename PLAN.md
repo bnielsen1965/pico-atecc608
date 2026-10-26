@@ -411,7 +411,9 @@ A single config struct drives init; everything else is a small, stable set.
   against the out-of-band copy) shipped in the same build; a production
   application must not expose the key.
   - **Done when:** the demo builds against the lib and runs on hardware
-    (build: MET 2026-10-26; hardware run: PENDING).
+    (build: MET 2026-10-26; hardware run: MET 2026-10-26 — first
+    `config` run on the chip, decoded zone matches the agreed plan,
+    SlotLocked FF BF; recorded in RESUME.md). **Phase 6: COMPLETE.**
 - **Phase 7 — On-hardware validation + regression + bring-up checklist.**
   Full on-hardware suite; a documented, reusable bring-up checklist.
   - **Done when:** suite green; checklist written.

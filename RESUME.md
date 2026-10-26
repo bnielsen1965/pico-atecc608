@@ -2,9 +2,12 @@
 
 Pause point: **2026-10-26 — Phase 4B is COMPLETE (2026-10-23), Phase 5
 is COMPLETE (KDF round-trip validated on hardware 2026-10-26), and
-Phase 6 is BUILT (decoded config read-back demo `config` + dev-only
-`prov iokeyshow`; awaiting its first hardware run). The
-Phase 5+ bench is ALMOST DONE: the ECC slots (1, 3–6, 12) are GenKey'd
+Phase 6 is COMPLETE (2026-10-26: the `config` read-back demo ran on
+hardware; the decoded zone matches the agreed plan, SlotLocked FF BF).
+The bench sequence is COMPLETE — including the production-only
+`prov lockslot 14 CONFIRM` (executed 2026-10-26; the chip config is
+now frozen for production). Bench record: the ECC slots (1, 3–6, 12)
+are GenKey'd
 (all six public keys recorded and verified in the "⏸ Where the
 conversation stopped" section below), the DATA ZONE IS LOCKED (one-way
 step executed 2026-10-25, verified by re-read), and **`prov iokeytest`
@@ -18,9 +21,10 @@ VALIDATED ON HARDWARE** (2026-10-26: `prov kdf 7` ran twice with
 IDENTICAL 32-B output — determinism + the enforced-mode decrypt with
 /io_key.bin through the wrapper; the value and a host cross-check note
 are in the newest "Latest state" paragraph; the Phase 5 done criterion
-is met). ONLY REMAINING bench item: `prov lockslot 14 CONFIRM`
-(PRODUCTION ONLY — **APPROVED by the user 2026-10-26**, to run at the
-bench after the Phase 6 reflash). Phase 4B:
+is met). The last bench item — `prov lockslot 14 CONFIRM` (PRODUCTION
+ONLY) — was APPROVED by the user and EXECUTED 2026-10-26 (slot 14
+locked, verified by re-reading SlotLocked = FF BF): the bench sequence
+is done and the chip config is frozen for production. Phase 4B:
 the chip is fully PROVISIONED. The config zone holds the approved
 planned image and
 is LOCKED (the one-way step ran after explicit user go-ahead); the
@@ -43,9 +47,9 @@ key, magic + len + CRC ok)", and the config zone was verified
 byte-identical to the approved plan (all 32 SlotConfig/KeyConfig values
 match, CRC F6DE, data zone still unlocked, counters 0/0).
 **`f52eb35` was the firmware live on the chip at that point** (current:
-the Phase 5 build, the 218,112 B uf2, flashed 2026-10-26 for the
-`prov kdf` bench — see the "Latest state (2026-10-26)" paragraph
-below).
+the Phase 6 build, the 226,304 B uf2, flashed 2026-10-26 for the
+lockslot + config bench steps — see the newest "Latest state"
+paragraph below).
 
 **The functional I/O-key test `prov iokeytest` was BUILT (`8aa8922`),
 flashed, and RUN (2026-10-24): `clear KDF failed: ATCA_STATUS -12`
@@ -268,23 +272,22 @@ enforces I/O encryption), NOT a key mismatch.**
   **Host cross-check (same H(K,N) recipe): both calls decrypt to the
   SAME true PRF output — PASS independently confirmed:**
   `54 2C B9 5B 04 45 43 7A D3 93 23 19 DC 28 3E 29 0D F9 1F 66 18 71 A0 F7 BF 85 B2 6F 8C E8 0D B1 B4 35 AE A0 40 C4 D7 60 B7 4B BA 95 DE 98 4B 33 6F 89 BF 5C 5C 4B B1 68 32 C2 91 44 E4 4E AC 1A`.
-- **Bench sequence status: 1–5 of 6 DONE** (flash, status, genkey ×6,
-  lockdata, iokeytest PASS) + the `prov kdf 7` wrapper round-trip DONE
-  2026-10-26 (see the "Latest state (2026-10-26)" paragraph below).
-  **Remaining: `prov lockslot 14 CONFIRM` — PRODUCTION ONLY, one-way
-  (SlotLocked byte for slot 14, FF→00); APPROVED by the user 2026-10-26,
-  to run at the bench after the Phase 6 reflash (the 226,304 B uf2).
-  Until then slot 14 stays re-keyable** (a 32-B write to a
-  non-individually-locked slot stays allowed with the data zone
+- **Bench sequence status: ALL DONE (2026-10-26)** (flash, status,
+  genkey ×6, lockdata, iokeytest PASS, `prov kdf 7` wrapper round-trip,
+  `prov lockslot 14 CONFIRM`). Slot 14 is now LOCKED (SlotLocked
+  FF BF — only the slot-14 bit cleared; one-way, verified by re-read)
+  — the chip config is frozen for production: no ECC re-gen (data zone
+  locked), no I/O-key change (slot 14 locked). (Historical note:
+  before the slot-14 lock, slot 14 stayed re-keyable — a 32-B write to
+  a non-individually-locked slot stays allowed with the data zone
   locked; `prov iokey` itself would refuse — its precondition still
-  says the data zone must be unlocked — so re-keying would need a new
-  command). After the slot-14 lock, the chip config is frozen for
-  production: no ECC re-gen (data zone locked), no I/O-key change
-  (slot 14 locked).
+  says the data zone must be unlocked — so re-keying would have needed
+  a new command.)
 
 **Latest state (2026-10-26): the Phase 5 KDF wrapper is IMPLEMENTED +
 host-tested; the console gains read-only `prov kdf <slot>`; the uf2 is
-rebuilt — NOT yet on the chip (the `0130207` build is still live).**
+rebuilt — NOT yet on the chip (the `0130207` build was live then;
+superseded — see the newest paragraphs).**
 - `atecc608_kdf_prf(slot, nonce, msg, msg_len, io_key, out)` in
   `include/atecc608/atecc608_crypto.h` + `src/atecc608_crypto.c` (NOT
   added to atecc608.h, which is not host-testable — the prov-header
@@ -379,8 +382,8 @@ next paragraph for the bench order).**
 
 **Latest state (2026-10-26, after the KDF bench): Phase 6 BUILT —
 decoded config read-back demo (`config`) + dev-only `prov iokeyshow`;
-uf2 rebuilt 226,304 B (`84edf05`). NOT yet on the chip (the Phase 5
-build, 218,112 B, is still live).**
+uf2 rebuilt 226,304 B (`84edf05`); that build is now LIVE on the chip
+(reflashed 2026-10-26 for the bench steps in the next paragraph).**
 - Phase 6 demo: top-level `config` in `example/console/main.c` — reads
   the zone with the module API (`atecc608_read_config_zone`) and decodes
   it with the Phase 4A builder (`atecc608_config_parse`): I2C address,
@@ -403,11 +406,40 @@ build, 218,112 B, is still live).**
 - uf2 rebuilt: `build/example/console/pico-atecc608.uf2`, 226,304 B
   (Pico build green, warning-clean apart from the known cosmetic
   ATCA_TA_SUPPORT note; host tests 3/3).
-- **Bench order (user action):** flash the 226,304 B uf2 → `prov
-  iokeyshow` (compare with the dev notes) → `prov lockslot 14 CONFIRM`
-  (APPROVED — one-way, SlotLocked byte for slot 14 FF→00; after this
-  the chip config is frozen for production) → `config` (Phase 6 demo,
-  read-only; closes the Phase 6 done criterion).
+- **Bench order (user action) — ALL EXECUTED 2026-10-26:** flash the
+  226,304 B uf2 → `prov iokeyshow` (compare with the dev notes) →
+  `prov lockslot 14 CONFIRM` (one-way, SlotLocked slot-14 bit FF→00;
+  after this the chip config is frozen for production) → `config`
+  (Phase 6 demo, read-only; closes the Phase 6 done criterion).
+  Results in the next paragraph.
+
+**BENCH DONE (2026-10-26): the bench sequence is COMPLETE —
+`prov lockslot 14 CONFIRM` EXECUTED (the production-only one-way step)
+and the Phase 6 `config` demo RAN ON HARDWARE. The Phase 6 done
+criterion is MET; the chip config is frozen for production.**
+- `prov lockslot 14 CONFIRM`: "slot 14 LOCKED (irreversible; verified
+  by re-reading SlotLocked)". SlotLocked is now **FF BF** (byte 88 =
+  FF: slots 0–7 all unlocked; byte 89 = BF: only the slot-14 bit
+  cleared) — exactly the expected one-bit change. Consequences: no ECC
+  re-gen (data zone locked), no I/O-key re-key (slot 14 locked); the
+  chip config is frozen for production.
+- `config` (Phase 6 demo, first hardware run): the decoded zone
+  matches the agreed plan in EVERY field — I2C 0xC0 (7-bit 0x60), lock
+  bytes 00 00 (config + data locked), ChipOptions (I/O protection ON,
+  key slot 14; KDF AES on; ecdh_prot=1 forced; kdf_prot=1 forced; POST
+  off), CountMatch/UseLock/VolKeyPerm/SecureBoot off, KDF IV source
+  location 0 slot 0, UserExtra 00/00, X509 00 ×4, counters 0/0 (KDF and
+  NONCE do not touch the counters — as expected), and all 16 slot rows
+  are byte-identical to the host-verified layout (1/12
+  secret+ext-sig+ecdh+gen-key, 3–6 secret+ext-sig+gen-key, 7–10/14
+  secret non-ECC lockable, 0/11 lockable ECC pubs, 2/13 ECC-pub
+  pub-info, 15 plain non-ECC). The demo works end-to-end on the real
+  chip through the module API.
+- The 226,304 B uf2 (`84edf05`) is the firmware LIVE on the chip.
+- (The user did not paste the `prov iokeyshow` output — the out-of-band
+  I/O key record remains the `prov iokey` console print in the state
+  list above + the key itself in slot 14; log it if the dev-notes
+  comparison is confirmed.)
 
 **`prov iokeytest` was BUILT (`8aa8922`), flashed, and RUN (2026-10-24)
 — it returned `clear KDF failed: ATCA_STATUS -12` (execution error) with
@@ -1624,8 +1656,10 @@ complete — config agreed (see "Agreed 4B config" above).
 Then per PLAN.md: ~~Phase 5 (crypto pass-through: kdf/sign/verify)~~ —
 COMPLETE 2026-10-26 (KDF wrapper implemented, host-tested and validated
 on hardware; the sign/verify wrappers remain on demand for Phase 7),
-Phase 6 (config read-back console demo) — BUILT 2026-10-26 (`84edf05`:
-top-level `config` demo + dev-only `prov iokeyshow`), awaiting its first
-hardware run (bench: flash the 226,304 B uf2 → `prov iokeyshow` → `prov
-lockslot 14 CONFIRM` (APPROVED by the user) → `config`), then Phase 7
-(on-hardware validation + bring-up checklist).
+Phase 6 (config read-back console demo) — COMPLETE 2026-10-26
+(`84edf05`: top-level `config` demo + dev-only `prov iokeyshow`; first
+hardware run 2026-10-26, decoded zone matches the agreed plan,
+SlotLocked FF BF) together with the final bench step `prov lockslot 14
+CONFIRM` (EXECUTED 2026-10-26 — the chip config is frozen for
+production); next is Phase 7 (on-hardware validation + bring-up
+checklist).
