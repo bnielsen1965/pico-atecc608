@@ -65,6 +65,10 @@
  *   add <name> <pin> <password>   - encrypt + store; replaces an existing
  *                                   entry (fresh salt/nonce each time)
  *   get <name> <pin>              - decrypt + print the password
+ *   dump <name>                   - show the RAW stored entry (no PIN):
+ *                                   the 96 flash bytes as text, non-
+ *                                   printable as '?' — a plaintext leak
+ *                                   would stand out as readable text
  *   rm <name>                     - delete the entry
  *
  * Limits: name 1..16 chars from [A-Za-z0-9._-]; PIN 1..24 ASCII;
@@ -231,6 +235,7 @@ static void commandHelp(char *cmdLine)
     printf("list  - list stored entries\n");
     printf("add <name> <pin> <password> - encrypt + store (replaces an entry)\n");
     printf("get <name> <pin> - decrypt + print the password\n");
+    printf("dump <name> - show the raw stored entry ('?' = non-printable byte)\n");
     printf("rm <name> - delete the entry\n");
     printf("note: input is echoed, and get prints the password — that is the demo.\n");
 }
@@ -416,6 +421,64 @@ static void commandGet(char *cmdLine)
     printf("%s\n", pass);
 }
 
+// One byte as a console character: printable ASCII as-is, anything else
+// as '?'. The point of `dump` is visual: the password is GCM-encrypted
+// in the ct field, so a 96-byte entry full of '?'-ish bytes is exactly
+// right — any plaintext leak would stand out as readable text.
+static char dump_char(uint8_t b)
+{
+    return ((b >= 0x20) && (b <= 0x7e)) ? (char)b : '?';
+}
+
+// READ-ONLY: print the raw stored entry as it sits in flash (no PIN,
+// no chip access — a littlefs read). Demonstrates that the password is
+// not stored in the clear.
+static void commandDump(char *cmdLine)
+{
+    char *tok[1];
+    if (1 != split_words(cmdLine + strlen("dump"), 1, tok)) {
+        printf("usage: dump <name>\n");
+        return;
+    }
+    const char *name = tok[0];
+    if (!valid_name(name)) {
+        printf("name must be 1..%d chars from [A-Za-z0-9._-]\n", VAULT_NAME_MAX);
+        return;
+    }
+    if (!pico_lfs_is_mounted()) {
+        printf("littlefs not mounted — cannot read\n");
+        return;
+    }
+    char path[2 + VAULT_NAME_MAX + 1];
+    entry_path(name, path, sizeof(path));
+    uint8_t raw[sizeof(vault_entry_t)];
+    if ((int)sizeof(raw) != pico_lfs_read_file(path, raw, sizeof(raw))) {
+        printf("no entry named '%s'\n", name);
+        return;
+    }
+    printf("raw entry %s (%u B) as stored in flash — non-printable bytes as '?':\n",
+           path, (unsigned)sizeof(raw));
+    printf("layout: [0:4] magic | [4:20] salt | [20:32] nonce | [32:36] pt_len\n"
+           "        [36:76] ct (the password, GCM-encrypted) | [76:92] tag | [92:96] crc32\n");
+    for (size_t off = 0; off < sizeof(raw); off += 16) {
+        printf("  %02u: ", (unsigned)off);
+        for (size_t i = 0; i < 16; i++) {
+            printf("%c", dump_char(raw[off + i]));
+        }
+        printf("\n");
+    }
+    // Record summary: the dump above is the raw bytes; this says whether
+    // the record parses (same checks `get` uses before the tag check).
+    vault_entry_t *e = (vault_entry_t *)raw;
+    if ((VAULT_MAGIC == e->magic) && (e->pt_len <= VAULT_PASS_MAX) &&
+        (iokey_file_crc32(raw, offsetof(vault_entry_t, crc32)) == e->crc32)) {
+        printf("record: magic OK, pt_len %u, CRC OK — the password text must NOT appear above\n",
+               (unsigned)e->pt_len);
+    } else {
+        printf("record: CORRUPT (magic/length/CRC mismatch) — `rm` it and re-add\n");
+    }
+}
+
 static void commandRm(char *cmdLine)
 {
     char *tok[1];
@@ -450,6 +513,7 @@ static struct command_t commands[] = {
     {"list", commandList},
     {"add", commandAdd},
     {"get", commandGet},
+    {"dump", commandDump},
     {"rm", commandRm},
 };
 

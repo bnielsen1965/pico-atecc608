@@ -133,6 +133,7 @@ app prints what is missing and where to get it; it never provisions.
 | `list` | list stored entries |
 | `add <name> <pin> <password>` | derive the key, GCM-encrypt, store (replaces an existing entry, fresh salt/nonce) |
 | `get <name> <pin>` | derive the key, GCM-decrypt + print the password |
+| `dump <name>` | show the raw stored 96-B entry as text (no PIN — a littlefs read; non-printable bytes as `?`): proves the password is not in flash in the clear, since any plaintext leak would stand out as readable text |
 | `rm <name>` | delete the entry |
 
 Limits: name 1..16 chars from `[A-Za-z0-9._-]`; PIN 1..24 chars;

@@ -75,10 +75,13 @@ the xtime sign-bit fix — details in the newest "Latest state"
 paragraph below): host ctest is 4/4 GREEN (the OpenSSL-verified NIST
 KATs pass), both Pico uf2s build warning-clean (console unchanged at
 238,080 B — identical to the live build; vault 196,096 B), and the
-docs are in (example/README vault section, PLAN.md scope note). Only
-the bench demo run remains (user action, ground rule 0): flash the
-vault uf2 → `add`/`get`/`list`/`rm`. The chip is FROZEN and untouched
-by this work (the vault runtime uses KDF + RNG only).
+docs are in (example/README vault section, PLAN.md scope note). The
+bench demo run was GREEN 2026-10-27 (the user flashed the vault uf2
+and verified add / get / wrong-PIN / list / rm — see the newest
+"Latest state" paragraph below); the read-only `dump <name>` demo
+command (raw stored entry as text, non-printables as `?`) was added
+the same day and awaits its first bench run. The chip is FROZEN and
+untouched by this work (the vault runtime uses KDF + RNG only).
 
 **The functional I/O-key test `prov iokeytest` was BUILT (`8aa8922`),
 flashed, and RUN (2026-10-24): `clear KDF failed: ATCA_STATUS -12`
@@ -747,15 +750,57 @@ Only the bench demo run remains (user action).**
   commit `d97214e` remains the audit trail for the diagnosed state).
 - **Chip: FROZEN, untouched.** The console 238,080 B uf2
   (`c1708f6`) is still the firmware LIVE on the chip.
-- **Remaining (user action, ground rule 0):** the bench demo run —
-  flash `build/example/vault/pico-atecc608-vault.uf2` (BOOTSEL drag;
-  `/io_key.bin` + any entries survive a reflash — the app region and
-  the 0x80000 volume are disjoint, proven in Phase 4B) → `help` →
-  `add <name> <pin> <password>` → `get <name> <pin>` (expect the
-  password back) → `get` with a WRONG PIN (expect "wrong PIN or
-  corrupted entry") → `list` → `rm <name>`. Runtime = KDF (slot 7,
-  target=output — the data zone is locked, so it works) + RNG only —
-  NO chip writes; HARD RULE safe.
+- **Bench demo run: GREEN (2026-10-27, user)** — the 196,096 B vault
+  uf2 was flashed (BOOTSEL drag; `/io_key.bin` survived, as proven —
+  the app region and the 0x80000 volume are disjoint) and `add` /
+  `get` (correct PIN — the password came back) / `get` with a WRONG
+  PIN ("wrong PIN or corrupted entry") / `list` / `rm` were all run
+  and verified as expected by the user. The vault works end-to-end on
+  the FROZEN chip: KDF (slot 7, target=output — the data zone is
+  locked, so it works) + chip RNG + littlefs only — NO chip writes;
+  HARD RULE observed.
+
+**Latest state (2026-10-27, after the bench): the read-only `dump
+<name>` command is BUILT (the plaintext-leak demonstration); the
+counters question is answered (a wrong-PIN `get` touches NOTHING —
+chip or Pico). Awaiting the reflash + `dump` bench run.**
+- `dump <name>` (READ-ONLY — a littlefs read only; no PIN, no chip
+  access; HARD RULE safe): prints the raw stored 96-B entry as TEXT —
+  printable ASCII (0x20..0x7E) as-is, every other byte as `?` — in
+  16-byte offset rows, with a layout legend
+  ([0:4] magic | [4:20] salt | [20:32] nonce | [32:36] pt_len |
+  [36:76] ct | [76:92] tag | [92:96] crc32) and a record summary
+  (magic/pt_len/CRC — the same checks `get` uses before the tag
+  check; a bad record is reported CORRUPT). The demonstration: the
+  salt/nonce are in the clear BY DESIGN (random, not secret —
+  uniqueness comes from salt ‖ PIN); the ct field — where the
+  password is — must read as `?`-ish noise, and any plaintext leak
+  would stand out as readable text. (Pure-hex was considered and
+  rejected for this purpose — the point is visual.) Help + usage +
+  top-of-file command list + the example/README vault command table
+  updated.
+- **Counters (user question, answered from bench evidence):** the
+  wrong-PIN `get` did NOT affect any chip counter — the KDF and
+  NONCE commands never increment them (selftest check 4: counters
+  0/0 after many KDF runs; only the explicit COUNTER command moves
+  them). The chip cannot even tell a wrong PIN from a right one — it
+  derives whatever key `salt ‖ PIN` maps to; "wrong" is a Pico-side
+  GCM tag failure. The agreed Pico-side brute-force lockout (littlefs
+  fail count, "5 failures → locked until deliberate reset") is BY
+  DESIGN but NOT IMPLEMENTED in this demo — so nothing is counted
+  anywhere today (a possible follow-up if wanted).
+- Build: vault uf2 now **203,776 B**, warning-clean (only the known
+  cosmetic ATCA_TA_SUPPORT note); host ctest 4/4 (unchanged — `dump`
+  lives in main.c, Pico-only). **The 196,096 B vault uf2
+  (`b5bafaf`) is the firmware LIVE on the chip** (the user's bench
+  flash); it will be superseded by the 203,776 B build when `dump`
+  gets its bench run.
+- **Bench run for `dump` (user action, ground rule 0):** reflash
+  `build/example/vault/pico-atecc608-vault.uf2` (203,776 B; entries
+  survive the reflash) → `add <name> <pin> <password>` →
+  `dump <name>` (expect the `?`-ish rows + "the password text must
+  NOT appear above") → `get <name> <pin>` (the password still comes
+  back). Read-only throughout after the flash.
 
 **`prov iokeytest` was BUILT (`8aa8922`), flashed, and RUN (2026-10-24)
 — it returned `clear KDF failed: ATCA_STATUS -12` (execution error) with
@@ -1516,17 +1561,17 @@ bit 13/14 behavior.
   host-computed C904 CRC golden confirmed on hardware). **ALL SEVEN
   PHASES ARE COMPLETE.** HARD RULE below still applies (the whole
   selftest suite is read-only, so it stays safe to run).
-- **Vault example (in-repo demo) — HOST-VERIFIED (2026-10-27):** the
+- **Vault example (in-repo demo) — BENCH-VERIFIED (2026-10-27):** the
   console-based PIN-gated password-store demo in `example/vault/`
   (chip = KDF master only; pure-C AES-256-GCM; flat `/v_<name>`
-  littlefs entries; `add`/`get`/`list`/`rm`) — the two diagnosed GCM
-  bugs are FIXED; host `test_vault_gcm` 12/12 (ctest 4/4); both uf2s
-  warning-clean (console unchanged 238,080 B; vault 196,096 B); docs
-  in (example/README "Vault example" section, PLAN.md scope note).
-  Chip untouched (frozen; KDF + RNG only at runtime). Remaining: the
-  bench demo run (user action — flash the vault uf2, then
-  add/get/list/rm; see the newest "Latest state" paragraph of the
-  stopped section).
+  littlefs entries; `add`/`get`/`dump`/`list`/`rm`) — the two
+  diagnosed GCM bugs are FIXED; host `test_vault_gcm` 12/12 (ctest
+  4/4); the bench demo run is GREEN (add / get / wrong-PIN / list /
+  rm verified by the user on the frozen chip); the read-only `dump`
+  plaintext-leak demonstration is built and awaits its first bench
+  run (203,776 B uf2). Chip untouched (frozen; KDF + RNG only at
+  runtime). Docs in (example/README "Vault example" section, PLAN.md
+  scope note).
 
 ## Build (verified green)
 ```sh
