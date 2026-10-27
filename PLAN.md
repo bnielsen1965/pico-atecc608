@@ -479,8 +479,11 @@ A single config struct drives init; everything else is a small, stable set.
   golden table — serial, six public keys, the slot-7 KDF value, CRC
   C904 — hard-FAIL in full mode; `selftest generic` skips them) and 7.3
   BUILT 2026-10-26 (`docs/BRINGUP.md` + the example/README pointer);
-  awaiting the 7.4 bench run (reflash + `selftest` green).
+  7.4 DONE 2026-10-26: reflash + bench run — `selftest` 12/12 PASS,
+  `selftest generic` 8/8 PASS (the C904 golden confirmed on the real
+  chip; record in RESUME.md).
   - **Done when:** suite green on hardware; checklist written.
+    **MET 2026-10-26 — Phase 7: COMPLETE.**
 
 ## Ground rules (provisioning safeguards)
 

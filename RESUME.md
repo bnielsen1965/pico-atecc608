@@ -11,12 +11,13 @@ now frozen for production). Phase 7 is SCOPED (2026-10-26 — read-only
 scope in PLAN.md). Sub-steps 7.1–7.3 are ALL BUILT (2026-10-26:
 `0242df2` selftest generic invariants + shared round-trip core;
 `c1708f6` bench-chip goldens + full/generic modes; `0d312a5`
-`docs/BRINGUP.md` bring-up checklist + example/README pointer); the
-current fully-locked config-zone CRC is **C904** (host-computed,
-cross-checked against both recorded CRCs — the 7.2 golden; see the
-newest "Latest state" paragraph). The ONLY remaining step is 7.4: the
-bench run (reflash the 238,080 B uf2 → `selftest` — expect 12/12
-green). Bench record: the ECC slots (1, 3–6, 12) are
+`docs/BRINGUP.md` bring-up checklist + example/README pointer).
+**Phase 7 is COMPLETE (2026-10-26): the 7.4 bench run was GREEN —
+`selftest` 12/12 PASS, `selftest generic` 8/8 PASS on the chip** (the
+C904 config-zone CRC golden — host-computed and cross-checked against
+both recorded CRCs — confirmed on the real chip). The 238,080 B uf2
+(`c1708f6`) is LIVE on the chip. All seven phases are done; the chip
+is provisioned, frozen, and regression-gated. Bench record: the ECC slots (1, 3–6, 12) are
 GenKey'd
 (all six public keys recorded and verified in the "⏸ Where the
 conversation stopped" section below), the DATA ZONE IS LOCKED (one-way
@@ -545,6 +546,28 @@ bench run remains — Phase 7 is one user action from COMPLETE.**
   optionally `selftest generic` (expect 8/8). Read-only throughout —
   HARD RULE safe. If any check FAILs, the detail line names it; do NOT
   re-provision — bring the output back.
+
+**BENCH GREEN (2026-10-26, 7.4): Phase 7 is COMPLETE — `selftest`
+12/12 PASS and `selftest generic` 8/8 PASS on the chip.**
+- `selftest` (full, first hardware run of the suite): ALL 12 checks
+  PASS — probe+info (part 0x60 rev 5), random (real TRNG, fetches
+  differ), config zone (00 00 locks, SlotLocked FF BF, I2C C0, zero
+  writable-region diff vs the agreed image), counters 0/0 via
+  `atecc608_counter_read` (first hardware exercise of that API —
+  correct), six ECC pubkeys (non-zero, pairwise distinct), kdf
+  determinism, io key round-trip, littlefs ("volume survived the last
+  reflash, /io_key.bin valid"), and the four goldens: serial, all six
+  pubkeys, the KDF value `6F FF 7D D6 …`, and **config CRC C904 —
+  confirming the host-computed golden on the real chip** (the
+  factory-bytes + agreed-image reconstruction is proven byte-exact end
+  to end).
+- `selftest generic`: 8/8 PASS (invariants only, goldens skipped —
+  the mode switch works).
+- The 238,080 B uf2 (`c1708f6`) is the firmware LIVE on the chip.
+- **All seven phases are COMPLETE.** The chip is provisioned, frozen
+  for production, and now regression-gated: any future `selftest` run
+  on it must stay 12/12 — a golden mismatch means the chip in front of
+  you is not the recorded bench chip, or the config drifted.
 
 **`prov iokeytest` was BUILT (`8aa8922`), flashed, and RUN (2026-10-24)
 — it returned `clear KDF failed: ATCA_STATUS -12` (execution error) with
@@ -1297,15 +1320,14 @@ bit 13/14 behavior.
   hardware: the decoded zone matches the agreed plan in every field
   (I2C 0xC0, locks 00 00, SlotLocked FF BF, all 16 slot rows); the
   dev-only `prov iokeyshow` matched the out-of-band dev notes.
-- **Phase 7 in progress (2026-10-26)** — 7.1–7.3 BUILT
+- **Phase 7 DONE (2026-10-26)** — 7.1–7.3 BUILT
   (`0242df2` `selftest`'s 8 generic invariants, read-only, shared
   I/O-key round-trip core; `c1708f6` bench-chip goldens +
-  full/generic modes; `0d312a5` `docs/BRINGUP.md`); the current
-  fully-locked config-zone CRC golden **C904** is host-computed and
-  cross-checked (CDC7 + F6DE both reproduced); all goldens verified
-  byte-for-byte against the RESUME.md records. Remaining: 7.4 bench
-  run (reflash + `selftest` green — expect 12/12). HARD RULE below
-  applies (the whole suite is read-only).
+  full/generic modes; `0d312a5` `docs/BRINGUP.md`) and 7.4 BENCH
+  GREEN (`selftest` 12/12, `selftest generic` 8/8 on the chip; the
+  host-computed C904 CRC golden confirmed on hardware). **ALL SEVEN
+  PHASES ARE COMPLETE.** HARD RULE below still applies (the whole
+  selftest suite is read-only, so it stays safe to run).
 
 ## Build (verified green)
 ```sh
