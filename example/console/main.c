@@ -107,6 +107,9 @@
 #include "atecc608/atecc608_crypto.h"
 #include "atecc608/atecc608_prov.h"
 #include "dev_config.h"
+// The I/O key file format is shared with the vault example (it reads the
+// file `prov iokey` writes here) — one contract in one header.
+#include "iokey_file.h"
 // The I/O-key functional test (prov iokeytest) uses the raw KDF command and
 // the host-side I/O decrypt directly: it needs the 64-byte target length and
 // the opt-in output-encrypted variant, which the module's curated 32-byte
@@ -128,19 +131,11 @@
 
 // --- provisioning: littlefs layout ------------------------------------------
 
-#define PROV_IOKEY_PATH   "/io_key.bin"
-#define PROV_IOKEY_LEN    32
-#define PROV_IOKEY_MAGIC  0x494F4B31u  // 'I''O''K''1'
+// The I/O key file format (path/len/magic/struct/CRC-32) lives in
+// common/iokey_file.h — it is a cross-app contract (the vault example
+// reads the file this app writes).
 #define PROV_LOCK_TOKEN   "CONFIRM"
 #define PROV_IO_KEY_SLOT  14
-
-// /io_key.bin: magic, length, key, and a CRC-32 over all preceding bytes.
-typedef struct {
-    uint32_t magic;
-    uint32_t len;
-    uint8_t  key[PROV_IOKEY_LEN];
-    uint32_t crc32;
-} iokey_file_t;
 
 // littlefs volume state, recorded at boot in main(). Distinguishes a volume
 // that SURVIVED the last reflash (an existing volume mounted) from one that
@@ -152,49 +147,27 @@ typedef struct {
 enum { LFS_STATE_NONE = 0, LFS_STATE_EXISTING = 1, LFS_STATE_FRESH = 2 };
 static int s_lfs_state = LFS_STATE_NONE;
 
-// Standard reflected CRC-32 (poly 0xEDB88320, init/xorout 0xFFFFFFFF).
-static uint32_t crc32_buf(const uint8_t *buf, size_t len)
-{
-    uint32_t crc = 0xFFFFFFFFu;
-    for (size_t i = 0; i < len; i++) {
-        crc ^= buf[i];
-        for (int b = 0; b < 8; b++) {
-            crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t)(-(int)(crc & 1u)));
-        }
-    }
-    return crc ^ 0xFFFFFFFFu;
-}
-
-// Validate the saved I/O key file (present, full size, magic, len, and
-// CRC-32 over the header) and return the key. On failure fills detail
-// (if non-NULL) with the short reason; it prints nothing itself, so the
+// Validate the saved I/O key file (present, full size, and valid per
+// common/iokey_file.h) and return the key. On failure fills detail (if
+// non-NULL) with the short reason; it prints nothing itself, so the
 // selftest can report the reason inside its own [FAIL] line.
-static bool iokey_file_valid(uint8_t key[PROV_IOKEY_LEN],
+static bool iokey_file_valid(uint8_t key[IOKEY_FILE_KEY_LEN],
                              char *detail, size_t detail_size)
 {
     iokey_file_t f;
-    int rd = pico_lfs_read_file(PROV_IOKEY_PATH, (uint8_t *)&f, sizeof(f));
-    if ((int)sizeof(f) != rd
-        || PROV_IOKEY_MAGIC != f.magic
-        || PROV_IOKEY_LEN != f.len) {
+    int rd = pico_lfs_read_file(IOKEY_FILE_PATH, (uint8_t *)&f, sizeof(f));
+    if ((int)sizeof(f) != rd) {
         if (detail) {
-            snprintf(detail, detail_size, "%s missing or corrupt", PROV_IOKEY_PATH);
+            snprintf(detail, detail_size, "%s missing or corrupt", IOKEY_FILE_PATH);
         }
         return false;
     }
-    if (crc32_buf((const uint8_t *)&f, offsetof(iokey_file_t, crc32)) != f.crc32) {
-        if (detail) {
-            snprintf(detail, detail_size, "%s CRC-32 mismatch", PROV_IOKEY_PATH);
-        }
-        return false;
-    }
-    memcpy(key, f.key, sizeof(f.key));
-    return true;
+    return iokey_file_check(&f, key, detail, detail_size);
 }
 
 // Load the I/O key saved in /io_key.bin (magic/len/CRC-32 checked). Prints
 // the reason and returns false if the file is missing or corrupt.
-static bool load_io_key_file(uint8_t key[PROV_IOKEY_LEN])
+static bool load_io_key_file(uint8_t key[IOKEY_FILE_KEY_LEN])
 {
     char detail[64];
     if (!iokey_file_valid(key, detail, sizeof(detail))) {
@@ -559,7 +532,7 @@ static void reportIokeyPersistence(void)
 {
     if (LFS_STATE_NONE == s_lfs_state) {
         printf("littlefs: not mounted at boot (init or mount FAILED) — cannot check %s\n",
-               PROV_IOKEY_PATH);
+               IOKEY_FILE_PATH);
         return;
     }
     printf("littlefs volume: %s\n",
@@ -568,8 +541,8 @@ static void reportIokeyPersistence(void)
                : "mounted existing (survived the last reflash)");
 
     struct lfs_info fi;
-    if (0 != pico_lfs_stat(PROV_IOKEY_PATH, &fi)) {
-        printf("  %s: MISSING%s\n", PROV_IOKEY_PATH,
+    if (0 != pico_lfs_stat(IOKEY_FILE_PATH, &fi)) {
+        printf("  %s: MISSING%s\n", IOKEY_FILE_PATH,
                (LFS_STATE_FRESH == s_lfs_state)
                    ? " — expected on a fresh volume"
                    : " — the volume survived but the file is gone");
@@ -577,17 +550,17 @@ static void reportIokeyPersistence(void)
         return;
     }
     iokey_file_t f;
-    int rd = pico_lfs_read_file(PROV_IOKEY_PATH, (uint8_t *)&f, sizeof(f));
+    int rd = pico_lfs_read_file(IOKEY_FILE_PATH, (uint8_t *)&f, sizeof(f));
     bool ok = (sizeof(f) == (size_t)rd)
-           && (PROV_IOKEY_MAGIC == f.magic)
-           && (PROV_IOKEY_LEN == f.len)
-           && (crc32_buf((const uint8_t *)&f, offsetof(iokey_file_t, crc32)) == f.crc32);
+           && (IOKEY_FILE_MAGIC == f.magic)
+           && (IOKEY_FILE_KEY_LEN == f.len)
+           && (iokey_file_crc32((const uint8_t *)&f, offsetof(iokey_file_t, crc32)) == f.crc32);
     if (!ok) {
         printf("  %s: present but CORRUPT (size %d, magic/len/CRC mismatch) — re-run `prov iokey`\n",
-               PROV_IOKEY_PATH, rd);
+               IOKEY_FILE_PATH, rd);
         return;
     }
-    printf("  %s: present and valid (%u B key, magic + len + CRC ok)\n", PROV_IOKEY_PATH, f.len);
+    printf("  %s: present and valid (%u B key, magic + len + CRC ok)\n", IOKEY_FILE_PATH, f.len);
 }
 
 // prov status — read-only: chip state, the current config zone, and a
@@ -730,7 +703,7 @@ static void provRandtest(void)
 // verified functionally by an I/O-protected transaction (Phase 7).
 static void provIokey(void)
 {
-    uint8_t key[PROV_IOKEY_LEN];
+    uint8_t key[IOKEY_FILE_KEY_LEN];
     uint8_t zone[ATECC608_CONFIG_ZONE_LEN];
     atecc608_config_intent_t cfg;
     bool locked = false;
@@ -785,7 +758,7 @@ static void provIokey(void)
     // Pico-side entropy: the chip RNG yields a deterministic factory
     // pattern before the config lock, so the key comes from the RP2350's
     // hardware TRNG (pico_rand uses it by default on RP2350).
-    for (int i = 0; i < PROV_IOKEY_LEN / 4; i++) {
+    for (int i = 0; i < IOKEY_FILE_KEY_LEN / 4; i++) {
         uint32_t w = get_rand_32();
         memcpy(&key[4 * i], &w, sizeof(w));
     }
@@ -807,22 +780,22 @@ static void provIokey(void)
     atecc608_print_hex(key, sizeof(key));
 
     iokey_file_t f;
-    f.magic = PROV_IOKEY_MAGIC;
-    f.len   = PROV_IOKEY_LEN;
+    f.magic = IOKEY_FILE_MAGIC;
+    f.len   = IOKEY_FILE_KEY_LEN;
     memcpy(f.key, key, sizeof(key));
-    f.crc32 = crc32_buf((const uint8_t *)&f, offsetof(iokey_file_t, crc32));
-    if (0 != pico_lfs_write_file(PROV_IOKEY_PATH, (const uint8_t *)&f, sizeof(f))) {
+    f.crc32 = iokey_file_crc32((const uint8_t *)&f, offsetof(iokey_file_t, crc32));
+    if (0 != pico_lfs_write_file(IOKEY_FILE_PATH, (const uint8_t *)&f, sizeof(f))) {
         printf("saving %s FAILED — the key is on the chip; re-save later.\n",
-               PROV_IOKEY_PATH);
+               IOKEY_FILE_PATH);
         return;
     }
     iokey_file_t rd;
-    if ((sizeof(f) != (size_t)pico_lfs_read_file(PROV_IOKEY_PATH, (uint8_t *)&rd, sizeof(rd)))
+    if ((sizeof(f) != (size_t)pico_lfs_read_file(IOKEY_FILE_PATH, (uint8_t *)&rd, sizeof(rd)))
         || (0 != memcmp(&f, &rd, sizeof(f)))) {
-        printf("saved %s FAILED read-back verify.\n", PROV_IOKEY_PATH);
+        printf("saved %s FAILED read-back verify.\n", IOKEY_FILE_PATH);
         return;
     }
-    printf("saved to littlefs: %s (read-back verified)\n", PROV_IOKEY_PATH);
+    printf("saved to littlefs: %s (read-back verified)\n", IOKEY_FILE_PATH);
 }
 
 // prov iokeytest — READ-ONLY functional verification of the I/O-protection
@@ -873,7 +846,7 @@ static void provIokey(void)
 static bool iokey_roundtrip(bool verbose, char *detail, size_t detail_size)
 {
     // 1. Load the saved I/O key.
-    uint8_t io_key[PROV_IOKEY_LEN];
+    uint8_t io_key[IOKEY_FILE_KEY_LEN];
     if (!iokey_file_valid(io_key, detail, detail_size)) {
         if (verbose) {
             printf("cannot load the I/O key: %s — run `prov iokey` first.\n",
@@ -1030,7 +1003,7 @@ static bool iokey_roundtrip(bool verbose, char *detail, size_t detail_size)
     if (0 != memcmp(ref, out_enc, sizeof(ref))) {
         snprintf(detail, detail_size,
                  "decrypted KDF != clear KDF (the I/O key in %s does not match slot %u)",
-                 PROV_IOKEY_PATH, (unsigned)PROV_IO_KEY_SLOT);
+                 IOKEY_FILE_PATH, (unsigned)PROV_IO_KEY_SLOT);
         if (verbose) {
             printf("I/O key test FAILED: the decrypted KDF does not match the clear\n"
                    "KDF (both decrypted with the saved key when the chip enforces\n"
@@ -1041,14 +1014,14 @@ static bool iokey_roundtrip(bool verbose, char *detail, size_t detail_size)
                    "Do NOT re-key slot 14 before that verdict.\n");
             printf("decrypted KDF (64 B):  ");
             atecc608_print_hex(out_enc, sizeof(out_enc));
-            printf("I/O key from %s (32 B): ", PROV_IOKEY_PATH);
+            printf("I/O key from %s (32 B): ", IOKEY_FILE_PATH);
             atecc608_print_hex(io_key, sizeof(io_key));
         }
         return false;
     }
     if (verbose) {
         printf("I/O key test PASSED: slot 14 matches %s and the I/O-\n"
-               "protection path works end-to-end.\n", PROV_IOKEY_PATH);
+               "protection path works end-to-end.\n", IOKEY_FILE_PATH);
         if (clear_had_nonce) {
             printf("NOTE: this chip ENFORCES I/O protection (kdf_prot=1) —\n"
                    "both KDF outputs arrived encrypted; both were decrypted\n"
@@ -1091,11 +1064,11 @@ static void provIokeyTest(void)
 // READ-ONLY and chip-free: a littlefs read only, no chip commands.
 static void provIokeyShow(void)
 {
-    uint8_t io_key[PROV_IOKEY_LEN];
+    uint8_t io_key[IOKEY_FILE_KEY_LEN];
     if (!load_io_key_file(io_key)) {
         return;
     }
-    printf("I/O key saved in %s (32 B):\n", PROV_IOKEY_PATH);
+    printf("I/O key saved in %s (32 B):\n", IOKEY_FILE_PATH);
     atecc608_print_hex(io_key, sizeof(io_key));
     printf("DEV-ONLY print: compare against the out-of-band copy. A\n"
            "production application must not expose this key.\n");
@@ -1538,7 +1511,7 @@ static void provKdf(const char *rest)
 {
     uint8_t slot;
     uint8_t msg[16];
-    uint8_t io_key[PROV_IOKEY_LEN];
+    uint8_t io_key[IOKEY_FILE_KEY_LEN];
     uint8_t out[ATECC608_KDF_OUT_LEN];
     atecc608_status_t st;
 
@@ -1882,7 +1855,7 @@ static void commandSelftest(char *cmdLine)
     // (6) KDF determinism: two PRF derivations from slot 7 (the vault
     // master in the agreed layout) with the fixed zero nonce and the
     // fixed 00..0F message must be identical. (7.2 adds the bench value.)
-    uint8_t io_key[PROV_IOKEY_LEN];
+    uint8_t io_key[IOKEY_FILE_KEY_LEN];
     bool have_io_key = iokey_file_valid(io_key, d, sizeof(d));
     uint8_t msg[16];
     for (int i = 0; i < 16; i++) {
@@ -2126,7 +2099,7 @@ int main(void) {
         if (0 != pico_lfs_mount_existing()) {
             printf("littlefs: no formatted volume — formatting (one-time; can take a while)...\n");
             if (0 != pico_lfs_mount()) {
-                printf("littlefs mount FAILED — %s persistence unavailable.\n", PROV_IOKEY_PATH);
+                printf("littlefs mount FAILED — %s persistence unavailable.\n", IOKEY_FILE_PATH);
             } else {
                 s_lfs_state = LFS_STATE_FRESH;
                 printf("littlefs: fresh volume formatted.\n");
@@ -2136,15 +2109,15 @@ int main(void) {
         }
         if (pico_lfs_is_mounted()) {
             struct lfs_info fi;
-            if (0 != pico_lfs_stat(PROV_IOKEY_PATH, &fi)) {
+            if (0 != pico_lfs_stat(IOKEY_FILE_PATH, &fi)) {
                 printf("WARNING: %s not found (first boot, or a full-flash erase — a\n"
                        "         normal uf2 reflash preserves the volume). If the chip is\n"
                        "         already provisioned, re-run `prov iokey` and re-record the key.\n",
-                       PROV_IOKEY_PATH);
+                       IOKEY_FILE_PATH);
             }
         }
     } else {
-        printf("littlefs init FAILED — %s persistence unavailable.\n", PROV_IOKEY_PATH);
+        printf("littlefs init FAILED — %s persistence unavailable.\n", IOKEY_FILE_PATH);
     }
 
     // The command processor (core1) blocks on a semaphore, so it must be

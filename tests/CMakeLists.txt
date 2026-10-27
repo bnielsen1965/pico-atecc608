@@ -146,3 +146,11 @@ target_link_libraries(test_crypto PRIVATE
 )
 target_compile_options(test_crypto PRIVATE -Wall -Wextra)
 add_test(NAME test_crypto COMMAND $<TARGET_FILE:test_crypto>)
+
+# The vault example's software AES-256-GCM (example/vault/vault_gcm.c) is
+# pure C — no pico-sdk, no cryptoauthlib — so it is host-verified here
+# against the NIST GCM vectors; it links nothing but its own sources.
+add_executable(test_vault_gcm test_vault_gcm.c ${MOD_ROOT}/example/vault/vault_gcm.c)
+target_include_directories(test_vault_gcm PRIVATE ${MOD_ROOT}/example/vault)
+target_compile_options(test_vault_gcm PRIVATE -Wall -Wextra)
+add_test(NAME test_vault_gcm COMMAND $<TARGET_FILE:test_vault_gcm>)
