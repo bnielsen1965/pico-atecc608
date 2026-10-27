@@ -58,7 +58,11 @@ typedef struct {
 // Multiply by 2 in GF(2^8) (xtime, FIPS-197 5.1.1).
 static uint8_t xtime(uint8_t a)
 {
-    uint8_t m = (uint8_t)(-(int)(a & 0x80u));  // 0xFF if the high bit is set, else 0x00
+    // Sign trick: the TESTED bit must be the sign bit of the int operand —
+    // (a >> 7) is 0 or 1, so -(int) is 0 or -1 (0x00 or 0xFF all-ones).
+    // Testing (a & 0x80) instead gives 0 or 128, and (uint8_t)(-128) is
+    // 0x80, NOT 0xFF (the 0x1B reduction would then never apply).
+    uint8_t m = (uint8_t)(-(int)(a >> 7));
     return (uint8_t)((a << 1) ^ (0x1b & m));
 }
 
@@ -176,19 +180,56 @@ static void ctr_inc(uint8_t ctr[16])
     }
 }
 
-// The GCM core shared by encrypt and decrypt:
-//   - blk = in ^ keystream (the ciphertext for encrypt; for the decrypt
-//     tag-check pass the plaintext is computed and discarded)
-//   - GHASH over the AAD blocks, then the blk blocks, then the 128-bit
-//     length block
-//   - tag = GHASH ^ E_K(J0)
-// out may be NULL (tag-only pass).
-static void gcm_core(const uint8_t key[VAULT_GCM_KEY_LEN],
-                     const uint8_t nonce[VAULT_GCM_NONCE_LEN],
-                     const uint8_t *aad, size_t aad_len,
-                     const uint8_t *in, size_t in_len,
-                     uint8_t *out,
-                     uint8_t tag[VAULT_GCM_TAG_LEN])
+// J0 = nonce || 0^31 || 1 (the nonce here is always 12 bytes).
+static void gcm_j0(const uint8_t nonce[VAULT_GCM_NONCE_LEN], uint8_t J0[16])
+{
+    memcpy(J0, nonce, VAULT_GCM_NONCE_LEN);
+    J0[12] = 0;
+    J0[13] = 0;
+    J0[14] = 0;
+    J0[15] = 1;
+}
+
+// AES-CTR (GCM's keystream): out = in ^ E_K(J0+1) ^ E_K(J0+2) ^ ...
+// (the keystream starts at counter 2; counter 1 / J0 is reserved for H).
+static void ctr_xcrypt(const uint8_t key[VAULT_GCM_KEY_LEN],
+                       const uint8_t nonce[VAULT_GCM_NONCE_LEN],
+                       const uint8_t *in, size_t len,
+                       uint8_t *out)
+{
+    aes256_ctx_t ctx;
+    aes256_init(&ctx, key);
+
+    uint8_t J0[16];
+    gcm_j0(nonce, J0);
+
+    uint8_t ctr[16];
+    memcpy(ctr, J0, 16);
+    ctr_inc(ctr);  // keystream starts at counter 2
+    size_t off = 0;
+    while (off < len) {
+        size_t n = len - off;
+        if (n > 16) {
+            n = 16;
+        }
+        uint8_t ks[16];
+        aes256_block(&ctx, ctr, ks);
+        ctr_inc(ctr);
+        for (size_t i = 0; i < n; i++) {
+            out[off + i] = (uint8_t)(in[off + i] ^ ks[i]);
+        }
+        off += n;
+    }
+}
+
+// GCM authentication tag: GHASH over the AAD blocks, then the CIPHERTEXT
+// blocks (never the plaintext — GCM authenticates what is stored on the
+// wire/flash), then the 128-bit length block; tag = GHASH ^ E_K(J0).
+static void gcm_tag(const uint8_t key[VAULT_GCM_KEY_LEN],
+                    const uint8_t nonce[VAULT_GCM_NONCE_LEN],
+                    const uint8_t *aad, size_t aad_len,
+                    const uint8_t *ct, size_t ct_len,
+                    uint8_t tag[VAULT_GCM_TAG_LEN])
 {
     aes256_ctx_t ctx;
     aes256_init(&ctx, key);
@@ -196,13 +237,8 @@ static void gcm_core(const uint8_t key[VAULT_GCM_KEY_LEN],
     uint8_t H[16];
     aes256_block(&ctx, zeros16, H);
 
-    // J0 = nonce || 0^31 || 1 (the nonce here is always 12 bytes).
     uint8_t J0[16];
-    memcpy(J0, nonce, VAULT_GCM_NONCE_LEN);
-    J0[12] = 0;
-    J0[13] = 0;
-    J0[14] = 0;
-    J0[15] = 1;
+    gcm_j0(nonce, J0);
 
     uint8_t ekJ0[16];
     aes256_block(&ctx, J0, ekJ0);
@@ -223,33 +259,22 @@ static void gcm_core(const uint8_t key[VAULT_GCM_KEY_LEN],
         off += n;
     }
 
-    // CTR part + GHASH over the resulting blocks.
-    uint8_t ctr[16];
-    memcpy(ctr, J0, 16);
-    ctr_inc(ctr);  // keystream starts at counter 2
+    // GHASH over the raw ciphertext blocks (zero-padded final block).
     off = 0;
-    while (off < in_len) {
-        size_t n = in_len - off;
+    while (off < ct_len) {
+        size_t n = ct_len - off;
         if (n > 16) {
             n = 16;
         }
-        uint8_t ks[16];
-        aes256_block(&ctx, ctr, ks);
-        ctr_inc(ctr);
         memset(blk, 0, sizeof(blk));
-        for (size_t i = 0; i < n; i++) {
-            blk[i] = (uint8_t)(in[off + i] ^ ks[i]);
-        }
-        if (out) {
-            memcpy(out + off, blk, n);
-        }
+        memcpy(blk, ct + off, n);
         ghash_update(X, blk, H);
         off += n;
     }
 
     // Length block: bit lengths, 64 bits each, big-endian.
     uint64_t a_bits = aad_len * 8u;
-    uint64_t c_bits = in_len * 8u;
+    uint64_t c_bits = ct_len * 8u;
     for (int i = 0; i < 8; i++) {
         blk[i]     = (uint8_t)(a_bits >> (56 - 8 * i));
         blk[8 + i] = (uint8_t)(c_bits >> (56 - 8 * i));
@@ -271,7 +296,8 @@ bool vault_gcm_encrypt(const uint8_t key[VAULT_GCM_KEY_LEN],
     if (ct_cap < pt_len) {
         return false;
     }
-    gcm_core(key, nonce, aad, aad_len, pt, pt_len, ct, tag);
+    ctr_xcrypt(key, nonce, pt, pt_len, ct);
+    gcm_tag(key, nonce, aad, aad_len, ct, pt_len, tag);
     return true;
 }
 
@@ -286,9 +312,10 @@ bool vault_gcm_decrypt(const uint8_t key[VAULT_GCM_KEY_LEN],
         return false;
     }
     // Verify the tag BEFORE releasing any plaintext: a wrong PIN derives a
-    // wrong key, so this tag check is what makes `get` fail.
+    // wrong key, so this tag check is what makes `get` fail. The tag is
+    // computed over the RAW stored ciphertext.
     uint8_t expect[VAULT_GCM_TAG_LEN];
-    gcm_core(key, nonce, aad, aad_len, ct, ct_len, NULL, expect);
+    gcm_tag(key, nonce, aad, aad_len, ct, ct_len, expect);
     uint8_t diff = 0;
     for (int j = 0; j < VAULT_GCM_TAG_LEN; j++) {
         diff |= (uint8_t)(tag[j] ^ expect[j]);
@@ -296,6 +323,6 @@ bool vault_gcm_decrypt(const uint8_t key[VAULT_GCM_KEY_LEN],
     if (0 != diff) {
         return false;  // pt untouched
     }
-    gcm_core(key, nonce, aad, aad_len, ct, ct_len, pt, expect);
+    ctr_xcrypt(key, nonce, ct, ct_len, pt);
     return true;
 }

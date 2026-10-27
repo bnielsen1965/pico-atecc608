@@ -1,6 +1,9 @@
 # Resume notes (pico-atecc608)
 
-Pause point: **2026-10-26 — Phase 4B is COMPLETE (2026-10-23), Phase 5
+Pause point: **2026-10-27 — the `vault` example is BUILT +
+HOST-VERIFIED (both diagnosed GCM bugs fixed; host ctest 4/4; bench
+demo run pending — the newest "Latest state" paragraph below), and
+Phase 4B is COMPLETE (2026-10-23), Phase 5
 is COMPLETE (KDF round-trip validated on hardware 2026-10-26), and
 Phase 6 is COMPLETE (2026-10-26: the `config` read-back demo ran on
 hardware; the decoded zone matches the agreed plan, SlotLocked FF BF).
@@ -61,15 +64,21 @@ match, CRC F6DE, data zone still unlocked, counters 0/0).
 the Phase 6 build, the 226,304 B uf2, flashed 2026-10-26 for the
 lockslot + config bench steps — see the newest "Latest state"
 paragraph below).
-**Since (2026-10-26, night):** the `vault` example (console-based
-PIN-gated password-store demo, `example/vault/`) is BUILT as a WIP —
-all files, the CMake wiring, the console refactor onto the shared
-`example/common/iokey_file.h`, and a 12-check host test are in;
-`test_vault_gcm` is RED on two DIAGNOSED bugs (an `xtime` mask that
-never yields 0xFF, and `gcm_core` hashing plaintext instead of
-ciphertext on the decrypt path) — full state + fix plan in the newest
-"Latest state" paragraph below. WIP committed; the chip is FROZEN and
-untouched by this work (the vault runtime uses KDF + RNG only).
+**Since (2026-10-26 night; FIXED 2026-10-27):** the `vault` example
+(console-based PIN-gated password-store demo, `example/vault/`) is
+BUILT and HOST-VERIFIED — all files, the CMake wiring, the console
+refactor onto the shared `example/common/iokey_file.h`, and a 12-check
+host test; the two diagnosed GCM bugs (`xtime` mask that never yields
+0xFF; `gcm_core` hashing plaintext instead of ciphertext on the decrypt
+path) are FIXED 2026-10-27 (the `ctr_xcrypt` + `gcm_tag` restructure +
+the xtime sign-bit fix — details in the newest "Latest state"
+paragraph below): host ctest is 4/4 GREEN (the OpenSSL-verified NIST
+KATs pass), both Pico uf2s build warning-clean (console unchanged at
+238,080 B — identical to the live build; vault 196,096 B), and the
+docs are in (example/README vault section, PLAN.md scope note). Only
+the bench demo run remains (user action, ground rule 0): flash the
+vault uf2 → `add`/`get`/`list`/`rm`. The chip is FROZEN and untouched
+by this work (the vault runtime uses KDF + RNG only).
 
 **The functional I/O-key test `prov iokeytest` was BUILT (`8aa8922`),
 flashed, and RUN (2026-10-24): `clear KDF failed: ATCA_STATUS -12`
@@ -692,6 +701,61 @@ to add).
   console refactor + CMake + test + this RESUME update; the commit
   message says the host KATs are red on purpose, two diagnosed bugs)
   so the night cannot lose the work.
+
+**Latest state (2026-10-27): the two diagnosed GCM bugs are FIXED —
+host ctest 4/4 GREEN, both Pico uf2s warning-clean, docs in, committed.
+Only the bench demo run remains (user action).**
+- **Bug 1 (xtime):** the mask `(uint8_t)(-(int)(a & 0x80u))` yields
+  0x80 (not 0xFF) when the high bit is set — `0x1b & 0x80 = 0`, so the
+  reduction was never applied and MixColumns silently did `a << 1`.
+  Fixed to the sign-bit form `(uint8_t)(-(int)(a >> 7))` (0 or -1 →
+  0x00/0xFF), with a comment explaining the tested-bit-must-be-the-sign-
+  bit requirement.
+- **Bug 2 (decrypt GHASH over the wrong data):** `gcm_core` always
+  GHASHed `blk = in ^ ks` — correct for encrypt (that is the
+  ciphertext) but for the decrypt tag-check pass `in` is the ciphertext,
+  so it hashed the *plaintext*. Restructured per the written plan:
+  `gcm_core` split into `ctr_xcrypt(key, nonce, in, len, out)` (pure
+  keystream XOR, counter 2 onward — no hashing) + `gcm_tag(key, nonce,
+  aad, aad_len, ct, ct_len, tag)` (H/J0/ekJ0 + GHASH over the RAW
+  ciphertext blocks + length block + `X ^ E_K(J0)`). Encrypt =
+  ctr_xcrypt then gcm_tag over the fresh ct; decrypt = gcm_tag over the
+  stored ct → constant-time compare → ctr_xcrypt. A small `gcm_j0`
+  helper is shared. The decrypt path does two key expansions (tag, then
+  xcrypt) — same cost class as the old double `gcm_core` call.
+- **Host ctest: 4/4 GREEN (12/12 vault checks)** — the OpenSSL-verified
+  NIST KATs (empty tag, 16/32/64-B ciphertexts + tags, AAD variant)
+  and both round-trips now pass; test_config / test_prov / test_crypto
+  unchanged and green. The KATs are ground truth, so the GCM is now
+  externally-verified on the exact code the Pico runs (same translation
+  unit on host and device).
+- **Pico build:** both targets warning-clean (only the known cosmetic
+  ATCA_TA_SUPPORT note from cryptoauthlib's own headers). The console
+  uf2 is **238,080 B — the same size as the live `c1708f6` build**
+  (the `iokey_file.h` refactor is behavior-identical, and the console
+  source is unchanged by the fix, so the chip's live console is
+  unchanged); the vault uf2 is **196,096 B**
+  (`build/example/vault/pico-atecc608-vault.uf2`).
+- **Docs:** `example/README.md` gains the "Vault example" section
+  (division of labour, flat `/v_<name>` storage + entry layout, startup
+  contract, command table, limits, the `get`-echoes-password and
+  slot-7-all-zeros bench caveats) + a "What's here" bullet + the vault
+  uf2 in the build list; `PLAN.md` gains the Goal scope note (the
+  in-repo demo supersedes the "vault = separate repo" note) and the
+  Phase 7 out-of-scope note is annotated.
+- **Committed 2026-10-27** (fix + docs + this RESUME update; the WIP
+  commit `d97214e` remains the audit trail for the diagnosed state).
+- **Chip: FROZEN, untouched.** The console 238,080 B uf2
+  (`c1708f6`) is still the firmware LIVE on the chip.
+- **Remaining (user action, ground rule 0):** the bench demo run —
+  flash `build/example/vault/pico-atecc608-vault.uf2` (BOOTSEL drag;
+  `/io_key.bin` + any entries survive a reflash — the app region and
+  the 0x80000 volume are disjoint, proven in Phase 4B) → `help` →
+  `add <name> <pin> <password>` → `get <name> <pin>` (expect the
+  password back) → `get` with a WRONG PIN (expect "wrong PIN or
+  corrupted entry") → `list` → `rm <name>`. Runtime = KDF (slot 7,
+  target=output — the data zone is locked, so it works) + RNG only —
+  NO chip writes; HARD RULE safe.
 
 **`prov iokeytest` was BUILT (`8aa8922`), flashed, and RUN (2026-10-24)
 — it returned `clear KDF failed: ATCA_STATUS -12` (execution error) with
@@ -1452,13 +1516,17 @@ bit 13/14 behavior.
   host-computed C904 CRC golden confirmed on hardware). **ALL SEVEN
   PHASES ARE COMPLETE.** HARD RULE below still applies (the whole
   selftest suite is read-only, so it stays safe to run).
-- **Vault example (in-repo demo) — WIP (2026-10-26 night):** the
-  console-based PIN-gated password-store demo in `example/vault/` is
-  built (chip = KDF master only; pure-C AES-256-GCM; flat `/v_<name>`
-  littlefs entries; `add`/`get`/`list`/`rm`); host `test_vault_gcm`
-  is RED on two diagnosed bugs (fix plan in the newest "Latest state"
-  paragraph of the stopped section). Chip untouched (frozen; KDF +
-  RNG only at runtime).
+- **Vault example (in-repo demo) — HOST-VERIFIED (2026-10-27):** the
+  console-based PIN-gated password-store demo in `example/vault/`
+  (chip = KDF master only; pure-C AES-256-GCM; flat `/v_<name>`
+  littlefs entries; `add`/`get`/`list`/`rm`) — the two diagnosed GCM
+  bugs are FIXED; host `test_vault_gcm` 12/12 (ctest 4/4); both uf2s
+  warning-clean (console unchanged 238,080 B; vault 196,096 B); docs
+  in (example/README "Vault example" section, PLAN.md scope note).
+  Chip untouched (frozen; KDF + RNG only at runtime). Remaining: the
+  bench demo run (user action — flash the vault uf2, then
+  add/get/list/rm; see the newest "Latest state" paragraph of the
+  stopped section).
 
 ## Build (verified green)
 ```sh
@@ -1482,10 +1550,11 @@ cmake --build tests/build -j
 ctest --test-dir tests/build --output-on-failure   # 4 tests: test_config, test_prov, test_crypto, test_vault_gcm
 # or run directly: ./tests/build/test_config  ./tests/build/test_prov  ./tests/build/test_crypto  ./tests/build/test_vault_gcm
 ```
-As of the 2026-10-26 night pause: 3/4 green — `test_vault_gcm` (the
-vault example's AES-256-GCM KATs, 12 checks) is RED on two diagnosed
-bugs (5/12 checks pass); see the newest "Latest state" paragraph in
-the stopped section for the diagnoses + fix plan.
+As of the 2026-10-27 pause: 4/4 green — `test_vault_gcm` (the
+vault example's AES-256-GCM KATs, 12 checks) passes: the two
+diagnosed GCM bugs (the xtime mask, the decrypt GHASH-over-plaintext)
+are fixed; see the newest "Latest state" paragraph in the stopped
+section for the fix record.
 `tests/` is a standalone host CMake project: FetchContent of the same
 v3.8.0, `ca_host` = cryptoauthlib's portable sources (minus
 `hal/hal_rp2350.c` — the mock defines those 8 HAL symbols), `mock_chip`,
@@ -1548,10 +1617,11 @@ pulls in the mock objects and leaves the HAL symbols unresolved);
 - `example/` — proof-of-concept examples (NOT part of the library):
   `console/` (probe/diag + the Phase 4B `prov` command set; littlefs via
   the pico-littlefs submodule for `/io_key.bin`, `pico_rand` for the
-  I/O-key entropy), `vault/` (the PIN-gated password-store demo, WIP
-  2026-10-26 night: `vault_gcm.{h,c}` pure-C AES-256-GCM + `main.c`
-  console app over flat `/v_<name>` entries; host-tested via
-  `tests/test_vault_gcm`), `tools/dump_devconfig.c` (the byte-plan
+  I/O-key entropy), `vault/` (the PIN-gated password-store demo:
+  `vault_gcm.{h,c}` pure-C AES-256-GCM — NIST-vector-verified via
+  `tests/test_vault_gcm` (12 checks) — + `main.c` console app over
+  flat `/v_<name>` entries; host-verified 2026-10-27, bench demo run
+  pending), `tools/dump_devconfig.c` (the byte-plan
   host tool), `common/dev_config.h` (the agreed 4B config intent,
   shared by console + tool; the provision-on-first-boot base is
   factored out here in 4B), `common/iokey_file.h` (the shared

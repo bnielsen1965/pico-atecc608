@@ -32,6 +32,10 @@ implementation.)
   (pico-littlefs, a submodule in this folder): `/io_key.bin` for now,
   later `/vault.db` and `/fido2.db`. The `bootrom` command re-enters
   BOOTSEL for reflashing.
+- **`vault/`** — PIN-gated password-store demo (the "Scenario 1" console
+  app): the chip is the KDF master (slot 7), the Pico does AES-256-GCM
+  (pure C, NIST-vector-verified) over flat littlefs entries
+  `/v_<name>`. See the "Vault example" section below.
 - **`tools/dump_devconfig.c`** — host tool that encodes the agreed dev
   config and prints the exact 128-byte config-zone image + summary CRC
   from the module's real builder (the byte plan).
@@ -84,6 +88,64 @@ interactive prompt inside a command would have its keystrokes split
 between the two cores. `prov lock` verifies the zone and aborts;
 `prov lock CONFIRM` carries the confirm. Both go through the module's
 confirm-callback API.
+
+## Vault example
+
+A demo of "Scenario 1 — PIN-gated password store" below (not a full
+password manager): `example/vault/` builds
+`build/example/vault/pico-atecc608-vault.uf2`.
+
+**Division of labour:** the chip is the *key master*, not a bulk cipher —
+each unlock derives a 32-byte AES-256 key with `atecc608_kdf_prf` (PRF
+mode, source = slot 7, fixed zero TempKey nonce, message = the entry's
+16-B salt ‖ PIN; with `kdf_prot=1` the derived key arrives I/O-encrypted
+on the bus and the module decrypts it in transit, so it never appears in
+clear). The Pico is the *bulk cipher* — AES-256-GCM in pure C
+(`vault_gcm.c`, forward-only AES + GCM, host-verified against NIST GCM
+vectors; this pico-sdk fork has no hardware_crypto module, and the
+ATECC608 performs no AES at all).
+
+**Storage:** one fixed 96-byte littlefs file per entry, `/v_<name>`,
+**flat at the volume root** (pico-littlefs has no mkdir; `list` filters
+the `v_` prefix next to `/io_key.bin`). Layout: magic `'VAU1'` +
+salt[16] + GCM nonce[12] (chip RNG at `add` time, not secret) + pt_len
++ ct[40] + tag[16] + CRC-32 (standard reflected, over the preceding
+bytes). The entry *name* is bound as GCM AAD, so ciphertexts cannot be
+swapped between entries or renamed. A wrong PIN derives a wrong key →
+GCM tag failure; "wrong PIN" and "corrupt entry" are deliberately not
+distinguished (a CRC pre-check reports storage corruption as such).
+`add` replaces an existing entry with a fresh salt/nonce.
+
+**Startup contract (same as the console):** the chip must already be
+provisioned — config and data zones LOCKED (the KDF target=output gate)
+and `/io_key.bin` present (written by the console's `prov iokey`). The
+app prints what is missing and where to get it; it never provisions.
+`/io_key.bin` and the entries survive console ↔ vault reflashes
+(littlefs volume @ 0x80000; a uf2 reflash touches only the app region).
+
+**Commands:**
+
+| Command | What it does |
+|---|---|
+| `help` | list commands |
+| `probe` | chip presence check (wake handshake) |
+| `bootrom` | reboot into BOOTSEL mode |
+| `list` | list stored entries |
+| `add <name> <pin> <password>` | derive the key, GCM-encrypt, store (replaces an existing entry, fresh salt/nonce) |
+| `get <name> <pin>` | derive the key, GCM-decrypt + print the password |
+| `rm <name>` | delete the entry |
+
+Limits: name 1..16 chars from `[A-Za-z0-9._-]`; PIN 1..24 chars;
+password 1..40 chars (no spaces — the command line is one buffer).
+
+**Demo caveats (bench use only):**
+- The console echoes what you type — the PIN and password are visible on
+  the serial console, and `get` prints the password. That is the point
+  of the demo.
+- The bench chip's slot 7 holds all-zero factory content (the data zone
+  is locked, so it is never re-keyed). The demo works with it as-is; a
+  real deployment provisions a random master into slot 7 during
+  bring-up, before the data-zone lock.
 
 ## Application scenarios — provisioning guidance
 
@@ -233,5 +295,6 @@ LOCKED, slot 14 locked last) is [`docs/BRINGUP.md`](../docs/BRINGUP.md)
 
 The examples build with the top-level build (see the top-level README):
 `cmake .. && make` in `build/` produces
-`build/example/console/pico-atecc608.uf2`. To build only the library:
-`-DATECC608_BUILD_EXAMPLES=OFF`.
+`build/example/console/pico-atecc608.uf2` (the console) and
+`build/example/vault/pico-atecc608-vault.uf2` (the vault demo). To build
+only the library: `-DATECC608_BUILD_EXAMPLES=OFF`.

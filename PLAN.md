@@ -11,9 +11,13 @@ projects: a C library (driver + HAL + clean `atecc608_*` API) that any Pico
 project can embed to provision and use an ATECC608 over I2C, without
 re-implementing the wake handshake, I2C protocol, CRC, or command plumbing.
 
-The earlier "dual-vault password store" is **out of scope** — it is a *potential
-consumer* (a separate repo). The module exposes primitives; applications build
-on top.
+The earlier "dual-vault password store" is **out of scope** as a *product* —
+it is a potential consumer. The module exposes primitives; applications build
+on top. **Scope note (2026-10-26, supersedes "a separate repo"):** the
+PIN-gated password store now exists **in-repo as a proof-of-concept demo**
+(`example/vault/`) — a console app that exercises the module's KDF path
+against a provisioned chip. It is part of the examples (not the library's
+API surface) and changes nothing about the module's scope.
 
 ## Decisions (locked 2026-10-17)
 
@@ -466,9 +470,11 @@ A single config struct drives init; everything else is a small, stable set.
   reflash/littlefs interplay).
   **Out of scope for Phase 7:** the `sign`/`verify` wrappers (PLAN:
   "added as consumers need them" — the FIDO2 / firmware-validation
-  consumers will pull them in); the vault itself (locked decision:
-  separate repo — Phase 7 validates the *module*, and the KDF path the
-  vault consumes is proven); a host-side mirror of the selftest (the
+  consumers will pull them in); the vault itself (Phase 7 validates the
+  *module*, and the KDF path the vault consumes is proven — the
+  "separate repo" decision was later superseded: the demo landed in-repo
+  as `example/vault/`, see the Goal scope note); a host-side mirror of
+  the selftest (the
   core `atecc608_*` API is not host-testable today, and mirroring
   against the mock would mostly test the mock — revisit if the suite
   grows).
