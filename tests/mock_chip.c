@@ -34,10 +34,25 @@
 //               UNLOCKED), param2 = slot; response = 64-byte public key
 //   INFO 0x30   param1 = 0 (revision); response = 4 bytes 00 00 60 05
 //   RANDOM 0x1B response = 32 bytes
-//   NONCE 0x16  param1 = 0x03 (pass-through; param2 0 = TempKey target);
-//               payload = the 32 bytes to store in the TempKey (a LOAD —
-//               the contents are stored, not random generation, bench
-//               verified); response = OK
+//   NONCE 0x16  param1 = 0x03 (pass-through, 32-byte input; target bits:
+//               0x00 TempKey / 0x40 Message Digest Buffer); payload = the
+//               32 bytes to store in the target (a LOAD — the contents
+//               are stored, not random generation, bench verified);
+//               response = OK
+//   SIGN 0x41   param1 = 0xA0 (external | message from the Message Digest
+//               Buffer), param2 = slot; response = 64-byte signature.
+//               Gates: private key slot WITH the EXT_SIG bit
+//               (SlotConfig bit 0) and a key in the slot. Fake signature
+//               (no P-256 math): sig[i] = priv[i%32] ^ digest[i%32]
+//               ^ (i/32) — the i/32 term keeps the R and S halves
+//               distinct, as in a real signature.
+//   VERIFY 0x45 param1 = 0x20 (stored | message from the Message Digest
+//               Buffer), param2 = slot, payload = 64-byte signature.
+//               Gates as SIGN (no EXT_SIG bit required). Response = OK
+//               when the recomputed fake signature matches, the chip's
+//               0x01 "checkmac/verify failed" error frame otherwise —
+//               distinct from the 0x0F execution error, and what the
+//               library normalizes to ATCA_CHECKMAC_VERIFY_FAILED.
 //   KDF 0x56    param1 = mode (PRF | source | target), param2 = key_id
 //               (source slot in the low byte), payload = 4 details bytes
 //               (LE; message length in the top byte) + the message.
@@ -437,6 +452,30 @@ static void mock_handle_update_extra(mock_chip_t *chip, uint8_t param1, uint16_t
     }
 }
 
+// Fake "private key" for slot `slot` (no P-256 math in the mock): the
+// same deterministic function in every code path that needs one, so the
+// key GenKey "generates" is the key Sign/Verify "use" (and an all-zero
+// slot — never GenKey'd — is the "no key" state).
+static void mock_gen_priv(uint16_t slot, uint8_t priv[MOCK_DATA_SLOT_LEN])
+{
+    for (int i = 0; i < MOCK_DATA_SLOT_LEN; i++) {
+        priv[i] = (uint8_t)((slot * 11u + (uint16_t)i * 5u + 2u) & 0xFFu);
+    }
+}
+
+// Fake ECDSA P-256 signature (no P-256 math in the mock): deterministic
+// in (private key, digest).
+static void mock_fake_sig(const uint8_t priv[MOCK_DATA_SLOT_LEN],
+                          const uint8_t digest[MOCK_DATA_SLOT_LEN],
+                          uint8_t sig[ATECC608_PUBKEY_LEN])
+{
+    for (int i = 0; i < ATECC608_PUBKEY_LEN; i++) {
+        sig[i] = (uint8_t)(priv[i % MOCK_DATA_SLOT_LEN]
+                           ^ digest[i % MOCK_DATA_SLOT_LEN]
+                           ^ (uint8_t)(i / MOCK_DATA_SLOT_LEN));
+    }
+}
+
 static void mock_handle_genkey(mock_chip_t *chip, uint8_t param1, uint16_t param2)
 {
     const uint8_t mode = (uint8_t)(param1 & GENKEY_MODE_MASK);
@@ -464,6 +503,11 @@ static void mock_handle_genkey(mock_chip_t *chip, uint8_t param1, uint16_t param
             mock_resp_exec(chip);
             return;
         }
+        // The fresh "private key" is stored in the data slot (fake,
+        // deterministic — no P-256 math): Sign/Verify use it as the
+        // signing key, so a slot that was never GenKey'd holds no key
+        // and cannot sign or verify (as on the real chip).
+        mock_gen_priv(slot, &chip->data[slot * MOCK_DATA_SLOT_LEN]);
     }
     // GENKEY_MODE_PUBLIC (0x00): recompute the public key from the stored
     // private key. Works at any time — including with the data zone
@@ -474,26 +518,36 @@ static void mock_handle_genkey(mock_chip_t *chip, uint8_t param1, uint16_t param
     //
     // Fake, deterministic "public key" (no P-256 math in the mock): the
     // same function of the slot in both modes, so mode 0x00 "recomputes"
-    // exactly the key mode 0x04 just generated. (The mock does not track
-    // whether a private key was ever generated in the slot; on a real
-    // chip a slot with no valid key would behave differently.)
+    // exactly the key mode 0x04 just generated.
     for (int i = 0; i < ATECC608_PUBKEY_LEN; i++) {
         pub[i] = (uint8_t)((slot * 7u + (uint16_t)i * 3u + 1u) & 0xFFu);
     }
     mock_resp_data(chip, pub, sizeof(pub));
 }
 
-// NONCE 0x16: pass-through (mode 0x03, TempKey target, 32-byte input).
-// The payload's CONTENTS become the TempKey — bench-verified 2026-10-25:
-// atcab_nonce is a nonce-LOAD, not random generation.
+// NONCE 0x16: pass-through (mode bits 0x03, 32-byte input) into the
+// TempKey (target 0x00) or the Message Digest Buffer (target 0x40).
+// The payload's CONTENTS become the target's contents — bench-verified
+// 2026-10-25: atcab_nonce is a nonce-LOAD, not random generation.
 static void mock_handle_nonce(mock_chip_t *chip, uint8_t param1, uint16_t param2,
                               const uint8_t *payload, uint16_t payload_len)
 {
-    if ((NONCE_MODE_PASSTHROUGH != param1) || (0u != param2) || (32u != payload_len)) {
+    const uint8_t target = param1 & NONCE_MODE_TARGET_MASK;
+
+    if ((NONCE_MODE_PASSTHROUGH != (param1 & NONCE_MODE_MASK))
+        || (NONCE_MODE_INPUT_LEN_32 != (param1 & NONCE_MODE_INPUT_LEN_MASK))
+        || (0u != param2) || (32u != payload_len)) {
         mock_resp_exec(chip); // other nonce modes: not modeled
         return;
     }
-    memcpy(chip->tempkey, payload, 32u);
+    if (NONCE_MODE_TARGET_TEMPKEY == target) {
+        memcpy(chip->tempkey, payload, 32u);
+    } else if (NONCE_MODE_TARGET_MSGDIGBUF == target) {
+        memcpy(chip->msgdigbuf, payload, 32u);
+    } else {
+        mock_resp_exec(chip); // ALTKEYBUF target: not modeled
+        return;
+    }
     mock_resp_ok(chip);
 }
 
@@ -575,6 +629,89 @@ static void mock_handle_kdf(mock_chip_t *chip, uint8_t param1, uint16_t param2,
     }
 }
 
+// SIGN 0x41: external-digest mode from the Message Digest Buffer only
+// (the combination atcab_sign uses). See the header comment for the
+// frame layout, gates and the fake signature.
+static void mock_handle_sign(mock_chip_t *chip, uint8_t param1, uint16_t param2)
+{
+    const uint16_t slot = param2;
+    uint8_t sig[ATECC608_PUBKEY_LEN];
+
+    if ((SIGN_MODE_EXTERNAL | SIGN_MODE_SOURCE_MSGDIGBUF) != param1) {
+        mock_resp_exec(chip); // other sign modes: not modeled
+        return;
+    }
+    if (15u < slot) {
+        mock_resp_exec(chip);
+        return;
+    }
+    if ((mock_key_cfg(chip, slot) & 0x01u) == 0u) {
+        mock_resp_exec(chip); // not a private key slot
+        return;
+    }
+    if ((mock_slot_cfg(chip, slot) & 0x01u) == 0u) {
+        mock_resp_exec(chip); // no EXT_SIG bit (SlotConfig bit 0)
+        return;
+    }
+    // A key must actually be in the slot (GenKey'd — the mock stores the
+    // fake private key there; an all-zero slot is the "no key" state).
+    const uint8_t *priv = &chip->data[slot * MOCK_DATA_SLOT_LEN];
+    bool has_key = false;
+    for (int i = 0; i < MOCK_DATA_SLOT_LEN; i++) {
+        has_key = has_key || (0u != priv[i]);
+    }
+    if (!has_key) {
+        mock_resp_exec(chip);
+        return;
+    }
+    mock_fake_sig(priv, chip->msgdigbuf, sig);
+    mock_resp_data(chip, sig, sizeof(sig));
+}
+
+// VERIFY 0x45: stored mode, message from the Message Digest Buffer only
+// (the combination atcab_verify_stored uses). The mock recomputes the
+// fake signature for (slot key, digest) and compares: match = OK,
+// mismatch = the chip's 0x01 "checkmac/verify failed" error frame — how
+// the real chip reports a bad signature (distinct from the 0x0F
+// execution error), which the library normalizes to ATCA_SUCCESS with
+// is_verified=false.
+static void mock_handle_verify(mock_chip_t *chip, uint8_t param1, uint16_t param2,
+                               const uint8_t *payload, uint16_t payload_len)
+{
+    const uint16_t slot = param2;
+    uint8_t expect[ATECC608_PUBKEY_LEN];
+
+    if ((VERIFY_MODE_STORED | VERIFY_MODE_SOURCE_MSGDIGBUF) != param1
+        || (ATECC608_PUBKEY_LEN != payload_len)) {
+        mock_resp_exec(chip); // other verify modes / sizes: not modeled
+        return;
+    }
+    if (15u < slot) {
+        mock_resp_exec(chip);
+        return;
+    }
+    if ((mock_key_cfg(chip, slot) & 0x01u) == 0u) {
+        mock_resp_exec(chip); // not a private key slot
+        return;
+    }
+    const uint8_t *priv = &chip->data[slot * MOCK_DATA_SLOT_LEN];
+    bool has_key = false;
+    for (int i = 0; i < MOCK_DATA_SLOT_LEN; i++) {
+        has_key = has_key || (0u != priv[i]);
+    }
+    if (!has_key) {
+        mock_resp_exec(chip);
+        return;
+    }
+    mock_fake_sig(priv, chip->msgdigbuf, expect);
+    if (0 == memcmp(expect, payload, sizeof(expect))) {
+        mock_resp_ok(chip);
+    } else {
+        const uint8_t verify_failed[1] = { 0x01 };
+        mock_resp_data(chip, verify_failed, 1);
+    }
+}
+
 // One command frame arrives with word address 0x03; the chip replies are
 // staged in chip->resp for the read-token / two-read sequence.
 static void mock_process_command(mock_chip_t *chip, const uint8_t *frame, uint16_t count)
@@ -617,6 +754,12 @@ static void mock_process_command(mock_chip_t *chip, const uint8_t *frame, uint16
         break;
     case ATCA_KDF:
         mock_handle_kdf(chip, param1, param2, payload, payload_len);
+        break;
+    case ATCA_SIGN:
+        mock_handle_sign(chip, param1, param2);
+        break;
+    case ATCA_VERIFY:
+        mock_handle_verify(chip, param1, param2, payload, payload_len);
         break;
     case ATCA_INFO:
         if (param1 == 0x00u) { // INFO_MODE_REVISION

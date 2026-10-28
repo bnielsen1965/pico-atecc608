@@ -13,12 +13,20 @@
 //   - wake handshake (the chip's I2C general-call + 4-byte reply);
 //   - READ / WRITE (word and 32-byte block, config + data zones);
 //   - LOCK (config / data / slot, with the summary-CRC-verified config lock);
-//   - GENKEY (fake deterministic public key — no P-256 math);
+//   - GENKEY (fake deterministic key pair — no P-256 math; the private
+//     key is stored in the data slot, so a slot that was never GenKey'd
+//     holds no key and cannot sign or verify);
 //   - COUNTER (read / increment of the two monotonic counters, which live in
 //     the config zone);
 //   - UPDATE_EXTRA (the one-shot UserExtra / Selector bytes 84 / 85);
-//   - NONCE (pass-through load into the TempKey register — the payload's
-//     contents are stored, bench-verified);
+//   - NONCE (pass-through load into the TempKey or the Message Digest
+//     Buffer — the payload's contents are stored, bench-verified);
+//   - SIGN (external-digest mode, message from the Message Digest Buffer
+//     only — fake deterministic signature, no P-256 math; gates: private
+//     key slot with the EXT_SIG bit and a key actually in the slot);
+//   - VERIFY (stored mode, message from the Message Digest Buffer only —
+//     recomputes the fake signature; OK on match, the chip's 0x01
+//     "verify failed" error frame on mismatch);
 //   - KDF (PRF, source=slot, target=output only — the combination the
 //     module uses; fake deterministic PRF, no SHA-256 math; the bench
 //     gate: refused while the data zone is unlocked; optional I/O
@@ -61,7 +69,8 @@ typedef struct {
     // --- state -------------------------------------------------------------
     bool     awake;      // true after a successful wake handshake
     bool     present;    // false => every I2C transaction NACKs (chip absent)
-    uint8_t  tempkey[32];// TempKey register (NONCE pass-through target)
+    uint8_t  tempkey[32];   // TempKey register (NONCE pass-through target)
+    uint8_t  msgdigbuf[32]; // Message Digest Buffer (NONCE pass-through target)
 
     // --- I/O protection model (minimal: the KDF output side only) ---------
     // kdf_prot=1 as bench-verified on the provisioned chip: every KDF

@@ -73,6 +73,9 @@
 //                    `prov iokeytest` should pass
 //   prov lockslot <slot> - WRITE, IRREVERSIBLE: lock one data slot (typed
 //                    CONFIRM); the chip enforces the slot's Lockable flag
+//   prov counter [<0|1> [CONFIRM]] - READ both monotonic counters;
+//                    `prov counter <n> CONFIRM` increments counter n
+//                    (ONE WAY — the typed CONFIRM is the confirm)
 //
 // The agreed Phase 5+ bench order: prov genkey 1; prov genkey 3..6;
 // prov genkey 12 (RECORD every printed public key) -> prov lockdata
@@ -239,6 +242,7 @@ static void commandHelp(char *cmdLine)
     printf("prov lockdata [CONFIRM]    - LOCK the data zone (IRREVERSIBLE)\n");
     printf("prov lockslot <slot> [CONFIRM] - LOCK one data slot (IRREVERSIBLE)\n");
     printf("prov kdf <slot> - 32-B KDF PRF from the slot (read-only; bench: run twice)\n");
+    printf("prov counter [<0|1> [CONFIRM]] - read the monotonic counters; CONFIRM increments (one way)\n");
 }
 
 static void commandBootrom(char *cmdLine)
@@ -1541,6 +1545,92 @@ static void provKdf(const char *rest)
            (unsigned)slot);
 }
 
+// The module's confirm gate for `prov counter <n> CONFIRM` (same pattern
+// as the other typed confirms: the command line carries the confirm).
+struct prov_counter_ctx {
+    bool confirmed; // true when the typed token is on the command line
+    uint8_t id;     // counter id (0..1)
+};
+
+static bool provCounterConfirm(const char *prompt, void *vctx)
+{
+    struct prov_counter_ctx *ctx = (struct prov_counter_ctx *)vctx;
+    printf("about to: %s (counter %u)\n", prompt, (unsigned)ctx->id);
+    if (!ctx->confirmed) {
+        printf("NOT incremented. To proceed, type the full command:\n\n"
+               "    prov counter %u %s\n", (unsigned)ctx->id, PROV_LOCK_TOKEN);
+        return false;
+    }
+    return true;
+}
+
+// prov counter [<0|1> [CONFIRM]] — READ both monotonic counters; with
+// `<n>` the increment for counter n is prepared and (without CONFIRM)
+// aborted, with `<n> CONFIRM` it is ISSUED — ONE WAY: a monotonic
+// counter can never be reset, so the typed CONFIRM is the confirm
+// (house style). Counter 0 is the FIDO2 signature count in the agreed
+// layout (its CountMatch is 0, so increments are unconditional);
+// counter 1 is the fw anti-rollback count. The reads are safe at any
+// time; the increment is a chip write (config zone).
+static void provCounter(const char *rest)
+{
+    struct prov_counter_ctx ctx = { 0 };
+    uint8_t id = 0;
+    bool have_id = false;
+    uint32_t v[2];
+    uint32_t new_value;
+    atecc608_status_t st;
+
+    if ('\0' != rest[0]) {
+        // Parse "<n> [CONFIRM]"; n is a single digit, 0..1.
+        if (!('0' <= rest[0] && rest[0] <= '1')) {
+            printf("usage: prov counter [<0|1> [CONFIRM]]\n");
+            return;
+        }
+        id = (uint8_t)(rest[0] - '0');
+        const char *p = rest + 1;
+        while (' ' == *p) {
+            p++;
+        }
+        if ((p[0] != '\0') && (0 != strcmp(p, PROV_LOCK_TOKEN))) {
+            printf("usage: prov counter [<0|1> [CONFIRM]]\n");
+            return;
+        }
+        have_id = true;
+        ctx.confirmed = (0 == strcmp(p, PROV_LOCK_TOKEN));
+    }
+
+    for (int i = 0; i < 2; i++) {
+        st = atecc608_counter_read((uint8_t)i, &v[i]);
+        if (ATECC608_OK != st) {
+            report_fail("COUNTER READ", st);
+            return;
+        }
+    }
+    printf("counter 0 (FIDO2 signature count): %lu\n", (unsigned long)v[0]);
+    printf("counter 1 (fw anti-rollback):      %lu\n", (unsigned long)v[1]);
+
+    if (!have_id) {
+        return;
+    }
+
+    ctx.id = id;
+    st = atecc608_counter_increment(id, &new_value, provCounterConfirm, &ctx);
+    if (ATECC608_OK == st) {
+        printf("counter %u incremented to %lu (one way — it can never be reset).\n",
+               (unsigned)id, (unsigned long)new_value);
+    } else if (ATECC608_ERR_CHIP_STATE == st) {
+        // The typed-confirm abort: nothing was written.
+        printf("increment aborted — the counter is unchanged.\n");
+    } else {
+        report_fail("COUNTER INCREMENT", st);
+        if (ATECC608_ERR_EXEC == st) {
+            printf("the chip refused: the counter is at its 21-bit maximum,\n"
+                   "or a CountMatch key rejected the increment.\n");
+        }
+    }
+}
+
 // --- Phase 7: selftest — the read-only on-hardware validation suite -------
 //
 // Runs the GENERIC invariants of a chip carrying the agreed config
@@ -2026,11 +2116,13 @@ static void commandProv(char *cmdLine)
         provPubkey(rest);
     } else if (take_word(&rest, "kdf")) {
         provKdf(rest);
+    } else if (take_word(&rest, "counter")) {
+        provCounter(rest);
     } else {
         printf("usage: prov status | prov randtest | prov iokey | prov iokeytest"
                " | prov iokeyshow | prov config | prov lock [CONFIRM] | prov genkey <slot>"
-               " | prov pubkey <slot> | prov kdf <slot> | prov lockdata [CONFIRM]"
-               " | prov lockslot <slot> [CONFIRM]\n");
+               " | prov pubkey <slot> | prov kdf <slot> | prov counter [<0|1> [CONFIRM]]"
+               " | prov lockdata [CONFIRM] | prov lockslot <slot> [CONFIRM]\n");
     }
 }
 

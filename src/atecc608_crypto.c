@@ -77,3 +77,47 @@ atecc608_status_t atecc608_kdf_prf(uint8_t slot,
     }
     return ATECC608_OK;
 }
+
+atecc608_status_t atecc608_sign(uint8_t slot,
+                                const uint8_t digest[ATECC608_DIGEST_LEN],
+                                uint8_t sig[ATECC608_SIG_LEN])
+{
+    ATCA_STATUS atca;
+
+    if ((digest == NULL) || (sig == NULL) || (slot > ATECC608_MAX_DATA_SLOT)) {
+        return ATECC608_ERR_BAD_PARAM;
+    }
+
+    // Sign command, external-digest mode: the library primes the chip RNG,
+    // loads the 32-byte digest into the Message Digest Buffer (Nonce
+    // pass-through to the MSGDIGBUF target), then signs it with the slot's
+    // private key. Chip gates (private key slot + EXT_SIG bit + a key
+    // actually in the slot) surface as ATECC608_ERR_EXEC.
+    atca = atcab_sign((uint16_t)slot, digest, sig);
+    return atecc608_map_status(atca);
+}
+
+atecc608_status_t atecc608_verify(uint8_t slot,
+                                  const uint8_t digest[ATECC608_DIGEST_LEN],
+                                  const uint8_t sig[ATECC608_SIG_LEN],
+                                  bool *is_verified)
+{
+    ATCA_STATUS atca;
+
+    if ((digest == NULL) || (sig == NULL) || (is_verified == NULL)
+        || (slot > ATECC608_MAX_DATA_SLOT)) {
+        return ATECC608_ERR_BAD_PARAM;
+    }
+
+    *is_verified = false;
+
+    // Verify command, stored mode: the library loads the digest into the
+    // Message Digest Buffer and the chip checks the signature against the
+    // slot's key. A FAILED check is the chip's 0x01 error frame, which the
+    // library normalizes to ATCA_SUCCESS with *is_verified left false —
+    // so ATECC608_OK here means "the command ran", and the verdict is in
+    // *is_verified. ATECC608_ERR_EXEC means the command could not run at
+    // all (slot not a key slot in the current config, no key in it, ...).
+    atca = atcab_verify_stored(digest, sig, (uint16_t)slot, is_verified);
+    return atecc608_map_status(atca);
+}

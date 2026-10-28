@@ -1,6 +1,8 @@
 // Host unit tests for the ATECC608 crypto pass-through API (Phase 5: KDF
-// PRF), driven through the real cryptoauthlib atcab_*/calib layers against
-// the mock chip (tests/mock_chip.c) — no Pico, no physical device.
+// PRF; Phase 0 of the FIDO2 example: Sign / Verify over an external
+// digest), driven through the real cryptoauthlib atcab_*/calib layers
+// against the mock chip (tests/mock_chip.c) — no Pico, no physical
+// device.
 //
 // The mock's KDF is a fake, deterministic PRF (documented in mock_chip.c:
 // out[i] = key[i%32] ^ nonce[i%32] ^ msg[i%msg_len] ^ i). The tests check
@@ -9,6 +11,16 @@
 // comparing against values computed with the same formula, plus the
 // mock's I/O-protection model (kdf_prot=1, as bench-verified on the real
 // chip).
+//
+// The mock's Sign is a fake, deterministic signature (sig[i] =
+// priv[i%32] ^ digest[i%32] ^ i/32) and its Verify recomputes it — no
+// P-256 math (the mock's house style; the real-curve cross-check happens
+// on the bench, where openssl verifies a chip signature). The tests
+// check the plumbing: the digest load into the Message Digest Buffer
+// (Nonce pass-through), the Sign mode/key_id encoding, the 64-byte
+// signature parsing, the chip gates (private key slot, EXT_SIG bit, key
+// present), and the verify-failure path (the chip's 0x01 error frame
+// coming back as ATECC608_OK with is_verified=false).
 
 #include <stdio.h>
 #include <string.h>
@@ -270,6 +282,210 @@ static void t_kdf_params(void)
     CHECK(ATECC608_ERR_BAD_PARAM == atecc608_kdf_prf(16, NULL, msg, 1, NULL, out));
 }
 
+// --- sign / verify (external digest, Phase 0) -------------------------------------------
+
+// The mock's fake "private key" (see mock_chip.c): what GenKey
+// "generates" into slot `slot`.
+static void fake_priv(uint16_t slot, uint8_t priv[ATECC608_DATA_SLOT_LEN])
+{
+    for (int i = 0; i < ATECC608_DATA_SLOT_LEN; i++) {
+        priv[i] = (uint8_t)((slot * 11u + (uint16_t)i * 5u + 2u) & 0xFFu);
+    }
+}
+
+// The mock's fake ECDSA signature (see mock_chip.c): the expected
+// signature for (private key, digest).
+static void fake_sig(const uint8_t priv[ATECC608_DATA_SLOT_LEN],
+                     const uint8_t digest[ATECC608_DIGEST_LEN],
+                     uint8_t sig[ATECC608_SIG_LEN])
+{
+    for (int i = 0; i < ATECC608_SIG_LEN; i++) {
+        sig[i] = (uint8_t)(priv[i % ATECC608_DATA_SLOT_LEN]
+                           ^ digest[i % ATECC608_DATA_SLOT_LEN]
+                           ^ (uint8_t)(i / ATECC608_DATA_SLOT_LEN));
+    }
+}
+
+// The sign/verify test slots (as in the agreed config: ECC private,
+// ext_sig, gen_key):
+//   3 = fully provisioned (GenKey'd) — the happy path;
+//   4 = fully provisioned (GenKey'd) — a second, different key;
+//   5 = provisioned but WITHOUT the EXT_SIG bit — Sign must refuse;
+//   6 = fully configured but NEVER GenKey'd — no key in the slot.
+#define SIGN_TEST_SLOT_A 3u
+#define SIGN_TEST_SLOT_B 4u
+#define SIGN_TEST_SLOT_NO_EXT_SIG 5u
+#define SIGN_TEST_SLOT_NO_KEY     6u
+
+static void provision_sign_slots(void)
+{
+    atecc608_config_intent_t cfg;
+    uint8_t pub[ATECC608_PUBKEY_LEN];
+
+    atecc608_config_default(&cfg);
+    for (uint8_t slot = 0; slot <= ATECC608_MAX_DATA_SLOT; slot++) {
+        if (slot == SIGN_TEST_SLOT_A || slot == SIGN_TEST_SLOT_B
+            || slot == SIGN_TEST_SLOT_NO_EXT_SIG || slot == SIGN_TEST_SLOT_NO_KEY) {
+            cfg.key[slot].key_type    = ATECC608_KEY_TYPE_ECC;
+            cfg.key[slot].private_key = true;
+            cfg.key[slot].pub_info    = true;
+            cfg.slot[slot].is_secret  = true;
+            cfg.slot[slot].gen_key    = true;
+            if (slot != SIGN_TEST_SLOT_NO_EXT_SIG) {
+                cfg.slot[slot].ext_sig = true;
+            }
+        }
+    }
+    CHECK(ATECC608_OK == atecc608_provision_config(&cfg));
+    CHECK(ATECC608_OK == atecc608_lock_config_zone(&cfg, confirm_hook, NULL));
+    // GenKey while the data zone is still unlocked, then lock it: the
+    // state of a provisioned device (slot 6 is deliberately not GenKey'd).
+    CHECK(ATECC608_OK == atecc608_genkey(SIGN_TEST_SLOT_A, pub));
+    CHECK(ATECC608_OK == atecc608_genkey(SIGN_TEST_SLOT_B, pub));
+    CHECK(ATECC608_OK == atecc608_genkey(SIGN_TEST_SLOT_NO_EXT_SIG, pub));
+    CHECK(ATECC608_OK == atecc608_lock_data_zone(confirm_hook, NULL));
+}
+
+static void fill_digest(uint8_t digest[ATECC608_DIGEST_LEN], uint8_t seed)
+{
+    for (int i = 0; i < ATECC608_DIGEST_LEN; i++) {
+        digest[i] = (uint8_t)(seed + (uint16_t)i);
+    }
+}
+
+static void t_sign_basic(void)
+{
+    uint8_t digest[ATECC608_DIGEST_LEN];
+    uint8_t sig[ATECC608_SIG_LEN];
+    uint8_t expect[ATECC608_SIG_LEN];
+    uint8_t priv[ATECC608_DATA_SLOT_LEN];
+
+    printf("t_sign_basic\n");
+    setup();
+    provision_sign_slots();
+    fill_digest(digest, 0xC0u);
+    fake_priv(SIGN_TEST_SLOT_A, priv);
+
+    // The signature matches the mock's formula — i.e. the wrapper's
+    // parameter encoding (digest load into the Message Digest Buffer,
+    // Sign external mode, slot number) and 64-byte response parsing are
+    // right.
+    CHECK(ATECC608_OK == atecc608_sign(SIGN_TEST_SLOT_A, digest, sig));
+    fake_sig(priv, digest, expect);
+    CHECK(0 == memcmp(sig, expect, sizeof(sig)));
+
+    // Deterministic in the mock (real ECDSA would be randomized): same
+    // inputs, same signature.
+    uint8_t sig2[ATECC608_SIG_LEN];
+    CHECK(ATECC608_OK == atecc608_sign(SIGN_TEST_SLOT_A, digest, sig2));
+    CHECK(0 == memcmp(sig, sig2, sizeof(sig)));
+
+    // A different digest gives a different signature.
+    uint8_t digest2[ATECC608_DIGEST_LEN];
+    memcpy(digest2, digest, sizeof(digest2));
+    digest2[0] ^= 0x01u;
+    CHECK(ATECC608_OK == atecc608_sign(SIGN_TEST_SLOT_A, digest2, sig2));
+    CHECK(0 != memcmp(sig, sig2, sizeof(sig)));
+}
+
+static void t_verify_roundtrip(void)
+{
+    uint8_t digest[ATECC608_DIGEST_LEN];
+    uint8_t sig[ATECC608_SIG_LEN];
+    uint8_t priv[ATECC608_DATA_SLOT_LEN];
+    bool ok;
+
+    printf("t_verify_roundtrip\n");
+    setup();
+    provision_sign_slots();
+    fill_digest(digest, 0x10u);
+
+    // A genuine signature verifies.
+    CHECK(ATECC608_OK == atecc608_sign(SIGN_TEST_SLOT_A, digest, sig));
+    CHECK(ATECC608_OK == atecc608_verify(SIGN_TEST_SLOT_A, digest, sig, &ok));
+    CHECK(ok);
+
+    // A corrupted signature fails — and the command still "succeeds":
+    // the chip reports the bad signature with its 0x01 error frame,
+    // which the library normalizes to ATECC608_OK with ok=false.
+    sig[5] ^= 0x40u;
+    CHECK(ATECC608_OK == atecc608_verify(SIGN_TEST_SLOT_A, digest, sig, &ok));
+    CHECK(!ok);
+
+    // A wrong digest fails.
+    CHECK(ATECC608_OK == atecc608_sign(SIGN_TEST_SLOT_A, digest, sig));
+    digest[31] ^= 0x01u;
+    CHECK(ATECC608_OK == atecc608_verify(SIGN_TEST_SLOT_A, digest, sig, &ok));
+    CHECK(!ok);
+
+    // A signature from slot 3 does not verify against slot 4's key
+    // (different keys in different slots, as on a real chip).
+    digest[31] ^= 0x01u; // restore
+    CHECK(ATECC608_OK == atecc608_sign(SIGN_TEST_SLOT_A, digest, sig));
+    CHECK(ATECC608_OK == atecc608_verify(SIGN_TEST_SLOT_B, digest, sig, &ok));
+    CHECK(!ok);
+
+    // The EXT_SIG bit gates SIGN only: slot 5 cannot sign, but a
+    // signature under its own key verifies (checked against the mock's
+    // formula, since the API cannot produce one).
+    memset(sig, 0, sizeof(sig));
+    CHECK(ATECC608_ERR_EXEC == atecc608_sign(SIGN_TEST_SLOT_NO_EXT_SIG, digest, sig));
+    {
+        bool untouched = true;
+        for (int i = 0; i < ATECC608_SIG_LEN; i++) {
+            untouched = untouched && (0u == sig[i]);
+        }
+        CHECK(untouched); // a refused sign leaves the buffer unwritten
+    }
+    fake_priv(SIGN_TEST_SLOT_NO_EXT_SIG, priv);
+    fake_sig(priv, digest, sig);
+    CHECK(ATECC608_OK == atecc608_verify(SIGN_TEST_SLOT_NO_EXT_SIG, digest, sig, &ok));
+    CHECK(ok);
+}
+
+static void t_sign_gates(void)
+{
+    uint8_t digest[ATECC608_DIGEST_LEN];
+    uint8_t sig[ATECC608_SIG_LEN];
+    bool ok;
+
+    printf("t_sign_gates\n");
+    setup();
+    provision_sign_slots();
+    fill_digest(digest, 0x55u);
+
+    // Never GenKey'd (slot 6): no key in the slot to sign or verify
+    // with.
+    CHECK(ATECC608_ERR_EXEC == atecc608_sign(SIGN_TEST_SLOT_NO_KEY, digest, sig));
+    CHECK(ATECC608_ERR_EXEC == atecc608_verify(SIGN_TEST_SLOT_NO_KEY, digest, sig, &ok));
+
+    // Not a key slot at all (slot 7: a normal non-ECC slot in the
+    // default config).
+    CHECK(ATECC608_ERR_EXEC == atecc608_sign(7, digest, sig));
+    CHECK(ATECC608_ERR_EXEC == atecc608_verify(7, digest, sig, &ok));
+}
+
+static void t_sign_verify_params(void)
+{
+    uint8_t digest[ATECC608_DIGEST_LEN];
+    uint8_t sig[ATECC608_SIG_LEN];
+    bool ok = true;
+
+    printf("t_sign_verify_params\n");
+    setup();
+    memset(digest, 0, sizeof(digest));
+    memset(sig, 0, sizeof(sig));
+
+    // Bad parameters are refused before any chip command.
+    CHECK(ATECC608_ERR_BAD_PARAM == atecc608_sign(3, NULL, sig));
+    CHECK(ATECC608_ERR_BAD_PARAM == atecc608_sign(3, digest, NULL));
+    CHECK(ATECC608_ERR_BAD_PARAM == atecc608_sign(16, digest, sig));
+    CHECK(ATECC608_ERR_BAD_PARAM == atecc608_verify(3, NULL, sig, &ok));
+    CHECK(ATECC608_ERR_BAD_PARAM == atecc608_verify(3, digest, NULL, &ok));
+    CHECK(ATECC608_ERR_BAD_PARAM == atecc608_verify(3, digest, sig, NULL));
+    CHECK(ATECC608_ERR_BAD_PARAM == atecc608_verify(16, digest, sig, &ok));
+}
+
 // --- main ------------------------------------------------------------------------------
 
 int main(void)
@@ -279,6 +495,10 @@ int main(void)
     t_kdf_io_prot();
     t_kdf_source_slot();
     t_kdf_params();
+    t_sign_basic();
+    t_verify_roundtrip();
+    t_sign_gates();
+    t_sign_verify_params();
 
     printf("%s: %d checks, %d failures\n",
            (s_failures == 0) ? "PASS" : "FAIL", s_checks, s_failures);

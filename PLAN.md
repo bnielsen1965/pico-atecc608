@@ -1,10 +1,35 @@
 # Plan: FIDO2 example — passkey authenticator
 
-**Current state: PLANNED (2026-10-27). No FIDO2 code yet; the next session
-starts at Phase 0.** This file is the plan *and* the continuity snapshot
-for this work (there is no separate RESUME.md anymore — the module's
-development history lives in the git log, and the completed module plan is
-in git history). Keep the "Current state" section current as phases land.
+**Current state: Phase 0 DONE (2026-10-28); the next session starts at
+Phase 1 (FIDO HID transport over USB).** Phase 0 landed:
+`atecc608_sign(slot, digest32, sig64)` / `atecc608_verify(slot, digest32,
+sig64, *is_verified)` in `atecc608_crypto.h/.c` (external-digest Sign /
+stored Verify; HAL-agnostic, so they compile in the host build), mock-chip
+host tests (the plumbing: digest load into the Message Digest Buffer, Sign
+mode/key_id encoding, 64-byte signature parsing, the chip gates — private
+key slot / EXT_SIG bit / key present — and the verify-failure path, where
+the chip's 0x01 error frame comes back as ATECC608_OK with
+is_verified=false), and the `prov counter` console subcommand (read
+counters 0/1; `prov counter <n> CONFIRM` increments via the module's
+typed-confirm gate). Pico build warning-clean (only the documented
+cryptoauthlib `ATCA_TA_SUPPORT` header noise); `ctest` green (test_crypto
+now 109 checks). The mock gained a Message Digest Buffer and SIGN/VERIFY
+handlers (fake deterministic signature, no P-256 math — house style; the
+real-curve cross-check happens on the bench), and GenKey now stores the
+fake private key in the data slot so a never-GenKey'd slot cannot sign.
+No chip write in Phase 0 (littlefs counter is the dev default). Decisions
+made at planning: the CTAP sync counter is
+**littlefs-backed by default** (dev-friendly, resettable) with a build flag
+(`FIDO2_COUNTER_CHIP`) to switch to the **chip Counter 0** (see Division of
+labour) — so development never burns the frozen monotonic counter, and the
+chip counter is exercised deliberately at the end. GET_ASSERTION
+**increments the counter before** building authData (so the first assertion
+after registration is never a "rollback" to the RP). FIDO2 testing uses the
+`../fido2-demonstration` Node/Express + fido2-lib server. This file is the
+plan *and* the continuity snapshot for this work (there is no separate
+RESUME.md anymore — the module's development history lives in the git log,
+and the completed module plan is in git history). Keep the "Current state"
+section current as phases land.
 
 ## Goal
 
@@ -23,8 +48,10 @@ on-chip GenKey, external-digest Sign, and the monotonic counter — the
 
 The agreed config was built for exactly this (Scenario 2 in
 `example/README.md`): slots 3–6 = four credential pairs, slots 1/2 =
-identity (attestation) pair, slot 12 = ECDH spare (PIN protocol),
-Counter 0 = CTAP global counter.
+identity (attestation) pair, slot 12 = ECDH spare (PIN protocol), and
+Counter 0 = the on-chip CTAP global counter (used when the example runs in
+chip-counter mode; the littlefs counter is the dev default — see Division
+of labour).
 
 ## Ground rules (unchanged)
 
@@ -34,9 +61,11 @@ Counter 0 = CTAP global counter.
     use; a reflash loses nothing because the keys are on the chip);
   - external-digest **Sign** with slot 1 (attestation) and slots 3–6
     (assertions) — all `ext_sig`;
-  - read + increment **Counter 0** — incrementable even with the config
-    zone locked (by ATECC design; CountMatch is 0, so increments are
-    unconditional);
+  - read + increment **Counter 0** (chip-counter mode only — behind the
+    `FIDO2_COUNTER_CHIP` flag; the dev default is a littlefs counter, so the
+    frozen counter is not burned during development). Incrementable even
+    with the config zone locked (by ATECC design; CountMatch is 0, so
+    increments are unconditional);
   - ECDH with slot 12 (PIN protocol only — stretch phase).
 - Flashing and every bench run is a **user action**.
 - Host KATs are ground truth for the pure-C parts (CBOR, SHA-256 if it
@@ -51,11 +80,22 @@ Counter 0 = CTAP global counter.
    key is generated on the chip (next free slot 3–6); the browser receives
    basic ("packed") attestation signed by the device identity key (slot 1).
 4. **Log out / log in** (GET_ASSERTION): the chip signs the challenge
-   digest with the credential key; Counter 0 increments; the browser logs
-   in.
+   digest with the credential key; the CTAP sync counter increments
+   (littlefs by default; chip Counter 0 in chip-counter mode); the browser
+   logs in.
 5. **Replug or reflash** the Pico: the credential still works — key on the
-   chip, metadata in littlefs, and the counter keeps counting from where it
-   left off (a reflash cannot reset it — FIDO's clone-detection property).
+   chip, metadata + counter in littlefs, and the counter keeps counting
+   from where it left off (littlefs @ 0x80000 is outside the app region, so
+   a reflash cannot reset it — FIDO's clone-detection property; in
+   chip-counter mode it lives on the chip, equally reset-proof).
+
+> **Test harness:** `../fido2-demonstration` (Node/Express + fido2-lib
+> v3.5.6) — register + login over HTTPS on :8080. Note its config sets
+> `authenticatorUserVerification: "required"` (satisfied by auto-UV, which
+> sets the UV flag; relax to `"preferred"` if a browser/RP ever complains)
+> and it compares each assertion counter against the value stored at
+> registration (the "rollback" check the increment-first ordering in
+> Phase 4 satisfies).
 
 ## Division of labour
 
@@ -63,7 +103,7 @@ Counter 0 = CTAP global counter.
 |---|---|
 | 4 credential private keys | slots 3–6, on-chip GenKey, never leave the chip |
 | Attestation key | existing identity pair (slots 1/2), "packed" statement, `x5c: []` |
-| CTAP global counter | Counter 0 (chip-side, monotonic) |
+| CTAP global counter | **littlefs file `/f2_cnt` by default** (dev-friendly, resettable by RESET); a **build flag** `FIDO2_COUNTER_CHIP` switches it to **chip Counter 0** (hardware-monotonic, not reset by RESET, not in a flash dump). One counter shared by all four credentials (CTAP2 is per-authenticator, not per-credential) |
 | CTAP2 protocol, CBOR, authData, command dispatch | Pico |
 | SHA-256(authData ‖ clientDataHash) | RP2350 hardware SHA-256 if this pico-sdk fork exposes it; else a small pure-C SHA-256 (host KAT'd) — resolve in Phase 1 |
 | Credential metadata (credID, rpIdHash, userHandle, slot) | littlefs flat files `/f2_<n>` (pico-littlefs has no mkdir) |
@@ -79,7 +119,12 @@ response carried an unexpected 32-B nonce, revisit.) The PIN stretch phase
 ## Scope cuts (what "simple" means)
 
 - CTAP 2.0 only (versions `"FIDO_2_0"`), one algorithm: ES256 (COSE −7).
-- **4 credentials max** (the four slots), all resident/discoverable.
+- **4 credentials max** (the four slots), all resident-capable/discoverable.
+  ("Resident" = the littlefs DB stores the metadata and the authenticator
+  supports discovery; the same key also serves a non-resident-style
+  assertion where the RP supplies the allowList — the demo's fido2-lib uses
+  exactly that path. The resident flag is per-authenticator, so all four are
+  resident-capable; there is no per-key resident/non-resident.)
 - No cred_prot, no large-blob storage, no PIN protocol in the MVP (Phase 6
   adds PIN v1 if needed — see Open questions).
 - No biometrics; auto-UV. One AAGUID (a fixed demo constant).
@@ -100,10 +145,12 @@ response carried an unexpected 32-B nonce, revisit.) The PIN stretch phase
 - **Console (tiny):** a `prov counter` subcommand — read counters 0/1;
   `prov counter <n> CONFIRM` increments (monotonic → typed confirm, house
   style). Gives an explicit, repeatable counter check.
-- **Bench (user action, needs explicit go-ahead — first chip write since
-  the freeze):** one-time Counter 0 increment test (0→1) to confirm the
-  frozen chip increments before we build on it. (Expected to work — by
-  design. If it fails, see Open question 3.)
+- **Counter:** the littlefs counter is the dev default, so Phase 0 does
+  **not** require a chip write. The one-time **Counter 0 increment test
+  (0→1)** — "first chip write since the freeze" — is deferred to a later
+  verification step when we flip `FIDO2_COUNTER_CHIP` (user action, needs
+  explicit go-ahead). (Expected to work — by design. If it fails, see Open
+  question 3.)
 
 ### Phase 1 — FIDO HID transport over USB
 
@@ -153,7 +200,7 @@ response carried an unexpected 32-B nonce, revisit.) The PIN stretch phase
   slot 2 public point, `x5c: []` (basic attestation), `sig` = chip Sign
   by slot 1 over SHA-256(authData ‖ clientDataHash).
 - **AAGUID:** fixed 16-byte demo constant (pick a UUID, record it here).
-- **authData:** rpIdHash(32) ‖ flags(UP|AT) ‖ counter(4 BE, Counter 0 —
+- **authData:** rpIdHash(32) ‖ flags(UP|AT) ‖ counter(4 BE, the CTAP sync counter —
   read, *not* incremented) ‖ AAGUID(16) ‖ credIdLen(2) ‖ credId ‖ COSE
   public key.
 - **DB record:** fixed-size littlefs file `/f2_<n>` — slot, rpIdHash,
@@ -171,10 +218,19 @@ response carried an unexpected 32-B nonce, revisit.) The PIN stretch phase
   No match → `CTAP2_ERR_CODE_NO_CREDENTIALS`.
 - **authData:** rpIdHash ‖ flags(UP|CRED_ID) ‖ counter ‖ credIdLen ‖
   credId.
-- **Counter 0:** read → build authData → chip Sign → **increment**; if the
+- **CTAP sync counter (increment BEFORE building authData):** read the
+  current value → **increment** → build authData with the *new* value → chip
+  Sign → send. Incrementing first means the first assertion after
+  registration reports a value strictly greater than the registration's, so
+  a relying party that compares against the stored registration counter (the
+  demo's fido2-lib does exactly this) never sees a "rollback". If the
   increment fails, return an error — never send a stale-counter assertion.
+  (The littlefs backend enforces monotonicity in software: never write a
+  value lower than the one read; the chip backend is hardware-monotonic.)
 - **RESET:** wipe the littlefs DB (the on-chip keys remain; the next
-  MAKE_CREDENTIAL re-binds the slots).
+  MAKE_CREDENTIAL re-binds the slots). In littlefs-counter mode this also
+  resets the counter to 0 (dev convenience); in chip-counter mode the
+  counter is on the chip and is NOT reset.
 - **Bench:** full register + login cycle in the browser; replug; **reflash
   survival** (credential works, counter keeps counting); counter strictly
   increasing across assertions.
@@ -215,9 +271,11 @@ user wants it:
    C)? If not, a small pure-C SHA-256, host KAT'd.
 3. **Counter 0 increment on the frozen chip:** expected to work by design
    (the COUNTER command is the one config-zone field writable after the
-   lock). The Phase 0 bench check confirms it **before** we build on it;
-   if it fails, FIDO2 assertions can't increment and this example is
-   blocked (a static counter is spec-noncompliant) — escalate to the user.
+   lock). Because the dev default is the littlefs counter, this is no longer
+   a Phase 0 gate — we confirm it when we flip `FIDO2_COUNTER_CHIP` for the
+   chip-counter verification. If it fails, chip-counter mode can't
+   increment (a static counter is spec-noncompliant), but the littlefs-counter
+   default is unaffected.
 
 ## Risks
 
@@ -227,8 +285,11 @@ user wants it:
 - **Browsers are strict** about the FIDO HID report shape — follow the
   FIDO HID spec exactly (report IDs 0x01–0x04, 64-byte payloads,
   keep-alive timing).
-- **Counter 0 only ever increases** (monotonic) — correct FIDO behavior,
-  not a bug; the bench chip's counter will not return to 0.
+- **Chip Counter 0 only ever increases** (monotonic) — correct FIDO
+  behavior, not a bug; once exercised, the bench chip's counter will not
+  return to 0. This is why the dev default is the littlefs counter
+  (resettable by RESET), with the chip counter exercised deliberately at the
+  end.
 
 ## Out of scope (explicit)
 
@@ -246,6 +307,9 @@ example/fido2/
   ctap.c/.h       CTAP2 commands: GET_INFO / MAKE_CREDENTIAL /
                   GET_ASSERTION / RESET
   fido_db.c/.h    littlefs credential store (flat /f2_<n>)
-CMakeLists.txt    + pico-atecc608-fido2 target
-tests/            + test_cbor (host KATs); test_crypto gains sign/verify
+  fido_count.c/.h CTAP sync-counter provider: littlefs (/f2_cnt) default,
+                  chip Counter 0 behind FIDO2_COUNTER_CHIP; read/increment
+CMakeLists.txt    + pico-atecc608-fido2 target (FIDO2_COUNTER_CHIP option)
+tests/            + test_cbor (host KATs); test_crypto gains sign/verify;
+                  + test_fido_count (littlefs backend host KAT)
 ```
