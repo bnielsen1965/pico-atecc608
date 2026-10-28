@@ -9,26 +9,9 @@ an RP2350 I2C HAL and a curated, stable `atecc608_*` API.
 
 > **Scope.** This repository is the *driver/module*, not an application.
 > Applications (password stores, FIDO2 authenticators, secure firmware
-> updates, …) build on the module's primitives. The
-> [Application scenarios](#application-scenarios--provisioning-guidance)
-> section documents the agreed chip configuration that those applications
-> share. `PLAN.md` holds the development plan and decisions; `RESUME.md` is
-> the continuity snapshot.
-
----
-
-## Status
-
-- **Done:** module skeleton + build wiring; RP2350 I2C HAL; curated
-  `atecc608_*` core API (hardware-validated, read-only); config-zone builder
-  + guarded provisioning API + host unit tests against a mock chip (`ctest`
-  green).
-- **In progress:** provisioning the connected chip with the agreed
-  development configuration (below) — pending explicit write approval. The
-  chip is currently **unprovisioned**.
-- **Next:** crypto pass-through (KDF / sign / verify wrappers), a
-  config-read-back console demo, full on-hardware validation + bring-up
-  checklist.
+> updates, …) build on the module's primitives. The application scenarios
+> and the agreed chip configuration they share are documented in
+> [`example/README.md`](example/README.md#application-scenarios--provisioning-guidance).
 
 ---
 
@@ -49,21 +32,25 @@ in [`example/README.md`](example/README.md).
 ## What the module provides
 
 - **Core API** (`include/atecc608/atecc608.h`): `atecc608_init` (I2C
-  instance, pins, baud), `probe`, `info` (part/revision), `serial` (factory
-  serial), `is_locked` (config/data zone), `random`, `read_config_zone`,
-  `read_slot`, `read_pubkey`, `write_config_zone`, `write_slot`, plus
-  `atecc608_last_error()` / `atecc608_status_str()` — every call's failure
-  is available as a curated status.
+  instance, pins, baud) / `atecc608_deinit`, `probe`, `info` (part/revision),
+  `serial` (factory serial), `is_locked` (config/data zone), `random`,
+  `read_config_zone`, `read_slot`, `read_pubkey`, `write_config_zone`,
+  `write_slot`, plus `atecc608_last_error()` / `atecc608_status_str()` —
+  every call's failure is available as a curated status.
 - **Config-zone builder** (`atecc608_config.h`): a field-level intent struct
   → 128-byte config array, a parser, CRC-16, and a writable-region diff —
   consumers express intent, never raw bytes.
 - **Guarded provisioning** (`atecc608_prov.h`): idempotent
   `provision_config` (read-back verified, preserves the chip's I2C address
   byte and the Lock-managed SlotLocked bytes), `lock_config_zone`,
-  `lock_data_zone`, `lock_data_slot`, `genkey`, `counter_read` /
+  `lock_data_zone`, `lock_data_slot`, `genkey`, `get_pubkey`,
+  `write_iokey` (the I/O-protection key to slot 14), `counter_read` /
   `counter_increment` — every irreversible step is confirm-hook gated.
-- **Crypto pass-through** (KDF / sign / verify / `read_pubkey` wrappers):
-  next phase, added as consumers need them.
+- **KDF wrapper** (`atecc608_crypto.h`): `atecc608_kdf_prf` — on-chip KDF
+  (PRF mode) with enforced I/O protection: with `kdf_prot=1` the 32-byte
+  derived key arrives AES-encrypted on the bus (slot-14 key) and the module
+  decrypts it in transit, so it never appears in clear on the wire.
+  Sign/verify wrappers will be added as consumers need them.
 
 ---
 
@@ -131,20 +118,22 @@ mkdir -p build && cd build
 cmake .. -DPICO_SDK_PATH="$HOME/Projects/pico-sdk"
 make -j
 
-# Flash over USB: drag build/example/console/pico-atecc608.uf2 to the
-# RP2350 drive, or use the `bootrom` console command to re-enter BOOTSEL.
+# Flash over USB: drag build/example/console/pico-atecc608.uf2 (the
+# console) or build/example/vault/pico-atecc608-vault.uf2 (the vault demo)
+# to the RP2350 drive, or use the `bootrom` command to re-enter BOOTSEL.
 ```
 
-The build produces the console example image in
-`build/example/console/` (`pico-atecc608.uf2` / `.bin` / `.elf` / `.map`)
-and two static libraries in `build/`: **`libatecc608.a`** (the module) and
-**`libcryptoauth_core.a`** (the fetched cryptoauthlib core, compiled for
-the Pico target).
+The build produces the example images — `build/example/console/`
+(`pico-atecc608.uf2`, the console) and `build/example/vault/`
+(`pico-atecc608-vault.uf2`, the password-store demo), each with `.bin` /
+`.elf` / `.map` — and two static libraries in `build/`:
+**`libatecc608.a`** (the module) and **`libcryptoauth_core.a`** (the
+fetched cryptoauthlib core, compiled for the Pico target).
 
 The examples build by default; to build only the library use
-`-DATECC608_BUILD_EXAMPLES=OFF`. Example console commands (probe/diag
-smoke tests plus the Phase 4B `prov` provisioning set) are documented in
-[`example/README.md`](example/README.md).
+`-DATECC608_BUILD_EXAMPLES=OFF`. The example commands (diagnostic smoke
+tests, the `prov` provisioning set, and the vault password-store demo) are
+documented in [`example/README.md`](example/README.md).
 
 ---
 
@@ -164,6 +153,11 @@ ctest --test-dir tests/build --output-on-failure
   round-trip, counter-encoding vectors, CRC equivalence with the library.
 - `test_prov` — provisioning/lock/genkey/counter flows against the mock,
   including the confirm and state guards.
+- `test_crypto` — the KDF wrapper's plumbing (nonce loading, parameter
+  encoding, response parsing) and the enforced I/O-protection decrypt path,
+  against the mock's deterministic PRF.
+- `test_vault_gcm` — the vault example's pure-C AES-256-GCM (the exact
+  device code) against OpenSSL-verified NIST GCM vectors.
 
 ---
 
@@ -171,25 +165,27 @@ ctest --test-dir tests/build --output-on-failure
 
 ```
 example/              proof-of-concept examples (NOT part of the library):
-                      console/ (bench console: probe/diag + prov commands),
+                      console/ (provisioning + diagnostic console),
+                      vault/ (PIN-gated password-store demo),
                       tools/ (dump_devconfig host tool), common/ (shared
-                      provision-on-first-boot base), submodules
-                      pico-command-line/ (console/CLI framework) and
-                      pico-littlefs/ (Pico-side persistence) — examples
-                      only; see example/README.md
+                      dev config), submodules pico-command-line/ (console
+                      CLI framework) and pico-littlefs/ (Pico-side
+                      persistence) — examples only; see example/README.md
 include/atecc608/     public headers: atecc608.h (core API),
                       atecc608_config.h (config builder),
+                      atecc608_crypto.h (KDF wrapper),
                       atecc608_prov.h (guarded provisioning),
                       atecc608_types.h (shared types/status)
 src/                  module sources: atecc608.c (core API), hal_rp2350.c/.h
-                      (RP2350 I2C HAL), atecc608_config.c, atecc608_prov.c,
+                      (RP2350 I2C HAL), atecc608_config.c,
+                      atecc608_crypto.c, atecc608_prov.c,
                       atecc608_status.c, atecc608_int.h
 tests/                host unit tests (standalone CMake, mock chip HAL)
 CMakeLists.txt        module build (+ examples by default,
                       ATECC608_BUILD_EXAMPLES=OFF to skip); fetches
                       cryptoauthlib at build time
-PLAN.md               development plan, decisions, discovery notes, open items
-RESUME.md             continuity snapshot (exact state + next steps)
+PLAN.md, RESUME.md    internal development notes (plan + continuity
+                      snapshot) — not needed to use the module
 ATECC608C-...-DS40002513.pdf   ATECC608C *summary* data sheet
 ```
 

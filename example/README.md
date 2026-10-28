@@ -16,22 +16,24 @@ not one app with several modes). Every example's startup is two-part:
 
 1. **Check:** is the chip on the bus already provisioned (config zone
    locked / expected layout)?
-2. **If yes** — run the application. **If no** — run the provisioning
-   sequence (below) first, then run the application.
+2. **If yes** — run the application. **If no** — provision it first with
+   the console (`prov` command set — the proven sequence, in the exact
+   order, is in [`docs/BRINGUP.md`](../docs/BRINGUP.md)), then run the
+   application.
 
-The shared half of that contract (provision-check + provisioning sequence)
-lives in `common/` so each example stays small. (To be factored out of
-`console/` during Phase 4B; until then `console/` *is* the provisioning
-implementation.)
+The console is the provisioner; the examples never provision a chip
+themselves. `common/dev_config.h` is the single shared config intent so
+the console and the byte-plan tool always encode the same image.
 
 ## What's here
 
-- **`console/`** — bench console over the serial port (pico-command-line,
-  a submodule in this folder): probe/diagnostic smoke commands plus the
-  Phase 4B `prov` command set. Pico-side state lives in littlefs
-  (pico-littlefs, a submodule in this folder): `/io_key.bin` for now,
-  later `/vault.db` and `/fido2.db`. The `bootrom` command re-enters
-  BOOTSEL for reflashing.
+- **`console/`** — the provisioner + diagnostic console over the serial
+  port (pico-command-line, a submodule in this folder): probe/diagnostic
+  smoke commands, the `prov` provisioning command set, the config
+  read-back (`config`), and the on-hardware `selftest` validation suite.
+  Pico-side state lives in littlefs (pico-littlefs, a submodule in this
+  folder): `/io_key.bin` (the I/O key copy). The `bootrom` command
+  re-enters BOOTSEL for reflashing.
 - **`vault/`** — PIN-gated password-store demo (the "Scenario 1" console
   app): the chip is the KDF master (slot 7), the Pico does AES-256-GCM
   (pure C, NIST-vector-verified) over flat littlefs entries
@@ -39,10 +41,9 @@ implementation.)
 - **`tools/dump_devconfig.c`** — host tool that encodes the agreed dev
   config and prints the exact 128-byte config-zone image + summary CRC
   from the module's real builder (the byte plan).
-- **`common/dev_config.h`** — the agreed 4B dev config as a build intent,
-  shared by the console (`prov status/config/lock`) and the byte-plan tool
-  so both always encode the same image. (The shared provision-on-first-boot
-  base also lands here — see above.)
+- **`common/dev_config.h`** — the agreed development config as a build
+  intent, shared by the console (`prov status/config/lock`) and the
+  byte-plan tool so both always encode the same image.
 
 ## Console example
 
@@ -57,7 +58,7 @@ Console output is on **both** USB CDC serial (no extra wiring) and UART0
 
 ### Commands
 
-Smoke (read-only, Phase 3):
+Diagnostics (read-only):
 
 | Command | What it does |
 |---|---|
@@ -69,25 +70,34 @@ Smoke (read-only, Phase 3):
 | `info` | part id + silicon revision |
 | `serial` | factory serial number |
 | `lock` | lock status (config zone / data zone) |
+| `config` | decoded config-zone read-back (field by field + summary CRC) |
+| `selftest [generic]` | read-only on-hardware validation suite (chip identity, config vs intent, key presence, KDF round-trip, I/O key, counters); `generic` runs the invariants only, without per-chip golden values |
 
-Provisioning (Phase 4B; every step idempotent and safe to re-run — only
-`prov lock` is irreversible and gates on a typed confirm; the module API
-already takes a confirm callback):
+Provisioning (every step is idempotent and safe to re-run while the
+relevant zone/slot is unlocked; the irreversible locks gate on a typed
+confirm, and everything goes through the module's confirm-callback API —
+see [`docs/BRINGUP.md`](../docs/BRINGUP.md) for the proven order):
 
 | Command | Does | Reversible? |
 |---|---|---|
-| `prov status` | chip state + factory-zone dump + diff vs planned image | read-only |
-| `prov randtest` | `atcab_random` ×2, print — expect the `0xFFFF0000` factory pattern while unlocked | read-only |
-| `prov iokey` | Pico TRNG → Write slot 14 → read-back verify → print 64 hex chars → save `/io_key.bin` (littlefs) | yes (re-run re-keys) |
-| `prov config` | build intent → write zone (byte 16 + SlotLocked 88..89 preserved) → read-back verify | yes |
-| `prov lock` | re-verify zone vs intent → typed confirm → Lock with summary CRC | **no** |
+| `prov status` | chip state + factory-zone dump + diff vs planned image + `/io_key.bin` persistence | read-only |
+| `prov config` | build intent → write config zone (I2C address byte + Lock-managed SlotLocked bytes preserved) → read-back verify | yes, while the config zone is unlocked |
+| `prov lock` | re-verify zone vs intent → typed confirm → Lock the config zone with its summary CRC | **no** |
+| `prov iokey` | Pico TRNG → Write slot 14 (chip ACK — a secret slot has no read-back) → print 64 hex chars → save `/io_key.bin` | yes, while the data zone is unlocked (re-run re-keys) |
+| `prov genkey <slot>` | fresh EC P-256 key pair in slot 1/3/4/5/6/12 (data zone must be unlocked) | yes, while the slot is unlocked |
+| `prov pubkey <slot>` | public key of the slot's private key | read-only (works locked) |
+| `prov lockdata [CONFIRM]` | Lock the data zone | **no** |
+| `prov iokeytest` | verify slot 14's I/O key via an I/O-protected KDF round-trip, using the key saved in `/io_key.bin` | read-only |
+| `prov kdf <slot>` | 32-B KDF PRF from the slot (I/O-protected; run twice — expect identical output) | read-only |
+| `prov lockslot <slot> [CONFIRM]` | Lock one data slot (e.g. slot 14, the final I/O-key hardening step) | **no** |
+| `prov randtest` | chip RNG ×2, print — the `0xFFFF0000` factory pattern while unlocked | read-only |
+| `prov iokeyshow` | DEV-ONLY: print the I/O key saved in `/io_key.bin` (compare against the out-of-band copy; never ship) | read-only |
 
-The typed confirm on `prov lock` is the command line itself: the handlers
-run on core1 while the console's stdin loop runs on core0, so an
-interactive prompt inside a command would have its keystrokes split
-between the two cores. `prov lock` verifies the zone and aborts;
-`prov lock CONFIRM` carries the confirm. Both go through the module's
-confirm-callback API.
+The typed confirm is the command line itself: the command handlers run on
+core1 while the console's stdin loop runs on core0, so an interactive
+prompt inside a command would have its keystrokes split between the two
+cores. `prov lock` / `prov lockdata` / `prov lockslot <slot>` verify and
+abort without the confirm; with `CONFIRM` on the line they carry it.
 
 ## Vault example
 
@@ -138,6 +148,15 @@ app prints what is missing and where to get it; it never provisions.
 
 Limits: name 1..16 chars from `[A-Za-z0-9._-]`; PIN 1..24 chars;
 password 1..40 chars (no spaces — the command line is one buffer).
+
+**Brute-force resistance (for apps you build on this pattern):** the demo
+deliberately implements no lockout — a wrong PIN fails the GCM tag check
+and nothing is counted (the chip's KDF cannot tell a wrong PIN from a
+right one, and no chip counter is touched). If you build a similar app,
+consider adding a Pico-side failure counter + lock flag in littlefs — e.g.
+5 failures → locked until a deliberate reset (see [Scenario 1](#scenario-1--pin-gated-password-store)).
+The chip's two monotonic counters are the wrong tool for that: they only
+ever increment (anti-rollback / CTAP semantics) and cannot be reset.
 
 **Demo caveats (bench use only):**
 - The console echoes what you type — the PIN and password are visible on

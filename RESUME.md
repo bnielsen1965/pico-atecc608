@@ -1,8 +1,9 @@
 # Resume notes (pico-atecc608)
 
-Pause point: **2026-10-27 — the `vault` example is BUILT +
-HOST-VERIFIED (both diagnosed GCM bugs fixed; host ctest 4/4; bench
-demo run pending — the newest "Latest state" paragraph below), and
+Pause point: **2026-10-27 — the `vault` example is COMPLETE (both
+diagnosed GCM bugs fixed; host ctest 4/4; bench demo run GREEN and the
+`dump` command bench-verified — the newest "Latest state" paragraphs
+below), and
 Phase 4B is COMPLETE (2026-10-23), Phase 5
 is COMPLETE (KDF round-trip validated on hardware 2026-10-26), and
 Phase 6 is COMPLETE (2026-10-26: the `config` read-back demo ran on
@@ -832,6 +833,39 @@ on the chip. **All vault commands (add / get / dump / wrong-PIN get /
 list / rm) are now bench-verified on the frozen chip** — the demo
 works end-to-end: KDF (slot 7, enforced I/O protection) + chip RNG +
 littlefs, no chip writes.
+
+**Latest state (2026-10-27, docs): README cleanup — both READMEs are
+now written for the END DEVELOPER (no project-status tracking, no phase
+jargon, loose ends fixed).** README.md: the stale **Status section was
+removed** (it claimed the chip was "currently unprovisioned" — long
+since wrong; the user's call: the README is for users, not a project
+tracker); the "next phase" crypto bullet now documents the SHIPPED KDF
+wrapper (`atecc608_crypto.h` / `atecc608_kdf_prf`, enforced I/O
+protection; sign/verify noted as on-demand); the prov bullet gained
+`get_pubkey` + `write_iokey`; the core bullet gained `deinit`; the
+broken scope-note anchor (pointed at a non-existent in-page anchor) now
+links to `example/README.md#application-scenarios--provisioning-guidance`;
+the Building section names BOTH uf2s (console + vault) and drops the
+"Phase 4B" reference; the host-test list gained `test_crypto` +
+`test_vault_gcm`; the layout gained `vault/` + `atecc608_crypto.h/.c`,
+and PLAN/RESUME are now one line ("internal development notes — not
+needed to use the module"). example/README.md: the per-example contract
+dropped the stale "Phase 4B factor-out" note (the console IS the
+provisioner; the proven sequence is docs/BRINGUP.md); the "What's here"
+console bullet dropped the speculative `/vault.db` / `/fido2.db` (the
+vault uses flat `/v_<name>` files); the console command tables now cover
+EVERY shipped command — all 12 `prov` subcommands (status / config /
+lock / iokey / genkey / pubkey / lockdata / iokeytest / kdf / lockslot /
+randtest / iokeyshow) + `config` + `selftest`; the `prov iokey` row no
+longer claims a "read-back verify" (a secret slot has NO read-back —
+chip ACK only); the typed-confirm paragraph covers `prov lockdata` /
+`prov lockslot` too; the vault section gained a **brute-force note for
+end developers building similar apps**: the demo has no lockout by
+design (a wrong PIN touches no counter — the chip KDF can't tell a
+wrong PIN, and the chip counters are increment-only), so consider a
+Pico-side littlefs fail count + lock flag (5 fails → lock until
+deliberate reset, per Scenario 1). Docs-only; no code, no chip access;
+working tree clean after the commit.
 
 **`prov iokeytest` was BUILT (`8aa8922`), flashed, and RUN (2026-10-24)
 — it returned `clear KDF failed: ATCA_STATUS -12` (execution error) with
