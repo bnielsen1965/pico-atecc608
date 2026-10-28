@@ -1,7 +1,24 @@
 # Plan: FIDO2 example — passkey authenticator
 
-**Current state: Phase 0 DONE (2026-10-28); the next session starts at
-Phase 1 (FIDO HID transport over USB).** Phase 0 landed:
+**Current state: Phase 1 DONE (2026-10-28); the next session starts at
+Phase 2 (CBOR + CTAP core + GET_INFO).** Phase 1 landed:
+`example/fido2/` — the pure-HID USB security key (2E8A:000B, usage
+page 0xF1D0, two raw 64-byte reports, no report IDs; 34-byte report
+descriptor from TinyUSB's own `TUD_HID_REPORT_DESC_FIDO_U2F`
+template) on the fork-native TinyUSB backend (marked
+`tinyusb_device` target + the app's own `tusb_config.h`; no CDC,
+debug on UART0, BOOTSEL flashing), plus the pure-C CTAPHID
+transport core `fido_ctaphid.c` (INIT allocate/sync with the
+exactly-17-byte response, PING echo up to the 7609-byte max, the
+CTAP v2.0 error table, 8-slot LRU channel table, one in-flight
+message, 750 ms busy timeout, 500 ms keep-alive throttle) —
+host-verified by `tests/test_ctaphid.c` (106 checks). Startup
+contract held: probe + config-zone-locked + identity-key check,
+never provision; unprovisioned devices still enumerate but answer
+nothing (LED slow-blink). `ctest` 5/5 green; Pico build
+warning-clean. The bench step (HID monitor sees the FIDO
+descriptor; INIT → nonce echo + CID) is a user action. Phase 0
+landed:
 `atecc608_sign(slot, digest32, sig64)` / `atecc608_verify(slot, digest32,
 sig64, *is_verified)` in `atecc608_crypto.h/.c` (external-digest Sign /
 stored Verify; HAL-agnostic, so they compile in the host build), mock-chip
@@ -157,22 +174,66 @@ response carried an unexpected 32-B nonce, revisit.) The PIN stretch phase
 - New example `example/fido2/` (its own app — USB descriptors are per-app;
   one example directory per app, house contract), target
   `pico-atecc608-fido2`, uf2 in `build/example/fido2/`.
-- USB HID with the standard **FIDO HID report layout**: report 0x01
-  (4-byte CID init), 0x02 (65-byte message: 1-byte type + 64 payload),
-  0x03 (error), 0x04 (keep-alive); vendor usage page; 500 ms keep-alive
-  while a transaction is pending; 256-byte message framing (maxMsgSize).
-  Follow the FIDO HID spec exactly — browsers match the report shape
-  strictly.
-- **Transport question to resolve first:** this pico-sdk fork's USB device
-  support for a *custom HID* class (the console uses CDC). If the fork
-  can't express a 4-report custom HID descriptor, use the TinyUSB backend.
-  Decide in this phase.
-- **Startup contract (house style):** probe the chip; require config zone
-  locked + identity key present (`read_pubkey` slot 2); if not
-  provisioned, print "provision with the console" and idle — **never
-  provision**.
-- **Bench:** a generic HID monitor on the PC sees the 4-report layout;
-  channel init (CID echo) works. No browser yet.
+- **Transport (RESOLVED):** the fork-native TinyUSB backend
+  (`pico-sdk/lib/tinyusb`, v0.21), linking the **marked**
+  `tinyusb_device` target — it defines `LIB_TINYUSB_DEVICE=1` in the
+  app's TUs so pico_stdio_usb stands down (no default descriptors, no
+  auto-init, no background task) and the app supplies its own
+  `tusb_config.h` (device mode, `CFG_TUD_HID 1`,
+  `CFG_TUD_HID_EP_BUFSIZE 64` — must stay 64, see below). **No CDC:**
+  USB is the FIDO HID interface only; flash via BOOTSEL uf2; debug
+  prints on UART0 (GPIO 0/1). Main loop is single-threaded polling
+  (`tud_task(); fido_hid_tick(); sleep_ms(1);`) — every TinyUSB callback
+  runs in that context.
+- **Report layout (corrects the earlier draft):** NO report IDs — two
+  raw 64-byte reports (IN + OUT), usage page **0xF1D0**, usage 0x01
+  (IN usage 0x20, OUT usage 0x21). The 34-byte report descriptor is
+  TinyUSB's own `TUD_HID_REPORT_DESC_FIDO_U2F(64)` template (static-
+  asserted to 34 bytes; byte-identical to Nitrokey's). IN EP 0x81 /
+  OUT EP 0x01 interrupt, max packet 64, bInterval 5 (U2FHID spec
+  example values). OUT buffer stays 64: the RP2040 DCD arms the OUT
+  transfer with that size and only a 64-byte arm sets the hardware
+  LAST bit, so one full 64-byte host packet completes the transfer;
+  a larger buffer would wait for a second packet that never comes.
+- **Framing:** init `CID(4,BE)|CMD(1=0x80|cmd)|BCNT(2,BE)|DATA(57)`;
+  continuation `CID(4,BE)|SEQ(1)|DATA(59)` with **0-based SEQ
+  (0x00..0x7F)**; max message 7609 = 57 + 128×59 (129 packets).
+  Commands: PING/MSG/LOCK/INIT/WINK/CBOR/CANCEL/KEEPALIVE/ERROR; CTAP
+  v2.0 §8.1.9 error table. The **INIT response is exactly 17 bytes**
+  on the request's CID: nonce(8)|cid(4,BE)|protocol(1)=0x02|version(3)
+  |caps(1)=0x0D (WINK|CBOR|NMSG — CTAP2-only). First allocated CID is
+  2 (0 and 0xFFFFFFFF reserved); broadcast INIT allocates, specific
+  INIT syncs (discards in-flight on that channel only). Unknown CIDs
+  are auto-accepted; the 8-slot channel table LRU-evicts (never the
+  in-flight channel) so broadcast INIT can never fail. One global
+  7609-byte in-flight buffer, one message at a time: a new init on a
+  different channel while buffering → ERR_CHANNEL_BUSY; bcnt > 7609 →
+  ERR_INVALID_LEN; wrong SEQ or a re-init on the in-flight CID →
+  ERR_INVALID_SEQ (in-flight cleared). In-flight idle ≥ 750 ms (clock
+  refreshed by every accepted packet) → ERR_MSG_TIMEOUT. CANCEL gets
+  NO response (Chromium doesn't wait); MSG/LOCK → ERR_INVALID_CMD on
+  a CTAP2-only device. Keep-alive: 1-byte status (1=processing,
+  2=UP-needed), 500 ms throttle, on the transaction's CID — the
+  mechanism exists but nothing emits one in Phase 1 (the CBOR stub
+  returns at once with a status byte).
+- **Startup contract (house style, deliberate deviation from the
+  examples' auto-provision):** probe the chip; require config zone
+  locked + identity key present (`atecc608_get_pubkey` slot 2,
+  read-only). If not provisioned, the device still enumerates over
+  USB but the state machine is gated off (answers nothing), the LED
+  (GP25) slow-blinks, and UART0 says "provision with the console" —
+  **never provision**. USB unmount re-inits the CTAPHID state (fresh
+  CIDs from 2).
+- **Host-verified core:** `fido_ctaphid.c` is pure C (no pico-sdk, no
+  TinyUSB); `tests/test_ctaphid.c` drives the whole state machine on
+  the host — INIT allocation/sync and the 17-byte response shape, PING
+  echo (single-packet shapes and multi-packet up to the 7609 max), the
+  error table, busy/timeout rules, keep-alive throttling, LRU
+  eviction.
+- **Bench (user action):** a generic HID monitor on the PC sees the
+  FIDO descriptor (usage page 0xF1D0, two 64-byte raw reports);
+  channel init (INIT → nonce echo + allocated CID) works. No browser
+  yet.
 
 ### Phase 2 — CBOR + CTAP core + GET_INFO
 
@@ -266,9 +327,10 @@ user wants it:
    discovery without it, Phase 6 becomes mandatory and moves up. (A
    non-resident path — browser supplies the credentialID — is always
    available as a debug fallback.)
-2. **Hardware SHA-256:** does this pico-sdk fork expose the RP2350
-   cryptoaccel (it does *not* expose hardware AES — the vault went pure
-   C)? If not, a small pure-C SHA-256, host KAT'd.
+2. **Hardware SHA-256 (RESOLVED in Phase 1):** the fork exposes
+   `pico_sha256` / `hardware_sha256` (`src/rp2_common/`) — the RP2350
+   cryptoaccel is usable on-device from the CTAP phases (it is not
+   host-compilable, so host tests needing the digest path stay pure C).
 3. **Counter 0 increment on the frozen chip:** expected to work by design
    (the COUNTER command is the one config-zone field writable after the
    lock). Because the dev default is the littlefs counter, this is no longer
@@ -279,12 +341,21 @@ user wants it:
 
 ## Risks
 
-- **The FIDO HID descriptor is the biggest unknown** (custom HID on this
-  pico-sdk fork). Mitigation: minimal descriptor; verify with a generic
-  HID monitor in Phase 1 *before* any CTAP work.
-- **Browsers are strict** about the FIDO HID report shape — follow the
-  FIDO HID spec exactly (report IDs 0x01–0x04, 64-byte payloads,
-  keep-alive timing).
+- **FIDO HID descriptor (RESOLVED in Phase 1):** the fork's TinyUSB
+  (v0.21) expresses it natively — `CFG_TUD_HID 1` + the
+  `TUD_HID_REPORT_DESC_FIDO_U2F` template, no fork changes. The
+  descriptor itself still gets its bench confirmation with a generic
+  HID monitor *before* any CTAP work. (Fork quirks found and handled:
+  no descriptor-builder macros like `TUD_DESC_TYPE_*`/`LO16`, no
+  per-class `tud_hid_mount_cb` — the bus-level `tud_mount_cb`/
+  `tud_umount_cb` are the events; `osal_time_millis()` is the clock;
+  `tud_hid_get_report_cb` is mandatory and STALLed, as GET_REPORT is
+  not part of the FIDO protocol.)
+- **Browsers are strict** about the FIDO HID layout — resolved against
+  Chromium/libfido2/Linux-kernel behavior in Phase 1: NO report IDs
+  (two raw 64-byte reports), the exactly-17-byte INIT response,
+  0-based continuation SEQ, 500 ms keep-alive throttle, 750 ms busy
+  timeout, no 0x0B to the browser (unknown CIDs auto-accepted).
 - **Chip Counter 0 only ever increases** (monotonic) — correct FIDO
   behavior, not a bug; once exercised, the bench chip's counter will not
   return to 0. This is why the dev default is the littlefs counter
@@ -301,15 +372,20 @@ firmware updates, and any config change (the chip is frozen).
 
 ```
 example/fido2/
-  main.c          CTAP app: startup contract, USB init, dispatch
-  fido_hid.c/.h   FIDO HID transport (USB device)
-  cbor.c/.h       minimal CBOR codec (host + device)
-  ctap.c/.h       CTAP2 commands: GET_INFO / MAKE_CREDENTIAL /
-                  GET_ASSERTION / RESET
-  fido_db.c/.h    littlefs credential store (flat /f2_<n>)
-  fido_count.c/.h CTAP sync-counter provider: littlefs (/f2_cnt) default,
-                  chip Counter 0 behind FIDO2_COUNTER_CHIP; read/increment
-CMakeLists.txt    + pico-atecc608-fido2 target (FIDO2_COUNTER_CHIP option)
-tests/            + test_cbor (host KATs); test_crypto gains sign/verify;
-                  + test_fido_count (littlefs backend host KAT)
+  main.c            CTAP app: startup contract, USB init, main loop
+  tusb_config.h     TinyUSB config (device mode, CFG_TUD_HID, 64-byte EP)
+  fido_hid.c/.h     FIDO HID descriptors + TinyUSB glue (USB device)
+  fido_ctaphid.c/.h CTAPHID transport core: pure-C framing/channel state
+                    machine (host-tested; the CBOR/WINK callbacks are the
+                    seam for the CTAP layer)
+  cbor.c/.h         minimal CBOR codec (host + device)
+  ctap.c/.h         CTAP2 commands: GET_INFO / MAKE_CREDENTIAL /
+                    GET_ASSERTION / RESET
+  fido_db.c/.h      littlefs credential store (flat /f2_<n>)
+  fido_count.c/.h   CTAP sync-counter provider: littlefs (/f2_cnt) default,
+                    chip Counter 0 behind FIDO2_COUNTER_CHIP; read/increment
+CMakeLists.txt      + pico-atecc608-fido2 target (FIDO2_COUNTER_CHIP option)
+tests/              + test_ctaphid (transport state machine, host);
+                    + test_cbor (host KATs); test_crypto has sign/verify;
+                    + test_fido_count (littlefs backend host KAT)
 ```

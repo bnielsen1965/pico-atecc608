@@ -154,3 +154,13 @@ add_executable(test_vault_gcm test_vault_gcm.c ${MOD_ROOT}/example/vault/vault_g
 target_include_directories(test_vault_gcm PRIVATE ${MOD_ROOT}/example/vault)
 target_compile_options(test_vault_gcm PRIVATE -Wall -Wextra)
 add_test(NAME test_vault_gcm COMMAND $<TARGET_FILE:test_vault_gcm>)
+
+# The fido2 example's CTAPHID transport (example/fido2/fido_ctaphid.c) is
+# likewise pure C — no pico-sdk, no TinyUSB — so the framing/channel state
+# machine is host-verified here: INIT allocation/sync, PING echo (single
+# and multi-packet, up to the 7609-byte maximum), the CTAP2 error table,
+# the busy/timeout rules, and keep-alive throttling.
+add_executable(test_ctaphid test_ctaphid.c ${MOD_ROOT}/example/fido2/fido_ctaphid.c)
+target_include_directories(test_ctaphid PRIVATE ${MOD_ROOT}/example/fido2)
+target_compile_options(test_ctaphid PRIVATE -Wall -Wextra)
+add_test(NAME test_ctaphid COMMAND $<TARGET_FILE:test_ctaphid>)

@@ -9,7 +9,7 @@
 #
 #   console/   bench console: probe/diag + provisioning command set
 #   vault/     PIN-gated password store demo (ATECC608 as KDF master)
-#   (future)   fido2/  ...  one discrete app each
+#   fido2/     FIDO2 (CTAP2) passkey authenticator (pure-HID USB key)
 #
 # See example/README.md for the contract and the agreed slot layout.
 
@@ -34,3 +34,4 @@ add_subdirectory(pico-littlefs)
 
 add_subdirectory(console)
 add_subdirectory(vault)
+add_subdirectory(fido2)
