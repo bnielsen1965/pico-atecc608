@@ -80,8 +80,12 @@ bench demo run was GREEN 2026-10-27 (the user flashed the vault uf2
 and verified add / get / wrong-PIN / list / rm — see the newest
 "Latest state" paragraph below); the read-only `dump <name>` demo
 command (raw stored entry as text, non-printables as `?`) was added
-the same day and awaits its first bench run. The chip is FROZEN and
-untouched by this work (the vault runtime uses KDF + RNG only).
+the same day, and its bench run was GREEN the same day (the ct region
+read as pure `?` noise — the plaintext-leak demo confirmed on
+hardware). The vault demo is COMPLETE end-to-end (add/get/dump/
+wrong-PIN/list/rm all verified on the frozen chip). The chip is
+FROZEN and untouched by this work (the vault runtime uses KDF + RNG
+only).
 
 **The functional I/O-key test `prov iokeytest` was BUILT (`8aa8922`),
 flashed, and RUN (2026-10-24): `clear KDF failed: ATCA_STATUS -12`
@@ -795,12 +799,39 @@ chip or Pico). Awaiting the reflash + `dump` bench run.**
   (`b5bafaf`) is the firmware LIVE on the chip** (the user's bench
   flash); it will be superseded by the 203,776 B build when `dump`
   gets its bench run.
-- **Bench run for `dump` (user action, ground rule 0):** reflash
-  `build/example/vault/pico-atecc608-vault.uf2` (203,776 B; entries
-  survive the reflash) → `add <name> <pin> <password>` →
-  `dump <name>` (expect the `?`-ish rows + "the password text must
-  NOT appear above") → `get <name> <pin>` (the password still comes
-  back). Read-only throughout after the flash.
+- **Bench run for `dump`: GREEN (2026-10-27, user)** — see the
+  "BENCH GREEN (2026-10-27, dump)" paragraph below.
+
+**BENCH GREEN (2026-10-27, dump): the plaintext-leak demonstration is
+CONFIRMED ON HARDWARE — the vault demo is COMPLETE end-to-end.** The
+203,776 B vault uf2 (`526c810`) was flashed (entries + `/io_key.bin`
+survived the reflash). Record of choice (user):
+```
+add mytest 1234 asdf
+stored 'mytest' (4 B password, fresh salt/nonce)
+dump mytest
+raw entry /v_mytest (96 B) as stored in flash — non-printable bytes as '?':
+layout: [0:4] magic | [4:20] salt | [20:32] nonce | [32:36] pt_len
+        [36:76] ct (the password, GCM-encrypted) | [76:92] tag | [92:96] crc32
+  00: VAU1p?X??Q?~????
+  16: ?????Un#Z g?^2??
+  32: ????????????????
+  48: ????????????????
+  64: ????????????????
+  80: X??{&au7I?<S????
+record: magic OK, pt_len 4, CRC OK — the password text must NOT appear above
+```
+The ct region (rows 32–64 = bytes 32–75, i.e. pt_len + ct) is pure
+`?` — the 4-B password "asdf" appears nowhere. The scattered
+printables in the salt/nonce rows (00–16) are random noise, as
+expected (≈37% of random bytes fall in the printable range —
+0x20..0x7E of 256); the printables at the end of row 80 are tag /
+crc32 bytes. `get mytest 1234` still returns the password
+(user-confirmed). The 203,776 B uf2 (`526c810`) is the firmware LIVE
+on the chip. **All vault commands (add / get / dump / wrong-PIN get /
+list / rm) are now bench-verified on the frozen chip** — the demo
+works end-to-end: KDF (slot 7, enforced I/O protection) + chip RNG +
+littlefs, no chip writes.
 
 **`prov iokeytest` was BUILT (`8aa8922`), flashed, and RUN (2026-10-24)
 — it returned `clear KDF failed: ATCA_STATUS -12` (execution error) with
@@ -1566,12 +1597,12 @@ bit 13/14 behavior.
   (chip = KDF master only; pure-C AES-256-GCM; flat `/v_<name>`
   littlefs entries; `add`/`get`/`dump`/`list`/`rm`) — the two
   diagnosed GCM bugs are FIXED; host `test_vault_gcm` 12/12 (ctest
-  4/4); the bench demo run is GREEN (add / get / wrong-PIN / list /
-  rm verified by the user on the frozen chip); the read-only `dump`
-  plaintext-leak demonstration is built and awaits its first bench
-  run (203,776 B uf2). Chip untouched (frozen; KDF + RNG only at
-  runtime). Docs in (example/README "Vault example" section, PLAN.md
-  scope note).
+  4/4); the bench demo run is GREEN — **every command (add / get /
+  dump / wrong-PIN / list / rm) verified by the user on the frozen
+  chip**, including the `dump` plaintext-leak demonstration (ct region
+  pure `?` noise on hardware; 203,776 B uf2 `526c810` live on the
+  chip). Chip untouched (frozen; KDF + RNG only at runtime). Docs in
+  (example/README "Vault example" section, PLAN.md scope note).
 
 ## Build (verified green)
 ```sh
