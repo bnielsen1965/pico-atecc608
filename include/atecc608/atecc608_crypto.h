@@ -1,7 +1,8 @@
 // ATECC608 crypto pass-through API (Phase 5).
 //
 // Curated wrappers over the chip's crypto commands, added as consumers
-// need them (PLAN.md Phase 5: kdf / sign / verify). Like the
+// need them (kdf today; sign/verify land with the FIDO2 example — see
+// PLAN.md). Like the
 // provisioning API (atecc608_prov.h), the implementation is HAL-agnostic
 // (it only calls atcab_* / atcah_*), so it compiles in the host unit-test
 // build and is exercised against the mock chip (tests/).

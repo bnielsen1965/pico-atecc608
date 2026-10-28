@@ -2,7 +2,7 @@
 //
 // These functions perform the chip writes that provision the device —
 // config-zone write, zone/slot locks, key generation, counter increment.
-// The guards follow the PLAN.md ground rules:
+// The guards follow the provisioning ground rules:
 //
 //   - nothing irreversible is issued without a read-back verification
 //     (provision_config re-reads and byte-compares before it reports

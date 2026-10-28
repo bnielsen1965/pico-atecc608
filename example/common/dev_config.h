@@ -1,6 +1,6 @@
-// The agreed 4B development config for the on-bench ATECC608
-// (scenario discussion 2026-10-22; see RESUME.md "Agreed 4B config" and
-// example/README.md for the full rationale).
+// The agreed development config for the on-bench ATECC608
+// (scenario discussion 2026-10-22; see example/README.md for the full
+// rationale).
 //
 // Shared by the two consumers that must always encode the SAME image:
 //   - example/console/main.c       (prov status/config/lock on the Pico)

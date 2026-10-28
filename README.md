@@ -184,8 +184,8 @@ tests/                host unit tests (standalone CMake, mock chip HAL)
 CMakeLists.txt        module build (+ examples by default,
                       ATECC608_BUILD_EXAMPLES=OFF to skip); fetches
                       cryptoauthlib at build time
-PLAN.md, RESUME.md    internal development notes (plan + continuity
-                      snapshot) — not needed to use the module
+PLAN.md               FIDO2 example development plan (the original
+                      module plan is in git history)
 ATECC608C-...-DS40002513.pdf   ATECC608C *summary* data sheet
 ```
 

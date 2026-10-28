@@ -5,9 +5,8 @@
 // This is pure logic: no HAL, no cryptoauthlib, no chip access. It compiles
 // and is unit-tested on the host (tests/). The authoritative layout and bit
 // positions are cryptoauthlib v3.8.0's `calib_device.h`
-// (`atecc608_config_s`); the field *semantics* (what each value means) are
-// the public ATECC508A/ATECC608 datasheet tables (see PLAN.md, Phase 4A
-// notes).
+// (`atecc608_config_s`); the field *semantics* (what each value means)
+// are the public ATECC508A/ATECC608 datasheet tables.
 //
 // Field encodings worth knowing before using the builder:
 //

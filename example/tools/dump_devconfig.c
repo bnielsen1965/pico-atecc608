@@ -1,9 +1,10 @@
-// Phase 4B: dump the agreed development config zone (128 bytes) for the
+// Dump the agreed development config zone (128 bytes) for the
 // on-bench ATECC608, as produced by the real builder
 // (atecc608_config_build). Pure host tool — no HAL, no chip access.
 //
-// The config is the one agreed in RESUME.md ("Agreed 4B config",
-// 2026-10-22): lock the layout, keep the contents open.
+// The config is the agreed development config (scenario discussion
+// 2026-10-22; rationale in example/README.md): lock the layout, keep
+// the contents open.
 //
 // Build (host, one line, from the repo root):
 //   gcc -std=c11 -Wall -Wextra -Iinclude -Iexample/common example/tools/dump_devconfig.c src/atecc608_config.c -o dump_devconfig && ./dump_devconfig

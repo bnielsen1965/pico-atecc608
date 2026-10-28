@@ -49,8 +49,7 @@
 //   prov kdf <slot> - READ-ONLY: 32-B KDF (PRF, source = data slot) via
 //                    the Phase 5 wrapper (atecc608_kdf_prf); fixed nonce
 //                    and message, so two runs print the SAME value — the
-//                    on-hardware KDF round-trip that closes PLAN.md
-//                    Phase 5. I/O key from /io_key.bin.
+//                    on-hardware KDF round-trip. I/O key from /io_key.bin.
 //   prov iokeyshow - DEV-ONLY (do not ship in a production application):
 //                    print the I/O key saved in /io_key.bin so it can be
 //                    compared against the out-of-band durable copy.
@@ -61,7 +60,7 @@
 //   prov lock      - WRITE, IRREVERSIBLE: verify zone vs intent -> typed
 //                    confirm -> Lock with the summary CRC
 //
-// Phase 5+ commands (the on-chip ECC key lifecycle, see PLAN.md):
+// The on-chip ECC key lifecycle commands:
 //   prov genkey <slot> - WRITE: fresh ECC P-256 key pair in slot 1/3/4/5/6/12
 //                    (data zone must be UNLOCKED; prints the 64-B public
 //                    key; re-running REPLACES the key and voids any binding
@@ -1010,7 +1009,7 @@ static bool iokey_roundtrip(bool verbose, char *detail, size_t detail_size)
                    "I/O protection). The printed values let the host side\n"
                    "recompute the exact keystreams (SHA256(io_key || 16-B nonce\n"
                    "half) XOR per 32-B block) and identify which key the chip and\n"
-                   "the file each hold — RESUME.md, 2026-10-25 iokeytest recipe.\n"
+                   "the file each hold — the 2026-10-25 iokeytest recipe.\n"
                    "Do NOT re-key slot 14 before that verdict.\n");
             printf("decrypted KDF (64 B):  ");
             atecc608_print_hex(out_enc, sizeof(out_enc));
@@ -1497,10 +1496,10 @@ static void provLockSlot(const char *rest)
     }
 }
 
-// prov kdf <slot> — READ-ONLY: derive 32 bytes with the Phase 5 KDF wrapper
+// prov kdf <slot> — READ-ONLY: derive 32 bytes with the KDF wrapper
 // (PRF, source = data slot, target = output) — the on-hardware KDF
-// round-trip that closes PLAN.md Phase 5 ("at least a KDF round-trip
-// validated on hardware"). A FIXED nonce (32 bytes of zero) and a FIXED
+// round-trip ("at least a KDF round-trip validated on hardware").
+// A FIXED nonce (32 bytes of zero) and a FIXED
 // 16-byte message (0x00..0x0F, same as prov iokeytest) make the output
 // deterministic: two runs of `prov kdf 7` must print the SAME 32 bytes.
 // The I/O key comes from /io_key.bin because this chip enforces I/O
@@ -1556,7 +1555,7 @@ static void provKdf(const char *rest)
 // --- bench-chip goldens (sub-step 7.2; dev-only, console example only) --
 //
 // Values recorded from the bench chip (serial 01 23 06 40 AE B6 B9 B7
-// EE) — the RESUME.md "record of choice" entries. The generic invariants
+// EE), recorded from the bench chip. The generic invariants
 // above prove a chip carries the AGREED config; the goldens prove it is
 // THE recorded bench chip, and `selftest` (full mode) hard-FAILS on a
 // mismatch: the regression gate. NOT part of the library.
@@ -1906,7 +1905,7 @@ static void commandSelftest(char *cmdLine)
     // --- bench-chip goldens (full mode only) ------------------------------
     // The checks above prove the chip carries the AGREED config; the
     // goldens prove it is THE recorded bench chip. A mismatch hard-FAILs:
-    // this is the regression gate (PLAN.md, Phase 7).
+    // this is the regression gate.
     if (!generic) {
         // G1 — the recorded factory serial.
         uint8_t sn[ATECC608_SERIAL_LEN];
