@@ -91,7 +91,10 @@ static const uint8_t s_config_desc[] = {
     0x11, 0x01,                               // bcdHID 1.11
     0x00,                                     // bCountryCode
     0x01,                                     // bNumDescriptors
-    0x21,                                     //   descriptor type: report
+    0x22,                                     //   descriptor type: report (0x22, HID_DT_REPORT
+                                              //   — NOT 0x21, which is the HID descriptor
+                                              //   type itself; Linux's usbhid rejects the
+                                              //   device with -EINVAL unless this is 0x22)
     (uint8_t)sizeof s_report_desc, 0x00,      //   report descriptor length (34)
     // Endpoint 0x81: interrupt IN, 64 bytes, every 5 ms
     0x07, TUSB_DESC_ENDPOINT, 0x81,

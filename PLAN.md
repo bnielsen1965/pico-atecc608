@@ -1,10 +1,87 @@
 # Plan: FIDO2 example — passkey authenticator
 
-**Current state: Phase 1 CODE is DONE + committed (`0979244`), but the
-bench acceptance is BLOCKED on two stacked device-side issues
-(2026-10-28, paused mid-debug; resume checklist at the end of this
-section). Phase 2 (CBOR + CTAP core + GET_INFO) is ON HOLD until the
-key enumerates and the host can talk to it.** Phase 1 code landed:
+**Current state (2026-10-29, post-cleanup + commit): the usbhid -22
+is ROOT-CAUSED, FIXED, and FULLY BENCH-VERIFIED end-to-end — round 6
+clean replug (the kernel's live probe succeeded: SET_IDLE ACKed,
+GET_DESCRIPTOR served the 34-byte report in ONE attempt, dmesg shows
+the `hid-generic ... hiddev99,hidraw7: USB HID v1.11 Device` bind
+with NO error, /dev/hidraw7 fresh) AND the final probe run (device 23
++ "detached kernel driver (usbhid)" + every GET_DESC byte exact). The
+UART-silence bug is ROOT-CAUSED + FIXED (`stdio_init_all()`). Both
+permanent fixes + the `bench/` probe tool are now COMMITTED. The probe
+TOOL had protocol bugs along the way (round 5b: GET_DESCRIPTOR sent
+class-typed rt=0xA1 instead of the standard rt=0x81 the kernel uses,
+which also retroactively explains the round-2/4 "baseline STALL"
+results; round 6: SET_IDLE sent 0x04, but Linux's `uapi/linux/hid.h`
+and TinyUSB number the SET_* HID requests 0x09/0x0A/0x0B, not the
+USB-IF table's 0x02/0x04/0x06 — the kernel sends 0x0A). The device
+was never at fault. All temporary instrumentation (B/P/T markers,
+heartbeat, `// DBG-TMP` fork prints) is REMOVED; clean build =
+`/tmp/opencode/fido2-clean-1031.uf2` (md5
+`111109eedbc43b46678a30a6b4c63ddc`; reflash optional — functionally
+identical to the verified fix22 build minus the debug prints).
+NOTE: the fork's `dcd_rp2040.c` has an UNCOMMITTED functional change
+(RP2040 IN-endpoint ping-pong / EPSTATE_PENDING handling; mtime
+2026-09-14 — predates the -22 debugging and is part of the verified
+build). It is NOT bench instrumentation; it was kept (the two true
+DBG-TMP files `usbd.c`/`hid_device.c` were reverted). Decide whether
+to commit it into the fork.
+NEXT: the provisioning side-quest (CTAP is gated off by design —
+`fido_probe.py` can't pass until the chip is provisioned; its
+/dev/hidraw path + 0x00+65-byte framing verified against v7.2
+`usbhid_output_report`), then Phase 2.
+
+**The -22 root cause (the whole multi-round hunt, in one line): the
+HID class descriptor in `fido_hid.c` referenced the report descriptor
+with byte `0x21` (the HID descriptor type) instead of `0x22` (the
+REPORT descriptor type).** Kernel 7.2's `usbhid_parse` (verified
+against the v7.2 source, `/tmp/opencode/hid-core-7.2.c`) reads the HID
+class descriptor from the *cached* config descriptor — in memory, zero
+USB traffic — and only adopts `wDescriptorLength` when
+`rpt_desc.bDescriptorType == HID_DT_REPORT (0x22)`; with `0x21` it
+gets rsize=0 → `return -EINVAL` → "can't add hid device: -22" *before
+sending any probe request*. This explains every observation: the fast
+failure ~306 ms after connect (no 5 s control timeouts), the trace log
+showing no probe SETUP ever reach the device (SET_IDLE rt=0x21 /
+GET_DESCRIPTOR rt=0x81 — the kernel never sends them), and the
+baseline raw-libusb probe's SET_IDLE→ACK / GET_DESCRIPTOR→STALL being
+*our own* libusb requests, not the kernel's. Fix in `fido_hid.c`
+(0x21→0x22 + comment; spec + Nitrokey/YubiKey descriptors + the kernel
+check all agree on 0x22); verified present in the built ELF.
+
+Bench round 4 (trace2) also closed the remaining open threads: (a)
+the main loop is ALIVE (500 ms `.` heartbeat keeps flowing after
+mount — the "freeze" hypothesis is dead; `led_tick` runs in the same
+loop, so round 3's "LED off" observation is superseded); (b)
+enumeration was 100% NORMAL — the earlier reading of "corrupted
+SETUP reads / flaky EP0" was a misdecode: wValue 0x0600 =
+GET_DESCRIPTOR *device-qualifier* (type 0x06), and the ×3 pattern is
+the kernel's -EPIPE retry loop against the qualifier we
+intentionally STALL (no device-qualifier descriptor defined); wValue
+0x0200 = GET_DESCRIPTOR *configuration* (type 0x02) with wLen 9/41 =
+the header + full read, exactly as expected. No dpram corruption, no
+EP0 flakiness, nothing else to fix. (c) Provisioning side-quest:
+banner confirmed "ATECC608 not provisioned — provision with the
+console (pico-atecc608) first."
+
+**UART root cause (permanent finding, fixed in `example/fido2/main.c`
+working tree):** the pico-sdk does NOT auto-initialize stdio before
+main — the app must call `stdio_init_all()` (the official hello-world
+does). The console/vault apps got it for free because
+`pico-command-line` calls it (`pico-command-line.c:60`); fido2 links
+no such library, so `clk_uart` never started, GP0/GP1 were never
+routed to UART0, and EVERY printf (even `uart_putc_raw`) was
+silently dropped since the first bench run. Fix: `stdio_init_all()`
+at the top of main (replaces the ad-hoc `uart_init` + pin routing).
+
+**Remaining: bench-verify the -22 fix** (round 5, checklist below).
+The trace2 instrumentation is STILL in the fork (`// DBG-TMP`,
+main-context `printf()`s in `usbd.c` event/SETUP log + `hid_device.c`
+open/GET_DESCRIPTOR dispatch) so the verification round shows the
+kernel's probe requests arriving (SET_IDLE + GET_DESCRIPTOR REPORT)
+and succeeding; remove it all when the bench passes. Do NOT
+re-enable CFG_TUSB_DEBUG. Phase 2 (CBOR + CTAP core + GET_INFO) is ON
+HOLD until the bench passes.** Phase 1 code landed:
 `example/fido2/` — the pure-HID USB security key (2E8A:000B, usage
 page 0xF1D0, two raw 64-byte reports, no report IDs; 34-byte report
 descriptor from TinyUSB's own `TUD_HID_REPORT_DESC_FIDO_U2F`
@@ -25,46 +102,42 @@ warning-clean.
 `burnin`; Pico at USB `5-1.4.1`; `ttyUSB0` = UART0 capture (verified
 working with the console app). Two stacked problems:
 
-1. **Kernel `usbhid` rejects the interface: `can't add hid device:
-   -22`** (no `/dev/hidraw*`; `lsusb -d 2e8a:000b` itself is OK).
-   Raw-libusb ground truth (`bench/fido_desc_probe.c`, run with
-   sudo): `SET_IDLE → ACK`; `GET_DESCRIPTOR(REPORT, len=34) →
-   STALL`; `(REPORT, len=4096) → STALL`; `(HID, len=9) → STALL`.
-   So the class control callback IS reached (SET_IDLE path works)
-   but both GET_DESCRIPTOR paths end in `return false` → usbd.c
-   stalls both EP0 IN and OUT. The -22 is -EINVAL from
-   `hid_add_device()` (drivers/hid/hid-core.c:2980 via
-   `usbhid_parse`); parse failures log only via `dbg_hid`
-   (debug-only), which is why dmesg looked silent. Kernel v7.2.13
-   sources were fetched to `/tmp/opencode/{usb72_hid-core.c,
-   core72_hid-core.c}` (may be gone — refetch from gregkh/linux tag
-   via raw.githubusercontent.com; kernel.org is Anubis-protected).
-   Static analysis ELIMINATED: descriptor constants, EP0 buffer
-   size, SETUP dispatch (SET_IDLE proves routing to
-   `hidd_control_xfer_cb`), `dcd_edpt_xfer` (rp2040 port returns
-   true unconditionally), and all static descriptor checks
-   (bLength=9, report size 34, wTotalLength=41, `_Static_assert`).
-   REMAINING SUSPECTS: `p_hid->hid_descriptor == NULL` in the HID
-   branch and something preventing the REPORT branch from arming —
-   i.e. `hidd_open` (hid_device.c:223) not fully applied, a runtime
-   state issue invisible to static analysis. NOTE:
-   `get_index_by_itfnum` returns 0xFF on mismatch but the BSS
-   default `itf_num=0` coincidentally matches interface 0, so a
-   failed open is masked for class requests.
+1. **RESOLVED (2026-10-29): kernel `usbhid` rejects the interface:
+   `can't add hid device: -22`.** Root cause: the report-descriptor
+   reference byte in the HID class descriptor was `0x21` instead of
+   `0x22` (see "The -22 root cause" in Current state). Fixed in
+   `fido_hid.c` (uncommitted, permanent — commit with the bench
+   pass). The -22 is -EINVAL from `hid_add_device()` via
+   `usbhid_parse` — which in kernel 7.2 does the descriptor
+   validation IN MEMORY from the cached config (no USB requests),
+   which is why dmesg was silent (parse failures log only via
+   `dbg_hid`) and no probe SETUP ever reached the device. Kernel
+   v7.2 sources fetched to `/tmp/opencode/hid-core-7.2.c` (+
+   `hidid-7.2.h` attempt, `usb-7.2.h`; kernel.org is
+   Anubis-protected — use raw.githubusercontent.com, tag `v7.2`).
+   The baseline raw-libusb probe results (SET_IDLE→ACK,
+   GET_DESCRIPTOR→STALL) were our own libusb requests — the kernel
+   never issued them. RESOLVED (round 5b): those GET_DESCRIPTOR
+   STALLs were the probe's own bug — it sent rt=0xA1 (CLASS type)
+   instead of rt=0x81 (STANDARD, as the kernel does), and hidd
+   correctly STALLs class-typed GET_DESCRIPTOR; its "SET_IDLE" was
+   really a zero-length SET_REPORT (0x02), harmlessly ACKed. The
+   device was never at fault. Whether the kernel's own (rt=0x81)
+   GET_DESCRIPTOR succeeds at enumeration is what the next clean
+   replug run settles.
 
-2. **The fido2 firmware prints NOTHING on UART0** — not even a raw
-   `uart_putc_raw(uart0, 'B')` placed before any USB/ATECC code.
-   The console app prints fine on the same `ttyUSB0` wiring; the
-   terminal's own echo (space/CR) works, so the bridge and the
-   RX direction are alive — the pico→host TX direction is dead.
-   fido2 CMakeLists: `pico_enable_stdio_uart(1)` only; console:
-   stdio_usb + stdio_uart + pico-command-line + pico-littlefs +
-   pico_multicore. `LIB_PICO_STDIO_UART=1` IS in fido2's compile
-   defines, so `stdio_uart_init()` should run via
-   `stdio_init_all()` before main — yet a raw write is lost, which
-   means either UART0 was never configured (stdio-uart driver path
-   in the fork's `src/rp2_common/pico_stdio_uart/stdio_uart.c`),
-   `clk_uart` is off, or the flash never landed.
+2. **RESOLVED (2026-10-29): UART0 silence** — the fido2 app never
+   called `stdio_init_all()`. The pico-sdk does NOT auto-initialize
+   stdio before main (verified against official 2.3.1: identical
+   `stdio.c`, no startup hook anywhere in the SDK; the official
+   hello-world calls `stdio_init_all()` in main). The console/vault
+   apps got it for free via `pico-command-line`
+   (`pico-command-line.c:60`); fido2 links no such library, so
+   `clk_uart` never started and GP0/GP1 were never routed to UART0 —
+   every printf (even raw `uart_putc_raw`) was silently dropped since
+   the first bench run; the Phase 1 banner was dead code on hardware.
+   Fix in the working tree: `stdio_init_all()` at the top of main;
+   diag-build bench run confirmed B/P/T + banner now print.
 
    **Do NOT re-enable `CFG_TUSB_DEBUG` in this fork.** A
    `CFG_TUSB_DEBUG=3` build killed USB enumeration entirely (no
@@ -76,49 +149,223 @@ working with the console app). Two stacked problems:
    handling in `tud_task`, app code) is safe; only the DCD IRQ-path
    logging is poison.
 
-**Uncommitted working tree (all temporary except bench/):**
-- `example/fido2/main.c`: TEMPORARY instrumentation — gpio25 on +
-  raw `'B'` at main entry, `'P'` after the first printf, `'T'`
-  after `fido_hid_init()`; `#include "hardware/uart.h"`. Remove when
-  the bench passes.
+**Prepared bench builds (2026-10-29, in /tmp/opencode/):**
+- `fido2-fix22-0808.uf2` (90112 B, md5
+  `6ecd120454f5d16f9b82ada600d062c7`): **the build to flash next** —
+  the descriptor fix (HID class descriptor report-type byte 0x21→0x22)
+  on top of trace2 (all round-3/4 `// DBG-TMP` instrumentation
+  retained for the verification log). ELF checked: the fixed 9-byte
+  HID descriptor `09 21 11 01 00 01 22 22 00` is present, the old
+  `... 21 22 00` byte sequence is gone.
+- `fido2-trace2-0645.uf2` (90112 B, md5
+  `07274c97067de4873bd1a55565835d26`): trace build + the round-3
+  freeze instruments (all `// DBG-TMP`):
+  - NEW `usbd.c tud_task_ext`: EVERY DCD event is logged before
+    processing — event ID (1=bus_reset, 2=unplugged, 3=sof,
+    4=suspend, 5=resume, 7=xfer_complete) and for SETUP_RECEIVED the
+    full setup (bmRequestType/bRequest/wValue/wIndex/wLength). This
+    is the request log: which SETUPs actually arrive, and whether the
+    loop keeps running after the last one.
+  - NEW `main.c`: raw `.` heartbeat on UART0 every 500 ms from the
+    main loop (dot stops = main loop frozen; dots continue = loop
+    alive, problem is on the USB side).
+  - Carried over: `stdio_init_all()` fix + B/P/T markers; `usbd.c`
+    `configuration_reset` + `driver->open` results +
+    `SET_CONFIGURATION FAILED`; `hid_device.c` `hidd_open`
+    entry/FAIL/OK + `hidd_control_xfer_cb` GET_DESCRIPTOR dispatch +
+    state dump.
+  Superseded: `fido2-trace-0619.uf2` (`fb2e4968...`), baseline
+  `67420184...`, diag `666f7ca3...`.
+
+**Uncommitted working tree:**
+- `example/fido2/fido_hid.c`: the PERMANENT -22 fix (HID class
+  descriptor report-type byte 0x21→0x22 + comment). Commit with the
+  bench pass.
+- `example/fido2/main.c`: the PERMANENT `stdio_init_all()` fix +
+  TEMPORARY B/P/T raw markers + TEMPORARY 500 ms `.` heartbeat in the
+  main loop (all `// DBG-TMP`). Remove the markers/heartbeat when the
+  bench passes.
+- Fork `/home/burnin/Projects/pico-sdk` `lib/tinyusb`: TEMPORARY
+  `// DBG-TMP` printf instrumentation in `src/device/usbd.c` and
+  `src/class/hid/hid_device.c` (+ `#include <stdio.h>` in both).
+  Remove after the -22 is root-caused.
 - `bench/` (untracked): `fido_desc_probe.c` (raw-libusb
   SET_IDLE/GET_DESCRIPTOR probe, builds on bench with libusb-1.0)
   and `fido_probe.py`. Commit both with the bench-pass.
 - `example/fido2/tusb_config.h`: clean — the temporary
   `CFG_TUSB_DEBUG 3` define is already removed; no diff.
-- Last built uf2: `build/example/fido2/pico-atecc608-fido2.uf2`,
-  84992 bytes (no debug logging, has B/P/T markers).
 
-**Resume checklist (in order):**
-1. **Prove the flash landed.** "LED on" is NOT a build fingerprint:
-   the old provisioned build also leaves GP25 steady. The lone `B`
-   character is the fingerprint — and it never appeared. Check the
-   copied uf2's size/md5 on the bench side; or add a fast LED blink
-   until the main loop is entered (new build blinks, old build
-   steady) and reflash.
-2. **If flash is proven and still no `B`:** decisive experiment —
-   call `uart_init(uart0, 115200)` explicitly at the top of main()
-   before the raw `'B'`. If `B` then appears, the SDK stdio-uart
-   init was skipped for this link set (dig: fork's
-   `pico_stdio/stdio.c` driver registration, and whether linking
-   `pico_stdio_usb` in the console app — which compiles to a
-   `#warning` stub here — changes `stdio_init_all()` behavior); if
-   `B` is still missing, suspect `clk_uart`/hardware.
-3. **Once UART works:** report which of B/banner/P/T appear (B only
-   → hang in ATECC608 I2C probe; all → main loop running) plus
-   `lsusb | grep 2e8a` (is the key back on the bus?).
-4. **GET_DESCRIPTOR STALL (the original -22):** trace with
-   main-context-only instrumentation — add targeted `printf()`s to
-   the fork's `hid_device.c` (`hidd_open`, `hidd_control_xfer_cb`:
-   dump itf_num, hid_descriptor pointer, report_desc_len) and
-   `usbd.c` dispatch. Keep `CFG_TUSB_DEBUG` at 0. (Alternative:
-   GPIO pin toggles on a logic analyzer, or a RAM ring buffer
-   flushed on a host command.) Fix, rebuild, reflash, re-run
-   `sudo ./bench/fido_desc_probe` then `sudo python3
-   bench/fido_probe.py`.
-5. **When the bench passes:** remove the B/P/T instrumentation +
-   uart include from `main.c`; commit `bench/`; update this section
-   → Phase 2.
+**Bench round 2 results (2026-10-29, DONE):** 1) BOOTSEL enumerates
+(mass storage) — bench USB path healthy; the earlier total silence
+was bench-side. 2) Baseline reproduced the pause state (lsusb OK,
+usbhid -22). 3) Diag build: fast blink + B/P/T + banner on UART0,
+device enumerates, usbhid -22 as before, LED slow-blinks.
+
+**Bench round 3 results (2026-10-29, DONE — trace build):** banner +
+"P" + "ATECC608 not provisioned — provision with the console
+(pico-atecc608) first." (provisioning side-quest: full banner
+confirmed, still unclear WHICH sub-check failed — probe /
+config-locked / identity slot 2) + "T". Then: `configuration_reset`
+x2 (both BEFORE the open — no post-open wipe), `hidd_open OK:
+hid_desc=10009E02 report_len=34 ep_in=0x81 ep_out=0x01`,
+`set_config: drv open -> drv_len=32 (remaining=32, itf_class=0x03)`
+(driver name prints empty — `DRIVER_NAME` is NULL without
+`CFG_TUSB_DEBUG`, expected), `fido2: USB enumerated (HID interface
+mounted)`. THEN: total silence — no further DBG lines (no
+GET_DESCRIPTOR dispatch ever reached the class driver), and the LED
+is OFF + not blinking (round 2's diag build slow-blinked in the same
+unprovisioned state). Working hypothesis: the main loop (or its
+USB-event supply) FREEZES right after the mount event — new failure
+mode vs the pause state. The trace2 build (heartbeat `.` + full
+event/SETUP log) splits the hypothesis: dots stop → loop frozen in
+`tud_task` (last logged event says where); dots continue → loop
+alive, DCD stopped delivering events (check host dmesg).
+
+**Bench round 4 results (2026-10-29, DONE — trace2 build):**
+1. Full UART0: banner + "not provisioned" text + T, then the full
+   enumeration trace. Key facts: the main loop is ALIVE (`.`
+   heartbeats keep flowing — 27 dots ≈ 13.5 s after mount); `hidd_open
+   OK` + mount as before; after mount the last SETUP is a string
+   re-read (0x0303, completes), then ONLY dots — no probe SETUPs
+   (SET_IDLE / GET_DESCRIPTOR) ever arrived.
+2. dmesg: clean enumeration (`2e8a:000b`, strings OK), `usbhid
+   5-1.4.1:1.0: can't add hid device: -22` ~306 ms after the
+   enumeration start — too fast for any control timeout ⇒ the kernel
+   failed IN MEMORY, before sending probe requests.
+3. Decoded the SETUP log correctly (the earlier "corruption" reading
+   was wrong — wValue high byte = descriptor TYPE): 0x0100 = device
+   desc; 0x0600 wLen=10 ×3 = device-QUALIFIER request (type 0x06)
+   STALLed by us (none defined) with the kernel's standard -EPIPE
+   retry loop; 0x0200 wLen=9/41 = configuration descriptor header +
+   full read (type 0x02) — all normal; strings 0/2/1/3 normal; the
+   two bus resets pre-date SET_ADDRESS (harmless). Enumeration was
+   100% normal; no EP0/dpram problem.
+4. Read kernel 7.2's `usbhid_parse` (v7.2 source fetched): the HID
+   class descriptor is validated from the cached config in memory;
+   `rsize` is only adopted when `rpt_desc.bDescriptorType == 0x22`;
+   ours was 0x21 ⇒ rsize=0 ⇒ `return -EINVAL` ⇒ -22, zero USB
+   traffic. ROOT CAUSE = the 0x21/0x22 typo in `fido_hid.c`.
+
+**Bench round 5b results (2026-10-29, DONE — probe re-run):**
+ 1. `fido_desc_probe` (rebuilt with kernel-driver detach/reattach):
+    `SET_IDLE n=0 (ok)` but all three GET_DESCRIPTORs →
+    LIBUSB_ERROR_PIPE (STALL); NO "detached kernel driver" line →
+    NO kernel driver attached to the interface right now (usbhid
+    is NOT bound).
+ 2. UART log during the run (device side): `SETUP rt=0x21
+    req=0x02 wLen=0` + event 7 (xfer complete); then the three
+    GET_DESCRIPTOR SETUPs (rt=0xA1, wValue 0x2200/0x2200/0x2100)
+    with NO hidd prints and NO completions → STALLed in hidd's
+    class-request path (GET_DESCRIPTOR is not a HID class request).
+ 3. ROOT CAUSE of the probe failures: the PROBE was wrong (our bug,
+    written in round 2): (a) its "SET_IDLE" used bRequest=0x02 —
+    that is HID_SET_REPORT (zero-length, harmlessly ACKed);
+    HID_SET_IDLE is 0x04, which is what the kernel's `hid_set_idle`
+    sends. (b) its GET_DESCRIPTOR used rt=0xA1 (CLASS); the
+    kernel's `hid_get_class_descriptor` sends it as a STANDARD
+    request, rt=0x81 (`USB_RECIP_INTERFACE|USB_DIR_IN`) — the USB
+    spec agrees GET_DESCRIPTOR is standard. TinyUSB's hidd answers
+    GET_DESCRIPTOR only in its standard branch (verified in the
+    fork's `hid_device.c`: `HID_DESC_TYPE_REPORT`=0x22 →
+    `tud_hid_descriptor_report_cb` → `s_report_desc`, no gating),
+    so a class-typed GET_DESCRIPTOR is correctly STALLed.
+    This retroactively explains the round-2/4 "baseline STALL"
+    results too: the probe was never a faithful kernel replay.
+ 4. Probe fixed: SET_IDLE bRequest 0x02→0x04; GET_DESCRIPTOR rt
+    0xA1→0x81 (all three). Rebuilt on the bench.
+ 5. Kernel 7.2 probe sequence, exactly (from the fetched
+    `usbhid_parse` + `include/uapi/linux/hid.h`): `hid_set_idle` =
+    rt=0x21 req=**0x0A** wValue=0x0000 wIndex=0 wLen=0 (result
+    ignored). NOTE the numbering: Linux's `uapi/linux/hid.h` (and
+    TinyUSB's `hid.h`) define the SET_* HID requests as
+    0x09/0x0A/0x0B, NOT the USB-IF table's 0x02/0x04/0x06 — the
+    kernel sends 0x0A and a 0x04 is STALLed by hidd. Then
+    `hid_get_class_descriptor` = rt=0x81 req=0x06 wValue=0x2200
+    wIndex=0 wLen=34, retried up to 4× while the answer is short;
+    a STALLed fetch surfaces as "can't add hid device: -32"
+    (EPIPE) in dmesg via `usbhid_probe`.
+
+**Bench round 6 results (2026-10-29, DONE — clean replug: PASS at
+the USB/HID level):**
+ 1. Full UART log since the plug: banner + P + "not provisioned" +
+    T; enumeration 100% normal (device desc, SET_ADDRESS 7,
+    qualifier ×3 STALLed as designed, config header + full, strings
+    0/2/1/3); `hidd_open OK: hid_desc=10009EDA report_len=34
+    ep_in=0x81 ep_out=0x01`; mount. THEN the kernel's probe,
+    exactly as predicted: `SETUP rt=0x21 req=0x0A wValue=0x0000
+    wLen=0` + event 7 (SET_IDLE ACKed by hidd's 0x0a case), then
+    `SETUP rt=0x81 req=0x06 wValue=0x2200 wIndex=0x0000 wLen=34` →
+    `DBG: hidd_ctrl` + `DBG: GET_DESCRIPTOR(type=0x22) ...
+    report_len=34 wLength=34` + data-complete + status-complete
+    events, ONE attempt (no retries). (The extra `hidd_ctrl`
+    prints without a type-line are the DATA/ACK stages re-invoking
+    the class cb — the line-298 print is stage-agnostic.)
+ 2. dmesg: CLEAN — `hid-generic 0003:2E8A:000B.000A: hiddev99,
+    hidraw7: USB HID v1.11 Device [Raspberry Pi Pico ATECC608 FIDO]
+    on usb-0000:12:00.4-1.4.1/input0`; NO "can't add hid device"
+    at all. usbhid bound; `/dev/hidraw7` is ours (fresh
+    timestamp).
+ 3. Probe (rebuilt binary): `GET_DESC(REPORT) len=34` → the exact
+    34-byte report descriptor
+    `06 D0 F1 09 01 A1 01 09 20 15 00 26 FF 00 75 08 95 40 81 02
+    09 21 15 00 26 FF 00 75 08 95 40 91 02 C0`; len=4096 → 34;
+    `GET_DESC(HID) len=9` → `09 21 11 01 00 01 22 22 00` (the
+    fixed 0x22 in byte 8). SET_IDLE showed n=-9 (PIPE): that
+    binary sent 0x04 (the USB-IF value) — STALLed, because
+    Linux/TinyUSB number SET_IDLE = 0x0A (round 5b item 5). Probe
+    fixed to 0x0A and rebuilt.
+    NOTE: that probe run printed "device 22" with NO "detached"
+    line — it evidently ran against the OLD (pre-replug, unbound)
+    device; its GET results are still valid (same firmware, and the
+    kernel's own fetch on device 23 proved the same path). The
+    final probe run (checklist step 3) should print device 23 +
+    the detach line.
+ 4. VERDICT: the -22 is FULLY bench-verified — the kernel fetched +
+    parsed the 34-byte report descriptor and bound usbhid with zero
+    errors; /dev/hidraw7 exists; the descriptor bytes on the wire
+    are exactly right. What remains: final all-green probe run
+    (step 3), the provisioning side-quest (CTAP is gated off by
+    design), then cleanup + commit (step 6).
+
+**Resume checklist (in order, 2026-10-29 post-round-6 revision):**
+1. ~~Flash the fix22 build (`fido2-fix22-0808.uf2`, md5
+   `6ecd120454f5d16f9b82ada600d062c7`)~~ **DONE (round 5): the -22
+   is gone from dmesg.**
+2. ~~Clean replug + full capture~~ **DONE (round 6): PASS** — see
+   "Bench round 6 results": the kernel's probe arrived exactly as
+   predicted (SET_IDLE req=0x0A ACKed; GET_DESCRIPTOR rt=0x81
+   wValue=0x2200 wLen=34 served 34 bytes in one attempt), dmesg
+   clean with the `hid-generic` bind line, /dev/hidraw7 fresh.
+3. ~~Final probe run~~ **DONE: all green.** `sudo
+   ./bench/fido_desc_probe` printed `found ... on bus 5 device 23`,
+   `detached kernel driver (usbhid) from interface 0` (confirms
+   usbhid was bound — the kernel's round-6 fetch succeeded),
+   SET_IDLE ok, `GET_DESC(REPORT) len=34` → the exact 34-byte report
+   descriptor
+   `06 D0 F1 09 01 A1 01 09 20 15 00 26 FF 00 75 08 95 40 81 02
+   09 21 15 00 26 FF 00 75 08 95 40 91 02 C0`, len=4096 → 34 bytes,
+   `GET_DESC(HID) len=9` → `09 21 11 01 00 01 22 22 00`.
+4. **CTAP probe:** `sudo python3 bench/fido_probe.py` (uses
+   /dev/hidraw — the real-host path; its 0x00+65-byte framing
+   verified correct against v7.2 `usbhid_output_report`). Will STILL
+   fail until the chip is provisioned — the app is gated off by
+   design; that's the provisioning side-quest, not a regression.
+5. **Provisioning side-quest (in parallel):** banner confirmed
+   "not provisioned". Check the bench chip's identity key in slot 2
+   via the console app (the startup contract is probe + config
+   locked + identity key slot 2) — fido2 answers nothing (by design)
+   until it passes, which matters for the browser test even now that
+   the -22 is fixed.
+6. ~~Cleanup + commit~~ **DONE.** Removed the B/P/T markers +
+   heartbeat from `main.c` (kept `stdio_init_all()` — the fix),
+   removed ALL `// DBG-TMP` prints from the fork (reverted
+   `usbd.c`/`hid_device.c`; kept the unrelated functional
+   `dcd_rp2040.c` change — see the note in "Current state"), rebuilt
+   clean (`/tmp/opencode/fido2-clean-1031.uf2`), committed
+   `fido_hid.c` + `main.c` + `bench/` + this file. REMAINING (not
+   blocking Phase 2): decide whether to commit the fork's
+   `dcd_rp2040.c` change into the fork (it's a real driver fix, part
+   of the verified build).
 
 Phase 0
 landed:

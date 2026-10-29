@@ -66,9 +66,15 @@ static bool chip_provisioned(void)
 
 int main(void)
 {
-    // The only stdio driver present is UART0 (no stdio-over-USB — the USB
-    // interface is the HID key), and it is enabled by default, so there is
-    // nothing to switch on before the first print.
+    // stdio_init_all() is NOT called before main by the SDK — the app
+    // must call it (the console/vault apps got it for free via
+    // pico-command-line, which calls it; this app does not link that
+    // library). Without it clk_uart never starts and GP0/GP1 are never
+    // routed to UART0, so every printf is silently dropped. The only
+    // stdio driver present is UART0 (no stdio-over-USB — the USB
+    // interface is the HID key).
+
+    stdio_init_all();
 
     printf("pico-atecc608-fido2: ATECC608 FIDO2 authenticator "
            "(Phase 1: CTAPHID transport)\n");
