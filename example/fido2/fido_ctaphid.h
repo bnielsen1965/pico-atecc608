@@ -62,11 +62,12 @@ enum {
     FIDO2_ERR_OTHER           = 0x7F,
 };
 
-// The one CTAP2 status code the transport itself needs (CTAP v2.0 9.1.1);
-// the CTAP layer (Phase 2) uses the full code set in its responses.
+// The CTAP2 status codes the transport itself needs (CTAP v2.1 §8.2;
+// 0x01 is shared with U2FHID); the CTAP layer (Phase 2) uses the full
+// code set in its responses.
 enum {
     FIDO2_CTAP_ERR_OK              = 0x00,
-    FIDO2_CTAP_ERR_INVALID_COMMAND = 0x11,
+    FIDO2_CTAP_ERR_INVALID_COMMAND = 0x01,
 };
 
 // INIT capability flags (CTAP v2.0 8.1.9.1.3).

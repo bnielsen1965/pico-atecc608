@@ -164,3 +164,25 @@ add_executable(test_ctaphid test_ctaphid.c ${MOD_ROOT}/example/fido2/fido_ctaphi
 target_include_directories(test_ctaphid PRIVATE ${MOD_ROOT}/example/fido2)
 target_compile_options(test_ctaphid PRIVATE -Wall -Wextra)
 add_test(NAME test_ctaphid COMMAND $<TARGET_FILE:test_ctaphid>)
+
+# The fido2 example's CBOR codec (example/fido2/fido_cbor.c) is pure C:
+# RFC 8949 known-answer vectors (the same set the spec's appendix uses),
+# the CTAP2 canonical-form rules (shortest encoding, definite lengths,
+# no tags), decode round-trips, and the error paths (truncation,
+# indefinite lengths, non-canonical integers, encoder overflow).
+add_executable(test_cbor test_cbor.c ${MOD_ROOT}/example/fido2/fido_cbor.c)
+target_include_directories(test_cbor PRIVATE ${MOD_ROOT}/example/fido2)
+target_compile_options(test_cbor PRIVATE -Wall -Wextra)
+add_test(NAME test_cbor COMMAND $<TARGET_FILE:test_cbor>)
+
+# The fido2 example's CTAP2 dispatch (example/fido2/fido_ctap.c) is
+# likewise pure C: the 6-byte header validation (length, version,
+# wLength), GET_INFO (the full response map, decoded field by field,
+# plus a hand-computed byte KAT), and the unimplemented-command answer
+# (CTAP1_ERR_INVALID_COMMAND, the spec's MUST).
+add_executable(test_ctap test_ctap.c
+            ${MOD_ROOT}/example/fido2/fido_ctap.c
+            ${MOD_ROOT}/example/fido2/fido_cbor.c)
+target_include_directories(test_ctap PRIVATE ${MOD_ROOT}/example/fido2)
+target_compile_options(test_ctap PRIVATE -Wall -Wextra)
+add_test(NAME test_ctap COMMAND $<TARGET_FILE:test_ctap>)

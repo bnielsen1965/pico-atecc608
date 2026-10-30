@@ -1,6 +1,61 @@
 # Plan: FIDO2 example — passkey authenticator
 
-**Current state (2026-10-30: WINK-LED mystery RESOLVED — the user
+**Current state (2026-10-30, evening: Phase 2 CODE-COMPLETE — host
+tests 7/7 green (test_cbor 167 checks, test_ctap 100 checks, + the 5
+pre-existing), Pico build clean (zero warnings), NOT yet bench-run;
+uf2 = build/example/fido2/pico-atecc608-fido2.uf2 md5
+e1c3e285b1c372cba5cbb0f3ea1f1d0f — REFASH REQUIRED. All Phase 2 work
+is UNCOMMITTED in the working tree. CRITICAL SPEC FIX found while
+prepping the probe extension (needed the exact wire bytes): the CTAP2
+message is NOT a 6-byte header. The spec defines the command as
+`ins (1) | cbor params` and the response as `status (1) | cbor` —
+CTAP v2.0 §6.1 ("All commands are structured as: Command Value (1
+byte) + Command Parameters (variable, optional, CBOR)"), v2.1 §8.1,
+the USB HID binding §11.2.9.1.2 ("DATA = CTAP command byte | DATA+1 =
+n bytes of CBOR encoded data") and the NFC binding §11.3.5.1 ("CTAP
+Command Byte || CBOR Encoded Data") all agree; grepping the full 492KB
+v2.1 body (fetched to /tmp/opencode/ctap21_full.html, extracted to
+ctap21_body.txt) finds NO bVersion/bPackNum/bcch/wLength anywhere.
+The channel is the CTAPHID CID and the length is the CTAPHID BCNT —
+neither appears in the message. The original 6-byte design (bVersion
+bIns bRFU wLength bPackNum) was an unverified hallucination; a real
+browser sending the bare `04` for GET_INFO would have gotten
+INVALID_COMMAND back. Fixed: fido_ctap.c dispatch rewritten (empty
+payload -> 0x03 INVALID_LENGTH; stray params must be one well-formed
+CBOR item, else 0x12 CTAP2_ERR_INVALID_CBOR; unknown ins -> 0x01),
+FIDO_CTAP_HDR_LEN removed from fido_ctap.h, tests rewritten, + bonus
+fix FIDO2_CTAP_ERR_INVALID_COMMAND 0x11 -> 0x01 in fido_ctaphid.h
+(0x11 is CTAP2_ERR_CBOR_UNEXPECTED_TYPE; 0x01 is the spec's
+invalid-command code). The full status table was cross-checked against
+the v2.1 §8.2 text — every code in our enum matches. GET_INFO map
+(10 members, keys verified against the v2.1 GET_INFO table in
+/tmp/opencode/ctap21.txt ~3985–4180): 0x01 versions ["FIDO_2_0"],
+0x03 aaguid = 65f5107f-31a6-4785-9301-6788e10ec776 (uuid4 DEMO value,
+NOT FIDO-registered — a real product must register one), 0x04 options
+{"rk":true,"up":true} (clientPin/uv absent = not supported;
+minPINLength 0x0D MUST be absent without clientPin — correctly
+omitted),
+0x05 maxMessageSize 256, 0x07 maxCredentialCountInList 128, 0x08
+maxCredentialIdLength 64, 0x09 ["usb"], 0x0A algs [-7] (ES256), 0x0E
+firmwareVersion 1, 0x14 remainingDiscoverableCredentials 4 (STATIC for
+now — must become dynamic once the Phase 3 cred DB exists). The plan's
+old member names "aVersion 0x20100"/"algs"/"maxCredentialCount" don't
+exist in the spec; the real keys are 0x0E and 0x14. Total 64 bytes
+(status + 63 CBOR) -> spans TWO CTAPHID packets (57 + 7 data bytes);
+the response path (resp_send) handles continuations, host-tested in
+test_ctaphid. Codec bugs the KATs caught: dec_arg inline values are
+0–23 (not just 0); enc_text was using major 2 (now shared
+enc_string, text=3); skip() multi-byte float advances omitted the
+header byte (0xF8->2, 0xF9->3, 0xFA->5, 0xFB->9); + array/map skip
+count guards for untrusted input. Probe extended with step 4
+(bench/fido_probe.py): 1-byte request `04` in a 0x90 packet, reads
+both response packets, compares the full 64-byte payload against the
+KAT (the same bytes as t_get_info_bytes in tests/test_ctap.c). NEXT
+(user actions): (1) REFASH the uf2, (2) run `sudo python3
+bench/fido_probe.py` (watch the LED on the WINK step), (3) optional:
+browser security-key enumeration. Then commit Phase 2.)
+
+**Prior (2026-10-30: WINK-LED mystery RESOLVED — the user
 confirmed the LED blinks on the `gpio_init()` fix (build
 `c9eb06ce…`); ALL `// DBG-TMP` probes removed, clean rebuild =
 `build/example/fido2/pico-atecc608-fido2.uf2` (md5
@@ -915,19 +970,36 @@ response carried an unexpected 32-B nonce, revisit.) The PIN stretch phase
   channel init (INIT → nonce echo + allocated CID) works. No browser
   yet.
 
-### Phase 2 — CBOR + CTAP core + GET_INFO
+### Phase 2 — CBOR + CTAP core + GET_INFO (DONE 2026-10-30, code
+complete, pending bench)
 
-- **Minimal CBOR codec** (encode + decode): uint, byte string, text
-  string, array, map — the definite-length subset CTAP2 actually uses.
+- **Minimal CBOR codec** (encode + decode): uint, negint, bool, byte
+  string, text string, array, map — the definite-length subset CTAP2
+  actually uses; `skip()` additionally walks floats/tags (any
+  definite-length CBOR) for robustness against untrusted input.
   Hand-rolled, no dependency (same spirit as the vault's pure-C GCM).
-- **Host KATs:** hand-computed fixed vectors + round-trips.
-- CTAP dispatch: 6-byte command header (channel, ins) → handlers, CTAP2
-  status codes.
-- **GET_INFO**: versions `["FIDO_2_0"]`, aVersion `0x20100`, algs
-  `[ES256]`, maxMsgSize 256, maxCredentialCount 4, AAGUID,
-  resident-key flag set.
-- **Bench:** a PC CTAP tool (or the browser's security-key enumeration)
-  sees a valid authenticator.
+- **Host KATs:** hand-computed fixed vectors + round-trips
+  (tests/test_cbor.c, 167 checks).
+- CTAP dispatch (tests/test_ctap.c, 100 checks): the message is
+  `ins (1) | cbor params` — there is NO extra header (spec-verified
+  2026-10-30; the original 6-byte design was wrong — see Current
+  state). Empty payload -> 0x03; unknown ins -> 0x01 (the spec's MUST
+  for an unimplemented command); stray params must be one well-formed
+  CBOR item, else 0x12. Response = `status (1) | cbor`.
+- **GET_INFO** (0x04; 64-byte response = status + 63 CBOR): 0x01
+  versions `["FIDO_2_0"]`, 0x03 aaguid
+  65f5107f-31a6-4785-9301-6788e10ec776 (demo uuid4, unregistered),
+  0x04 options `{"rk":true,"up":true}`, 0x05 maxMessageSize 256, 0x07
+  maxCredentialCountInList 128, 0x08 maxCredentialIdLength 64, 0x09
+  `["usb"]`, 0x0A `[-7]` (ES256), 0x0E firmwareVersion 1, 0x14
+  remainingDiscoverableCredentials 4 (static — make dynamic in Phase 3
+  once the cred DB exists).
+- **Bench (user action):** reflash uf2 (md5
+  e1c3e285b1c372cba5cbb0f3ea1f1d0f), run the extended
+  bench/fido_probe.py — step 4 sends the 1-byte GET_INFO request in a
+  0x90 (CBOR) packet, reads both response packets (57 + 7 data bytes),
+  and byte-compares the 64-byte payload against the KAT; the browser's
+  security-key enumeration should also see a valid authenticator.
 
 ### Phase 3 — MAKE_CREDENTIAL
 

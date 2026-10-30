@@ -13,11 +13,13 @@
 // enumerates over USB but answers nothing, slow-blinks the LED (GP25),
 // and says so on UART0. It never provisions.
 //
-// Phase 1 implements the CTAPHID transport only: INIT (channel
-// allocation/sync), PING echo, WINK (LED), CANCEL (no response), the
-// CTAP2 error table, and the keep-alive plumbing (nothing emits one yet
-// — the CBOR stub returns at once). CTAPHID_CBOR answers status
-// CTAP2_ERR_INVALID_COMMAND until the CTAP layer lands in Phase 2.
+// Phase 2 implements the CTAPHID transport (INIT channel
+// allocation/sync, PING echo, WINK (LED), CANCEL (no response), the
+// CTAP2 error table, the keep-alive plumbing) plus the CTAP2 message
+// layer: GET_INFO (versions/aaguid/options/maxMsgSize/...) over a
+// minimal CBOR codec; every other command code answers
+// CTAP1_ERR_INVALID_COMMAND until its phase lands (MAKE_CREDENTIAL /
+// GET_ASSERTION / RESET in Phases 3-5).
 
 #include <stdio.h>
 
@@ -81,7 +83,7 @@ int main(void)
     stdio_init_all();
 
     printf("pico-atecc608-fido2: ATECC608 FIDO2 authenticator "
-           "(Phase 1: CTAPHID transport)\n");
+           "(Phase 2: CTAPHID + CTAP2 GET_INFO)\n");
 
     atecc608_status_t st = atecc608_init(&s_cfg);
     if (ATECC608_OK != st) {

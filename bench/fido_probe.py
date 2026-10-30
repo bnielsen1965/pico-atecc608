@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""fido_probe.py — Phase 1 bench check for the Pico FIDO2 key.
+"""fido_probe.py — Phase 1 + Phase 2 bench check for the Pico FIDO2 key.
 
-Finds the key by VID/PID (2e8a:000b), then runs the three transport
-checks that Phase 1 promises:
+Finds the key by VID/PID (2e8a:000b), then runs the transport checks
+that Phase 1 promises and the first CTAP2 command from Phase 2:
 
   1. CTAPHID INIT (broadcast) -> the exactly-17-byte response with the
      nonce echoed, an allocated CID (first one is 2), protocol 0x02 and
@@ -10,6 +10,12 @@ checks that Phase 1 promises:
   2. CTAPHID PING on the allocated channel -> the payload echoed back.
   3. CTAPHID WINK (sent 3x, 1 s apart) -> empty responses; the on-board
      LED flickers 600 ms after each, so watch the Pico during the run.
+  4. CTAP2 GET_INFO over CTAPHID_CBOR (0x90): the request payload is a
+     single command byte (0x04 — GET_INFO takes no parameters, CTAP
+     v2.1 §6.4/§8.1); the response is status(1) + CBOR map(63) = 64
+     payload bytes, spanning TWO CTAPHID packets (57 data bytes in the
+     first, 7 in a continuation), byte-for-byte the expected map
+     (versions, aaguid, options, transports, alg ES256, fw 1, 4 slots).
 
 No third-party dependencies (no pyusb/hidapi) — plain /dev/hidraw.
 Run as root, or add a udev rule granting your user access to 2e8a:000b.
@@ -169,8 +175,49 @@ def main():
                 time.sleep(1.0)
         print('      ok (3x empty response — the LED flickered 3x600 ms)')
 
-        print('PASS — Phase 1 transport verified (descriptor-level checks')
-        print('       1 and 2 were done separately: lsusb + report_descriptor)')
+        # --- 4. GET_INFO (CTAP2 — the first real protocol command) --------
+        # The CTAPHID_CBOR (0x90) payload IS the CTAP2 message: one
+        # command byte (0x04 = GET_INFO; it takes no parameters, CTAP
+        # v2.1 §6.4/§8.1) — no extra header. The response is
+        # status(1)=0x00 + the 63-byte CBOR map = 64 payload bytes, which
+        # spans two CTAPHID packets: 57 data bytes in the first (CMD +
+        # BCNT header) and 7 in a continuation (CID + SEQ header, no BCNT).
+        pkt = got_cid + bytes([0x90]) + (1).to_bytes(2, 'big') \
+            + b'\x04' + bytes(56)
+        write_report(fd, pkt)
+        r1 = read_report(fd)
+        if len(r1) != 64:
+            sys.exit(f'GET_INFO: no response ({len(r1)} bytes)')
+        check_error(r1, 'GET_INFO')
+        assert r1[0:4] == got_cid, \
+            'response must come back on the allocated CID'
+        assert r1[4] == 0x90, f'expected CBOR response, cmd={r1[4]:#04x}'
+        bcnt = int.from_bytes(r1[5:7], 'big')
+        assert bcnt == 64, f'GET_INFO payload must be 64 bytes, got {bcnt}'
+        payload = bytearray(r1[7:64])        # first 57 payload bytes
+        r2 = read_report(fd)
+        if len(r2) != 64:
+            sys.exit(f'GET_INFO: no continuation packet ({len(r2)} bytes)')
+        assert r2[0:4] == got_cid, \
+            'continuation must come back on the allocated CID'
+        assert r2[4] == 0x00, f'continuation SEQ must be 0, got {r2[4]:#04x}'
+        payload += r2[5:12]                  # the remaining 7 payload bytes
+        expected = bytes.fromhex(
+            '00aa0181684649444f5f325f30035065f5107f31a6478593016788e10ec776'
+            '04a262726bf5627570f5051901000718800818400981637573620a81260e011404')
+        assert len(payload) == 64
+        if bytes(payload) != expected:
+            print(f'      got      {bytes(payload).hex()}')
+            print(f'      expected {expected.hex()}')
+            sys.exit('GET_INFO: response does not match the expected map')
+        print(f'GET_INFO -> cid={r1[0:4].hex()} status=0x{r1[7]:02x} '
+              f'{bcnt} bytes over 2 packets (57+7)')
+        print('      ok (map matches the 64-byte KAT: versions, aaguid,')
+        print('           options, transports, ES256, fw=1, 4 slots)')
+
+        print('PASS — Phase 1 transport + Phase 2 GET_INFO verified')
+        print('       (descriptor-level checks 1 and 2 were done separately:')
+        print('       lsusb + report_descriptor)')
     finally:
         os.close(fd)
 

@@ -34,6 +34,7 @@
 
 #include "tusb.h"
 
+#include "fido_ctap.h"
 #include "fido_ctaphid.h"
 
 // On-board LED (GP25): status indicator + WINK.
@@ -123,8 +124,11 @@ static char s_serial[17];
 
 // --- state ---------------------------------------------------------------------
 
-static fido2_ctaphid_t s_ctaphid;
-static bool            s_enabled;
+static fido2_ctaphid_t  s_ctaphid;
+// The CTAP2 dispatch context (fido_ctap.h) — Phase 2 is read-only
+// identity data (AAGUID + capabilities); later phases extend it.
+static fido_ctap_ctx_t  s_ctap_ctx;
+static bool             s_enabled;
 
 // WINK is non-blocking: the callback only marks the window; fido_hid_tick
 // drives the LED (tud_task must not be delayed by a blink delay).
@@ -134,20 +138,6 @@ static void led_wink_cb(void *ctx)
 {
     (void)ctx;
     s_wink_until_ms = osal_time_millis() + 600;
-}
-
-// Phase 1 CBOR stub: no CTAP layer yet, so every CTAPHID_CBOR message is
-// answered with the status byte only (CTAP2_ERR_INVALID_COMMAND).
-static void cbor_stub(void *ctx, const uint8_t *req, uint32_t req_len,
-                      uint8_t *resp, uint32_t resp_max, uint32_t *resp_len)
-{
-    (void)ctx;
-    (void)req;
-    (void)req_len;
-    if (resp_max >= 1) {
-        resp[0] = FIDO2_CTAP_ERR_INVALID_COMMAND;
-    }
-    *resp_len = 1;
 }
 
 // The state machine's report sink: one 64-byte IN report to the host.
@@ -299,8 +289,11 @@ void fido_hid_init(bool enabled)
     // 16 hex chars of the Pico's unique ID.
     pico_get_unique_board_id_string(s_serial, sizeof s_serial);
 
+    fido_ctap_ctx_init(&s_ctap_ctx);
     fido2_ctaphid_init(&s_ctaphid);
-    fido2_ctaphid_set_cbor(&s_ctaphid, cbor_stub, NULL);
+    // The real CTAP2 dispatch (Phase 2: GET_INFO; unimplemented command
+    // codes answer CTAP1_ERR_INVALID_COMMAND per the spec's MUST).
+    fido2_ctaphid_set_cbor(&s_ctaphid, fido_ctap_dispatch, &s_ctap_ctx);
     fido2_ctaphid_set_wink(&s_ctaphid, led_wink_cb, NULL);
 
     s_enabled = enabled;
