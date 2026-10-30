@@ -7,8 +7,10 @@ confirmed the LED blinks on the `gpio_init()` fix (build
 `233774d2bddb8745f9bfd11a9afb791f`; reflash optional — functionally
 identical to the verified build minus the debug prints), ctest 5/5.
 The full batch (led_init fix + handler-wipe/reset fix + slot-1 fix +
-spec-corrected probe + regression test + this file) is COMMITTED.
-NEXT: the TinyUSB 0.18/0.21 gitlink decision (see below), then
+spec-corrected probe + regression test + this file) is COMMITTED,
+and the TinyUSB pin is COMMITTED (option (b) — our own
+`lib/tinyusb` submodule at 0.21.0 + `PICO_TINYUSB_PATH`; commit "build: pin TinyUSB 0.21.0 via our own
+submodule", verify line in the TINYUSB DISCUSSION entry). NEXT:
 Phase 2 (CBOR + CTAP core + GET_INFO). 2026-10-29, post-cleanup +
 commit + dcd revert + identity-slot fix): the
 usbhid -22
@@ -262,7 +264,29 @@ pad=1-idle the user should at least see a solid state change at
 boot, which settles polarity. THEN: remove ALL `// DBG-TMP` from
 fido_hid.c, clean rebuild, commit (led_init fix + the reset fix +
 slot-1 fix + probe fixes + tests), TinyUSB gitlink, Phase 2.
-TINYUSB DISCUSSION (USER'S HINT — TALK ABOUT THIS TOMORROW): the
+TINYUSB DISCUSSION — RESOLVED (2026-10-30, user chose option (b)):
+OUR build now pins its own TinyUSB via `PICO_TINYUSB_PATH`.
+`lib/tinyusb` is a git submodule of THIS repo at upstream
+`hathach/tinyusb` tag 0.21.0 (`dae3f9a36` — the same commit the
+fork's working tree had), and the top-level CMakeLists sets
+`PICO_TINYUSB_PATH` to it before `pico_sdk_init()` (the SDK's
+`src/rp2_common/tinyusb/CMakeLists.txt` reads a plain variable
+first, then falls back to `<PICO_SDK_PATH>/lib/tinyusb`; an
+environment `PICO_TINYUSB_PATH` still wins over both). Verified: a
+fresh configure prints `TinyUSB available at
+/home/burnin/Projects/pico-atecc608/lib/tinyusb/hw/bsp/rp2040`,
+the full Pico build is warning-clean (only the documented
+cryptoauthlib ATCA_TA_SUPPORT header noise), ctest 5/5. The
+fork's own gitlink stays as-is (0.18.0 pin, 0.21.0 working tree —
+option (a) was rejected, so no fork change); the fragility it
+represents no longer affects us because we never build against
+`<PICO_SDK_PATH>/lib/tinyusb` anymore. NOTE the built uf2's md5
+changed vs the LED-fix build (`233774d2…` → `e3b485f1…`): the
+pinned source path differs, which lands in the ELF debug info —
+functionally identical (same TinyUSB commit, same app code), no
+reflash needed.
+TINYUSB DISCUSSION (original, superseded by the resolution above):
+the
 fork's `lib/tinyusb` gitlink still pins 0.18.0 (`86ad6e56c`)
 while the working tree is checked out at EXACTLY tag 0.21.0
 (`dae3f9a36`, `git describe` = 0.21.0) — that 0.21.0 state came
@@ -291,10 +315,11 @@ something on our end". Relevance to today's bug: NONE suspected
 this is a durability/build-correctness discussion.
 RESOLVED (2026-10-30): the LED batch (`bench/fido_probe.py` +
 `example/fido2/` slot-1 fix + reset fix + led_init fix +
-`tests/test_ctaphid.c`) is COMMITTED (see Current state). REMAINING
-housekeeping: the fork's tinyusb gitlink 0.18.0 -> 0.21.0 is still
-uncommitted (the TINYUSB DISCUSSION below), and at publish time
-untrack PLAN.md (`git rm --cached` + `.gitignore`). Then Phase 2.
+`tests/test_ctaphid.c`) is COMMITTED, and the TinyUSB pin landed
+(option (b): our own `lib/tinyusb` submodule + `PICO_TINYUSB_PATH` —
+see TINYUSB DISCUSSION). REMAINING housekeeping: at publish time
+untrack PLAN.md (`git rm --cached` + `.gitignore`). Then Phase 2
+(CBOR + CTAP core + GET_INFO).
 
 **The -22 root cause (the whole multi-round hunt, in one line): the
 HID class descriptor in `fido_hid.c` referenced the report descriptor

@@ -17,6 +17,15 @@ endif()
 # Location of the Pico SDK. Override with -DPICO_SDK_PATH=... if you move it.
 set(PICO_SDK_PATH "$ENV{HOME}/Projects/pico-sdk" CACHE PATH "Path to the Raspberry Pi Pico SDK")
 
+# TinyUSB is pinned to OUR checkout, not the SDK's: the app depends on
+# TinyUSB 0.21's device HID behavior (interrupt-OUT data routed to
+# tud_hid_set_report_cb), and the SDK's lib/tinyusb gitlink is a
+# separate pin that can drift under `git submodule update`. The SDK
+# reads PICO_TINYUSB_PATH (a plain variable set before pico_sdk_init
+# wins over its <PICO_SDK_PATH>/lib/tinyusb default), so point it at
+# the submodule we pin at tag 0.21.0.
+set(PICO_TINYUSB_PATH "${CMAKE_CURRENT_SOURCE_DIR}/lib/tinyusb")
+
 include(${PICO_SDK_PATH}/external/pico_sdk_import.cmake)
 
 project(pico-atecc608 C CXX ASM)
