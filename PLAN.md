@@ -1,6 +1,17 @@
 # Plan: FIDO2 example — passkey authenticator
 
-**Current state (2026-10-29, post-cleanup + commit): the usbhid -22
+**Current state (2026-10-30: WINK-LED mystery RESOLVED — the user
+confirmed the LED blinks on the `gpio_init()` fix (build
+`c9eb06ce…`); ALL `// DBG-TMP` probes removed, clean rebuild =
+`build/example/fido2/pico-atecc608-fido2.uf2` (md5
+`233774d2bddb8745f9bfd11a9afb791f`; reflash optional — functionally
+identical to the verified build minus the debug prints), ctest 5/5.
+The full batch (led_init fix + handler-wipe/reset fix + slot-1 fix +
+spec-corrected probe + regression test + this file) is COMMITTED.
+NEXT: the TinyUSB 0.18/0.21 gitlink decision (see below), then
+Phase 2 (CBOR + CTAP core + GET_INFO). 2026-10-29, post-cleanup +
+commit + dcd revert + identity-slot fix): the
+usbhid -22
 is ROOT-CAUSED, FIXED, and FULLY BENCH-VERIFIED end-to-end — round 6
 clean replug (the kernel's live probe succeeded: SET_IDLE ACKed,
 GET_DESCRIPTOR served the 34-byte report in ONE attempt, dmesg shows
@@ -20,16 +31,270 @@ heartbeat, `// DBG-TMP` fork prints) is REMOVED; clean build =
 `/tmp/opencode/fido2-clean-1031.uf2` (md5
 `111109eedbc43b46678a30a6b4c63ddc`; reflash optional — functionally
 identical to the verified fix22 build minus the debug prints).
-NOTE: the fork's `dcd_rp2040.c` has an UNCOMMITTED functional change
-(RP2040 IN-endpoint ping-pong / EPSTATE_PENDING handling; mtime
-2026-09-14 — predates the -22 debugging and is part of the verified
-build). It is NOT bench instrumentation; it was kept (the two true
-DBG-TMP files `usbd.c`/`hid_device.c` were reverted). Decide whether
-to commit it into the fork.
-NEXT: the provisioning side-quest (CTAP is gated off by design —
-`fido_probe.py` can't pass until the chip is provisioned; its
-/dev/hidraw path + 0x00+65-byte framing verified against v7.2
-`usbhid_output_report`), then Phase 2.
+NOTE: the fork's `dcd_rp2040.c` change is IDENTIFIED and REVERTED
+(2026-10-29): it is byte-for-byte pico-usbnet's "RP2040 E15
+deferred-ZLP fix" patch (file blob `00c43c009` == the patch's result
+blob in `patches/tinyusb-rp2040-e15-zlp.patch`, `~/Projects/pico-usbpixels/pico-usbnet`
+commit `5ed82f8`, Sep 14 2026 — our file's mtime is 18:47 that day;
+the fix also lives on branch `fix/rp2040-e15-zlp-sel` in
+`~/Projects/tinyusb`, pushed to github.com/bnielsen1965/tinyusb with
+a `PR_DESCRIPTION.md` written). It fixes two real bugs in TinyUSB
+0.21.0's E15 SOF-resume path (fresh deferred ZLP never resets the
+buffer select; `EPSTATE_ACTIVE` set before arming orphans the
+transfer) — a permanent Bulk-IN TX deadlock on RP2040+E15 (Pi 4 / Pi
+400 hosts). It was INERT in our firmware: the patched block sits in
+`#if CFG_TUSB_RP2_ERRATA_E15`, E15 is RP2040-only ("E15 is fixed with
+RP2350" per TinyUSB's own comment), and the compiled fido2 DCD object
+has no e15 symbols. Reverted to stock 0.21.0 per user decision; the
+rebuild is md5-IDENTICAL to `fido2-clean-1031.uf2` (proof of
+binary-neutrality). REMAINING fork question: the gitlink itself —
+fork HEAD pins tinyusb 0.18.0 (`86ad6e56c`), the working tree is
+0.21.0 (`dae3f9a36`), uncommitted (all current builds already use
+0.21.0).
+NEXT: the user flashed `fido2-slot1-fix.uf2` (md5
+`e7743a06ef3d952b7cc9e3e7878e6aab`) — the provisioning gate is OPEN
+(the device answers CTAP; the slot-1 fix is confirmed live). The first
+`fido_probe.py` run came back "no/bad response" — ROOT-CAUSED: the
+PROBE had protocol bugs, the device was right. It sent INIT to
+CID 0x00000000; the spec reserves channel 0 and requires the
+BROADCAST CID 0xFFFFFFFF for allocation ("SHALL use the broadcast
+channel CTAPHID_BROADCAST_CID (0xFFFFFFFF)" — CTAP v2.1 §11.2.3), so
+the device correctly answered ERROR (cmd 0xBF, bcnt 1, err 0x0B
+INVALID_CHANNEL — the observed `...0000bf00010b...` packet). The
+probe also asserted response cmd bytes WITHOUT the spec's always-set
+high bit (INIT 0x06 not 0x86, PING 0x01 not 0x81, WINK 0x08 not 0x88)
+and expected the allocation response's CID field to be zero (spec: it
+goes out on the broadcast CID; the new CID is inside the 17-byte
+payload). The device's framing was re-verified AGAINST THE SPEC ITSELF
+this round (FIDO CTAP v2.1 PS 2021-06-15, fetched to
+/tmp/opencode/ctap21.html): §11.2.4 packet structure =
+CID(4,BE)|CMD(1, "bit 7 always set")|BCNTH|BCNTL|DATA, continuation
+CID(4)|SEQ(0x00..0x7F)|DATA, max payload 7609 = 64-7+128*(64-5) —
+exactly as `fido_ctaphid.c` implements it (the earlier
+"bMsgType|pkg|wLength|bcID" memory was wrong — that is not in the
+spec). §11.2.9.1.3 INIT response = 17-byte payload nonce(8)|cid(4,BE)
+|proto(1)=0x02|version(3)|caps(1), matching the device byte-for-byte.
+PROBE FIXED (bench/fido_probe.py, working tree), TWO bugs: (1) INIT to
+0xFFFFFFFF, response-CID assert = broadcast, cmd asserts 0x86/0x81/
+0x88, PING/WINK bcnt asserts, + an ERROR-decode helper so a future
+device error prints its code instead of a hex dump. (2) READ shape:
+the probe assumed hidraw returns 0x00+64 — WRONG on this kernel.
+hidraw is ASYMMETRIC for a no-report-ID device, verified against the
+kernel 7.2 source (fetched to /tmp/opencode/hidraw-7.2.c +
+usbhid-7.2.c): WRITE — pass 0x00 + 64; `usbhid_output_report` drops
+the leading 0x00 ("Don't send the Report ID") so the device sees 64
+bytes; READ — `hid_irq_in` passes the wire bytes straight through to
+`hidraw_report_event`, which kmemdups them untouched: the user reads
+the RAW 64-byte report, no prefix. Probe now reads 64 and parses it
+directly. Proof it works: the user's second run printed a 64-byte
+read that decodes to a PERFECT INIT response (CID=FFFFFFFF, CMD=0x86,
+BCNT=17, nonce echoed, allocated CID 4, proto 0x02, fw 1.0.0, caps
+0x0D) — the device is spec-correct, only the probe's read shape was
+wrong. NOTE the CID counter: the three failed runs each completed an
+allocation on the device (CIDs 2, 3, 4 consumed), so the next run
+allocates 5 (replugging the Pico resets CIDs to 2 — USB unmount
+re-inits the state machine). Simulated against the REAL bench
+response bytes + PING/WINK sims — all assertions pass. RESOLVED
+(2026-10-29): the re-run came back ALL GREEN — INIT
+cid=00000002 (the user had re-plugged; the CID counter reset to 2 as
+predicted), proto 0x02, fw 1.0.0, caps 0x0D, PING echo, WINK ok —
+"PASS — Phase 1 transport verified". PHASE 1 IS DONE. ONE open
+observation: the user saw NO LED change during WINK — and was
+watching, guaranteed (a triple-WINK probe run with 3x600 ms of
+flickering still showed nothing; idle LED = solid OFF, consistent
+with an active-low on-board LED + the idle code's gpio_put(25,1)).
+ROOT-CAUSED as a REAL FIRMWARE BUG (2026-10-29): `tud_umount_cb` in
+`fido_hid.c` called `fido2_ctaphid_init()`, whose `memset` zeroes the
+whole state — INCLUDING the cbor/wink handler pointers registered in
+`fido_hid_init()`. TinyUSB 0.21.0's `usbd.c` calls `tud_umount_cb()`
+on `DCD_EVENT_UNPLUGGED` (line 726) and on SET_CONFIGURATION(0)
+(line 1006) — so the FIRST unplug of the Pico wiped the handlers,
+and every re-enumeration since runs with wink_cb = NULL. WINK then
+still answers (send_empty runs regardless) and CBOR still looks fine
+(no-handler fallback == the Phase 1 stub's answer, 0x11) — which is
+exactly why the probe went green while the LED never moved. The
+user's replug before the first green run (CID back to 2) is the
+trigger. FIX (working tree): new `fido2_ctaphid_reset()` in the core
+— resets protocol state (channels, in-flight, CID cursor; allocation
+restarts at 2) but KEEPS the registered handlers; `tud_umount_cb`
+now calls it. Host regression test `t_reset_preserves_handlers`
+(stale in-flight cleared, allocation restarts at 2, WINK hook fires,
+CBOR handler answer 0x00 not the 0x11 fallback, init still a full
+wipe) — ctest 5/5, test_ctaphid now 115 checks. Also (working tree,
+bench only): the probe's WINK step sends THREE WINKs, 1 s apart
+(~3 s of visible flickering — a single 600 ms flicker ends before
+the probe exits). NEW BUILD: `/tmp/opencode/fido2-wink-fix.uf2`
+(md5 `d1aa608b75406b849a556468d9e29bff`) — REFLASH NEEDED this
+time (firmware changed). PAUSED (2026-10-29, user call): the user
+flashed `fido2-wink-fix.uf2` and re-ran the probe watching the
+Pico — the LED STILL NEVER BLINKS (probe passes: INIT/PING/WINK
+ok; idle solid off). The handler-wipe bug was REAL and is fixed
+(worth keeping: it also silently broke the CBOR handler after any
+re-plug), but it is NOT the root cause of the dead WINK LED — or
+not the only cause. Verified before pausing: (1) the fix IS in
+the flashed binary (`fido2_ctaphid_reset` present in the built
+ELF; ELF/uf2 timestamps + md5 match); (2) the main loop is
+correct (`tud_task(); fido_hid_tick(); sleep_ms(1);` — led_tick
+runs every 1 ms); (3) TinyUSB 0.21.0's hid_device.c routes
+interrupt-OUT data to `tud_hid_set_report_cb` (line 410:
+instance, report_id=0, HID_REPORT_TYPE_OUTPUT) — the app's OUT
+callback is the right one for THIS TinyUSB (SET_REPORT control
+also lands there, line 342). OPEN: the callback→window→blink
+chain — either led_wink_cb still isn't firing (then WHY, after
+the fix, on a cold boot where no unplug happened?), or it fires
+but the 600 ms window / 100 ms toggle never reaches the pin.
+DECISIVE EXPERIMENTS FOR TOMORROW (UART0 available — ttyUSB0
+@115200): E1: temporary `printf("wink! now=%lu until=%lu\n")`
+in led_wink_cb + run the probe — prints → the bug is in the
+window/tick path (also print the led_tick branch a couple of
+times); no print → dispatch isn't reaching the callback, print
+s->wink_cb after fido_hid_init and walk the dispatch path.
+E2 (separate LED from USB): blink 3x100 ms unconditionally at
+boot after led_init() — visible → GPIO/clock/main-loop healthy,
+bug is specifically the wink-window path; not visible → deeper
+(pin function, clock, or something else owns GP25). E3 (separate
+the clock in the s_enabled state): temporarily make the
+provisioned-idle branch slow-blink like the unprovisioned one.
+Note: the unprovisioned slow-blink (which proved
+clock+GPIO+led_tick) ran on the SAME code, so those three are
+probably healthy — E1 first.
+E1 BUILT (2026-10-30): `// DBG-TMP` prints, ALL in
+`example/fido2/fido_hid.c` (device-only; `fido_ctaphid.c` and the
+host tests stay clean): (1) every OUT packet in
+`tud_hid_set_report_cb` — `DBG-TMP: out itf= cmd=0x n=`, with the
+dropping gate named (`DROP:itf` / `DROP:not-enabled` / `DROP:len`)
+if any — proves the WINK packet reaches the app at all; (2)
+`led_wink_cb` — `DBG-TMP: wink! now= until=` — proves the dispatch
+reached the callback (the E1 question itself); (3) `led_tick` —
+`DBG-TMP: tick now= wink_until= branch= pin=` every 250 ms,
+bounded to 80 prints (~20 s; branch 0=unprovisioned, 1=wink
+window, 2=idle) — proves the window is seen by the tick and what
+the pin is doing; (4) once in `fido_hid_init` —
+`DBG-TMP: handlers cbor= wink= enabled= led_pin=` — proves the
+hooks are registered. All main-loop context (safe printf; never
+the DCD IRQ path). Build = `build/example/fido2/
+pico-atecc608-fido2.uf2` (89088 B, md5
+`43fdc029c2798afe8e1117c10d87536a`; the /tmp/opencode copies from
+2026-10-29 were wiped by the OS — this is that build + DBG-TMP).
+USER STEPS: flash the uf2 (BOOTSEL), then on the bench:
+`sudo python3 bench/fido_probe.py` while capturing UART0
+(`ttyUSB0` @115200, e.g. `sudo timeout 30 cat /dev/ttyUSB0` in a
+second shell — the probe run is ~6 s so start the capture before
+the probe). READING: "out ... cmd=0x88" lines absent → the WINK
+packets never reach the OUT callback (TinyUSB/EP problem — but
+PING/INIT on the same path passed, so this would be shocking);
+"out cmd=0x88" present but NO "wink!" line → dispatch dropped it
+in `fido_ctaphid.c` (then walk dispatch — check the cid/cmd the
+state machine saw, e.g. the channel wasn't accepted); "wink!"
+present but tick shows branch never 1 or pin never toggles → the
+window/led_tick math; tick shows branch 1 + pin alternating but
+no visible blink → the pin/LED hardware (E2 territory).
+E1 ROUND 1 RESULT (2026-10-30): dispatch is HEALTHY — `out cmd=0x88`
+×3 arrived, `wink! now=… until=now+600` fired ×3 (at now≈41387/
+42399/43411). TWO findings: (1) my `tick` samples had a 80-print/
+20 s budget that EXHAUSTED at now≈19833 — the probe ran ~41 s after
+boot, so the wink window was never sampled (instrumentation bug,
+fixed in the next build: 50 ms sampling while the window is active,
+250 ms idle capped at 400 prints). (2) ANOMALY: in the idle branch
+(br=2) the code does `gpio_put(25,1)` every 1 ms tick, yet
+`pin=gpio_get()` read 0 on every sample. ROOT-READ of the SDK
+(verified in the fork, `src/rp2_common/hardware_gpio/include/
+hardware/gpio.h`): `gpio_get()` reads the PHYSICAL INPUT pad
+(`sio_hw->gpio_in`), NOT the output latch — even on a pin configured
+as an output. `gpio_put` writes the latch via `sio_hw->
+gpio_set/gpio_clr`. So `pin=0` means the PHYSICAL pad on GP25 is
+LOW even though the code drives it HIGH every millisecond. Three
+candidate explanations, distinguished by reading: pad=0 + latch=1 +
+dir=1 + func=GPIO(5) → the output isn't reaching the wire (something
+else owns the pad — a function select someone changed, or a hardware
+pull/drive on the board); pad=0 + latch=0 → a software writer is
+clearing the latch between ticks (no candidate in the app — only
+I2C GP20/21, UART GP0/1, LED GP25 are configured; the ATECC ALERT
+line is NOT wired per docs/BRINGUP.md, killing the open-drain
+hypothesis); dir=0 → someone set the pin back to input.
+E1 ROUND 2 BUILT (2026-10-30): the `tick` sample now prints `pad`
+(input), `latch` (`sio_hw->gpio_out` bit — `gpio_out_get` does not
+exist in this fork, read the SIO alias directly; GP25 is in bank 0
+so the 32-bit `sio_hw->gpio_out` covers it), `dir`
+(`gpio_get_dir`), `func` (`gpio_get_function`; GPIO_FUNC_GPIO = 5),
+at 50 ms during the wink window (catches the 100 ms toggle) and 250
+ms idle (capped 400 prints ≈ 100 s). Build =
+`build/example/fido2/pico-atecc608-fido2.uf2` (89088 B, md5
+`c35d584c795892a32991d1e82d0151c1`). SAME USER STEPS (flash,
+capture ttyUSB0, run the probe); the WINKs now land inside the
+sampling window regardless of when the probe runs.
+E1 ROUND 2 RESULT (2026-10-30): ROOT CAUSE FOUND + FIXED. The
+samples read `latch=1 dir=1 func=31 pad=0` in idle, and during each
+wink window the LATCH toggled 0/1 at exactly the 100 ms cadence
+while the PAD stayed 0. `func=31` = `GPIO_FUNC_NULL` (the fork's
+RP2350 enum: `src/rp2350/hardware_structs/include/hardware/structs/
+io_bank0.h` — 0=HSTX 1=SPI 2=UART 3=I2C 4=PWM 5=**SIO (the GPIO
+function)** 6-8=PIO 10=USB … **0x1f=NULL = the reset default**).
+The pin's function select was never set: `led_init()` (since the
+original Phase 1 commit — checked in git history) calls
+`gpio_set_dir(25, GPIO_OUT)` but NEVER `gpio_set_function`, so the
+pad sits on the NULL function — the SIO output latch works but is
+not routed to the wire, and the pad floats to 0 through the LED
+circuit. The LED could NEVER have lit in any clean build. This also
+retroactively explains the round-2 "LED slow-blinking" observation:
+that was the DIAG build whose temporary "fast blink" instrumentation
+apparently did configure the pin properly (uncommitted, lost) — the
+function select is sticky for the session, so the permanent slow-
+blink then worked; every build after the cleanup had only
+set_dir and the LED died. (The earlier "active-low, idle solid off"
+polarity assumption in the plan was built on this dead-pin
+observation and is now VOID — with a live pin, idle = pad HIGH; if
+the board LED is active-low that stays solid OFF as before, if
+active-HIGH it becomes solid ON. WINK blinks either way.) FIX
+(working tree): `led_init()` = `gpio_init(FIDO2_LED_PIN)` (the
+fork's `gpio_init_mask` sets function SIO + input + clean pad) +
+`gpio_set_dir(..., GPIO_OUT)` — the canonical two-step, with a
+comment recording the bug. The handler-wipe fix (round 1) stands:
+it was a real bug, this was THE dead-LED cause. VERIFICATION
+BUILD (DBG-TMP probes retained for one more round):
+`build/example/fido2/pico-atecc608-fido2.uf2` (md5
+`c9eb06ce120bcb07bcb79c03cb67b5fd`). EXPECTED on the next run:
+idle `br=2 pad=1 latch=1 dir=1 func=5`; wink window `pad`
+alternating 0/1 at 100 ms AND the LED visibly flickering; the
+probe stays all green. If the pad toggles but the user still sees
+no blink (board-level LED circuit), that is E2 — but with
+pad=1-idle the user should at least see a solid state change at
+boot, which settles polarity. THEN: remove ALL `// DBG-TMP` from
+fido_hid.c, clean rebuild, commit (led_init fix + the reset fix +
+slot-1 fix + probe fixes + tests), TinyUSB gitlink, Phase 2.
+TINYUSB DISCUSSION (USER'S HINT — TALK ABOUT THIS TOMORROW): the
+fork's `lib/tinyusb` gitlink still pins 0.18.0 (`86ad6e56c`)
+while the working tree is checked out at EXACTLY tag 0.21.0
+(`dae3f9a36`, `git describe` = 0.21.0) — that 0.21.0 state came
+in via the pico-usbnet work and is UNCOMMITTED in the fork.
+User: "we need to do something on our end to ensure we get
+tinyusb 0.21". Fragility: any `git submodule update` in the fork
+(or a fresh clone) silently reverts to 0.18.0, whose HID OUT
+callback API differs (0.21 routes interrupt-OUT data to
+tud_hid_set_report_cb) — the app would change behavior with no
+version bump anywhere in our repo. Options: (a) commit the
+gitlink bump in the fork (earlier rule was "don't unilaterally
+commit fork changes" — the user is now the one raising it);
+(b) point OUR build at an explicit TinyUSB via
+`PICO_TINYUSB_PATH` — the SDK's documented override
+(`PICO_CMAKE_CONFIG: PICO_TINYUSB_PATH ... default=
+<PICO_SDK_PATH>/lib/tinyusb`, seen in
+src/rp2_common/tinyusb/CMakeLists.txt) — set from our top-level
+CMakeLists or the environment, at a checkout WE pin (a gitlink
+submodule of our repo at tag 0.21.0; note ~/Projects/tinyusb is
+0.21.0+460 with the E15 branch, not stock); (c) at minimum a
+configure-time guard in our repo: read the submodule's
+`git describe` / version.yml and fail the build loudly if it is
+not 0.21.0. (b)/(c) live entirely in our repo — fits "do
+something on our end". Relevance to today's bug: NONE suspected
+(the flashed binary was built from the fork's 0.21.0 tree) —
+this is a durability/build-correctness discussion.
+RESOLVED (2026-10-30): the LED batch (`bench/fido_probe.py` +
+`example/fido2/` slot-1 fix + reset fix + led_init fix +
+`tests/test_ctaphid.c`) is COMMITTED (see Current state). REMAINING
+housekeeping: the fork's tinyusb gitlink 0.18.0 -> 0.21.0 is still
+uncommitted (the TINYUSB DISCUSSION below), and at publish time
+untrack PLAN.md (`git rm --cached` + `.gitignore`). Then Phase 2.
 
 **The -22 root cause (the whole multi-round hunt, in one line): the
 HID class descriptor in `fido_hid.c` referenced the report descriptor
@@ -347,25 +612,64 @@ the USB/HID level):**
    `GET_DESC(HID) len=9` → `09 21 11 01 00 01 22 22 00`.
 4. **CTAP probe:** `sudo python3 bench/fido_probe.py` (uses
    /dev/hidraw — the real-host path; its 0x00+65-byte framing
-   verified correct against v7.2 `usbhid_output_report`). Will STILL
-   fail until the chip is provisioned — the app is gated off by
-   design; that's the provisioning side-quest, not a regression.
-5. **Provisioning side-quest (in parallel):** banner confirmed
-   "not provisioned". Check the bench chip's identity key in slot 2
-   via the console app (the startup contract is probe + config
-   locked + identity key slot 2) — fido2 answers nothing (by design)
-   until it passes, which matters for the browser test even now that
-   the -22 is fixed.
+   verified against v7.2 `usbhid_output_report`, round 6). The gate
+   it was waiting on is FIXED in `fido2-slot1-fix.uf2` (item 5) and
+   the user has flashed it — the device now answers CTAP. First run
+   (2026-10-29): the probe itself was wrong (INIT to CID 0 instead of
+   broadcast 0xFFFFFFFF; cmd-byte asserts missing the spec's high
+   bit; wrong expectation on the response CID field) — the device's
+   INVALID_CHANNEL (0x0B) answer was correct behavior, and the
+   device's framing was re-verified against the FIDO CTAP v2.1 spec
+   text (§11.2.4/§11.2.9.1.3 — see Current state). Second run: the
+   probe's READ shape was also wrong (expected 0x00+64; kernel 7.2's
+   hidraw returns the raw 64-byte report — see Current state), and
+   the 64-byte read it printed was a perfect INIT response. Probe
+   fixed in the working tree (both bugs). **DONE (2026-10-29): ALL
+   GREEN — Phase 1 PASS** (user re-plugged: INIT cid=2 proto 0x02
+   fw 1.0.0 caps 0x0D + PING echo + WINK ok). WINK LED: the
+   transport check passed but the LED never flickered — ROOT-CAUSED
+   as a firmware bug: `tud_umount_cb` → `fido2_ctaphid_init()`
+   memset the registered cbor/wink handlers away on the first
+   unplug (see Current state). FIXED with `fido2_ctaphid_reset()`
+   (state only, handlers kept) + host regression test (115 checks).
+   FLASHED (2026-10-29, `fido2-wink-fix.uf2` md5
+   `d1aa608b75406b849a556468d9e29bff`) — the LED STILL never
+   blinks; the wipe bug was real but not the (whole) cause.
+   PAUSED — see Current state: experiment plan (E1 printf in the
+   wink callback via UART0 first) + the TinyUSB 0.18/0.21
+   gitlink discussion the user flagged.
+5. **Provisioning side-quest — ROOT-CAUSED + FIXED (2026-10-29): a
+   firmware bug, not a chip gap.** The bench chip IS provisioned
+   (the console procedure is complete: config locked, identity key
+   in slot 1, credentials 3-6, spare 12, data zone locked, slot 14
+   locked). The fido2 gate failed because `FIDO2_IDENTITY_SLOT`
+   was 2 — the identity pair's PUBLIC-key-only slot in the agreed
+   layout (`example/common/dev_config.h`), which can never hold a
+   private key (the console's genkey allowlist is 1/3/4/5/6/12, and
+   the data-zone lock now makes writing slot 2 impossible anyway).
+   `atecc608_get_pubkey` recomputes the public key FROM a slot's
+   private key (GenKey mode 0x00), so the check could never pass on
+   any chip provisioned per the agreed layout. Fix (working tree,
+   uncommitted): slot 1 — the private half, the key Phase 2's
+   attestation signs with — + corrected comments; rebuild =
+   `/tmp/opencode/fido2-slot1-fix.uf2` (md5
+   `e7743a06ef3d952b7cc9e3e7878e6aab`). Optional read-only bench
+   confirmation via the console: `lock` (config locked), `prov
+   pubkey 1` (identity private key present — prints the 64-B public
+   point), `prov pubkey 2` (fails — live proof of the old bug),
+   `selftest` (full regression gate vs the agreed locked config).
 6. ~~Cleanup + commit~~ **DONE.** Removed the B/P/T markers +
    heartbeat from `main.c` (kept `stdio_init_all()` — the fix),
    removed ALL `// DBG-TMP` prints from the fork (reverted
-   `usbd.c`/`hid_device.c`; kept the unrelated functional
-   `dcd_rp2040.c` change — see the note in "Current state"), rebuilt
+   `usbd.c`/`hid_device.c`), rebuilt
    clean (`/tmp/opencode/fido2-clean-1031.uf2`), committed
-   `fido_hid.c` + `main.c` + `bench/` + this file. REMAINING (not
-   blocking Phase 2): decide whether to commit the fork's
-   `dcd_rp2040.c` change into the fork (it's a real driver fix, part
-   of the verified build).
+   `fido_hid.c` + `main.c` + `bench/` + this file. (2026-10-29
+   addendum: the `dcd_rp2040.c` change was then identified —
+   pico-usbnet's E15 ZLP patch, byte-identical, inert on RP2350 —
+   and REVERTED to stock 0.21.0; the rebuild is md5-identical. See
+   "Current state".) REMAINING (not blocking Phase 2): the fork's
+   tinyusb gitlink 0.18.0 → 0.21.0 is still uncommitted (working
+   tree shows `M lib/tinyusb`).
 
 Phase 0
 landed:
@@ -568,8 +872,9 @@ response carried an unexpected 32-B nonce, revisit.) The PIN stretch phase
   returns at once with a status byte).
 - **Startup contract (house style, deliberate deviation from the
   examples' auto-provision):** probe the chip; require config zone
-  locked + identity key present (`atecc608_get_pubkey` slot 2,
-  read-only). If not provisioned, the device still enumerates over
+  locked + identity key present (`atecc608_get_pubkey` slot 1 — the
+  identity's PRIVATE half; the original slot-2 check was a bug,
+  fixed 2026-10-29 — slot 2 is public-key-only), read-only).
   USB but the state machine is gated off (answers nothing), the LED
   (GP25) slow-blinks, and UART0 says "provision with the console" —
   **never provision**. USB unmount re-inits the CTAPHID state (fresh
@@ -608,8 +913,11 @@ response carried an unexpected 32-B nonce, revisit.) The PIN stretch phase
   `CTAP2_ERR_CODE_KEYSTORE_FULL`).
 - On-chip **GenKey** → `read_pubkey` → COSE_Key.
 - **Attestation:** statement type `"packed"`, alg ES256, attestationKey =
-  slot 2 public point, `x5c: []` (basic attestation), `sig` = chip Sign
-  by slot 1 over SHA-256(authData ‖ clientDataHash).
+  the identity public point recomputed from slot 1 via `get_pubkey(1)`
+  (slot 2 was meant to store this point, but the bench chip never
+  received it and the data-zone lock makes writing it impossible now;
+  the recomputed point is identical), `x5c: []` (basic attestation),
+  `sig` = chip Sign by slot 1 over SHA-256(authData ‖ clientDataHash).
 - **AAGUID:** fixed 16-byte demo constant (pick a UUID, record it here).
 - **authData:** rpIdHash(32) ‖ flags(UP|AT) ‖ counter(4 BE, the CTAP sync counter —
   read, *not* incremented) ‖ AAGUID(16) ‖ credIdLen(2) ‖ credId ‖ COSE

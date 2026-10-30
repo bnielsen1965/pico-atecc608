@@ -8,16 +8,26 @@ checks that Phase 1 promises:
      nonce echoed, an allocated CID (first one is 2), protocol 0x02 and
      capabilities 0x0D (WINK|CBOR|NMSG).
   2. CTAPHID PING on the allocated channel -> the payload echoed back.
-  3. CTAPHID WINK -> empty response, and the on-board LED flickers for
-     600 ms (watch it).
+  3. CTAPHID WINK (sent 3x, 1 s apart) -> empty responses; the on-board
+     LED flickers 600 ms after each, so watch the Pico during the run.
 
 No third-party dependencies (no pyusb/hidapi) — plain /dev/hidraw.
 Run as root, or add a udev rule granting your user access to 2e8a:000b.
 
-Linux hidraw quirk (why the 0x00 byte below): for a device WITHOUT
-report IDs, hidraw still prepends a report-ID byte, and the kernel's
-usbhid strips the leading 0x00 before the wire — the device sees
-exactly 64 report bytes. Reads come back the same way: 0x00 + 64.
+Wire framing (CTAP v2.0 §8.1.8 / v2.1 §11.2.4): each 64-byte packet is
+CID(4, big-endian) | CMD(1, bit 7 ALWAYS set — e.g. INIT is 0x86) |
+BCNT(2, big-endian, total payload length) | DATA(57). Broadcast INIT
+goes to CID 0xFFFFFFFF (channel 0 is reserved); allocation responses
+come back on the broadcast CID, with the new CID inside the payload.
+
+hidraw is ASYMMETRIC for a device WITHOUT report IDs (verified
+against kernel 7.2 source, drivers/hid/):
+  - WRITE: pass 0x00 + the 64 report bytes (65 total); usbhid's
+    output_report() drops the leading 0x00 ("Don't send the Report
+    ID"), so the device sees exactly 64 bytes.
+  - READ: the raw 64-byte report, NO prefix (hid_irq_in passes the
+    wire bytes straight through to hidraw_report_event, which stores
+    them untouched).
 
 If every read times out but lsusb shows the device: the chip is not
 provisioned (LED slow-blinks) — the app enumerates but answers nothing
@@ -30,6 +40,30 @@ import time
 
 VID, PID = '2e8a', '000b'
 READ_TIMEOUT_S = 1.0
+
+# Spec (CTAP v2.0 8.1.9.1.3 / v2.1 11.2.3): channel 0 is reserved and
+# 0xFFFFFFFF is the broadcast CID; INIT MUST be sent to it. Channel
+# allocation responses also go out on the broadcast CID.
+BROADCAST = bytes.fromhex('ffffffff')
+
+# Error codes as returned in a 1-byte payload of a 0xBF (ERROR) command.
+ERR_NAMES = {
+    0x01: 'INVALID_CMD', 0x02: 'INVALID_PARAM', 0x03: 'INVALID_LENGTH',
+    0x04: 'INVALID_SEQ', 0x05: 'MESSAGE_TIMEOUT', 0x06: 'CHANNEL_BUSY',
+    0x0A: 'LOCK_REQUIRED', 0x0B: 'INVALID_CHANNEL', 0x7F: 'OTHER',
+}
+
+
+def check_error(r, what):
+    """Die with a decoded message if the reply is a CTAPHID ERROR (0xBF)."""
+    if r[4] != 0xBF:
+        return
+    if r[5:7] == b'\x00\x01':
+        err = r[7]
+        sys.exit(f'{what}: device answered ERROR {err:#04x} '
+                 f'({ERR_NAMES.get(err, "UNKNOWN")})')
+    sys.exit(f'{what}: device answered ERROR with unexpected shape: '
+             f'{r[:8].hex()}')
 
 
 def find_hidraw():
@@ -48,11 +82,11 @@ def find_hidraw():
 
 
 def read_report(fd):
-    """Read one IN report: 0x00 prefix + 64 report bytes (65 total)."""
+    """Read one IN report: the raw 64-byte report (no report-ID prefix)."""
     end = time.time() + READ_TIMEOUT_S
     while True:
         try:
-            data = os.read(fd, 65)
+            data = os.read(fd, 64)
             if data:
                 return data
         except BlockingIOError:
@@ -76,17 +110,20 @@ def main():
     try:
         # --- 1. INIT (broadcast) -----------------------------------------
         nonce = bytes(range(1, 9))
-        pkt = bytes(4) + bytes([0x86]) + (8).to_bytes(2, 'big') + nonce + bytes(49)
+        pkt = BROADCAST + bytes([0x86]) + (8).to_bytes(2, 'big') + nonce \
+            + bytes(49)
         write_report(fd, pkt)
         resp = read_report(fd)
-        if len(resp) != 65 or resp[0] != 0:
+        if len(resp) != 64:
             sys.exit(f'INIT: no/bad response ({len(resp)} bytes: {resp.hex()})')
-        r = resp[1:]                                  # the 64-byte report
+        r = resp                                      # the 64-byte report
+        check_error(r, 'INIT')
         got_cid = r[15:19]
         print(f'INIT  -> cid={got_cid.hex()} '
               f'proto={r[19]:#04x} fw={r[20]}.{r[21]}.{r[22]} caps={r[23]:#04x}')
-        assert r[0:4] == bytes(4), 'response must go to the broadcast CID'
-        assert r[4] == 0x06, f'expected INIT response, cmd={r[4]:#04x}'
+        assert r[0:4] == BROADCAST, \
+            f'response must go to the broadcast CID, got {r[0:4].hex()}'
+        assert r[4] == 0x86, f'expected INIT response, cmd={r[4]:#04x}'
         assert r[5:7] == (17).to_bytes(2, 'big'), 'INIT payload must be 17 bytes'
         assert r[7:15] == nonce, f'nonce mismatch: {r[7:15].hex()} != {nonce.hex()}'
         assert r[19] == 0x02, 'protocol must be 0x02'
@@ -98,27 +135,39 @@ def main():
         pkt = got_cid + bytes([0x81]) + (8).to_bytes(2, 'big') + nonce + bytes(49)
         write_report(fd, pkt)
         resp = read_report(fd)
-        if len(resp) != 65:
+        if len(resp) != 64:
             sys.exit(f'PING: no response ({len(resp)} bytes)')
-        r = resp[1:]
+        r = resp
+        check_error(r, 'PING')
         print(f'PING  -> cid={r[0:4].hex()} cmd={r[4]:#04x} '
               f'echo={r[7:15].hex()}')
         assert r[0:4] == got_cid, 'response must come back on the allocated CID'
-        assert r[4] == 0x01, f'expected PING response, cmd={r[4]:#04x}'
+        assert r[4] == 0x81, f'expected PING response, cmd={r[4]:#04x}'
+        assert r[5:7] == (8).to_bytes(2, 'big'), 'PING echo must be 8 bytes'
         assert r[7:15] == nonce, f'PING echo mismatch: {r[7:15].hex()}'
         print('      ok (payload echoed)')
 
-        # --- 3. WINK (watch the LED flicker for 600 ms) --------------------
-        pkt = got_cid + bytes([0x88]) + (0).to_bytes(2, 'big') + bytes(57)
-        write_report(fd, pkt)
-        resp = read_report(fd)
-        if len(resp) != 65:
-            sys.exit(f'WINK: no response ({len(resp)} bytes)')
-        r = resp[1:]
-        print(f'WINK  -> cmd={r[4]:#04x} bcnt={int.from_bytes(r[5:7], "big")}')
-        assert r[4] == 0x08, f'expected WINK response, cmd={r[4]:#04x}'
-        assert r[5:7] == (0).to_bytes(2, 'big'), 'WINK response must be empty'
-        print('      ok (empty response — LED flickering now)')
+        # --- 3. WINK (watch the LED flicker) -------------------------------
+        # Provisioned and idle, the on-board LED is steady (no blink);
+        # each WINK makes it flicker (100 ms on/off) for 600 ms. A single
+        # WINK's flicker ends before this probe exits, so send three,
+        # 1 s apart: ~3 s of visible flickering to actually catch.
+        print('WINK  -> watch the Pico: the LED flickers 600 ms per WINK')
+        for i in range(3):
+            pkt = got_cid + bytes([0x88]) + (0).to_bytes(2, 'big') + bytes(57)
+            write_report(fd, pkt)
+            resp = read_report(fd)
+            if len(resp) != 64:
+                sys.exit(f'WINK {i + 1}: no response ({len(resp)} bytes)')
+            r = resp
+            check_error(r, f'WINK {i + 1}')
+            assert r[0:4] == got_cid, \
+                'response must come back on the allocated CID'
+            assert r[4] == 0x88, f'expected WINK response, cmd={r[4]:#04x}'
+            assert r[5:7] == (0).to_bytes(2, 'big'), 'WINK response must be empty'
+            if i < 2:
+                time.sleep(1.0)
+        print('      ok (3x empty response — the LED flickered 3x600 ms)')
 
         print('PASS — Phase 1 transport verified (descriptor-level checks')
         print('       1 and 2 were done separately: lsusb + report_descriptor)')

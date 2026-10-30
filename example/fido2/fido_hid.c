@@ -164,6 +164,13 @@ static void report_sink(void *ctx, const uint8_t report[FIDO2_REPORT_LEN])
 
 static void led_init(void)
 {
+    // gpio_init, NOT just gpio_set_dir: after reset the pin's function
+    // select is GPIO_FUNC_NULL (31) — the pad is not routed to the SIO
+    // output at all, so set_dir alone leaves a pin whose latch works but
+    // whose wire never moves (the WINK-LED bug, bench-verified 2026-10-30:
+    // latch=1 dir=1 func=31 pad=0). gpio_init sets function SIO (the GPIO
+    // function on RP2350) + input direction + a clean pad config.
+    gpio_init(FIDO2_LED_PIN);
     gpio_set_dir(FIDO2_LED_PIN, GPIO_OUT);
 }
 
@@ -278,8 +285,11 @@ void tud_umount_cb(void)
     printf("fido2: USB unmounted\n");
     // The host's channels die with the connection; start fresh (CID
     // allocation restarts at 2). Safe: all TinyUSB callbacks run in the
-    // main-loop (tud_task) context in this app.
-    fido2_ctaphid_init(&s_ctaphid);
+    // main-loop (tud_task) context in this app. reset, NOT init: the
+    // handlers registered in fido_hid_init must survive a re-plug — with
+    // init, a re-plugged key would answer CTAP but WINK would never reach
+    // the LED and CBOR would silently take the no-handler path.
+    fido2_ctaphid_reset(&s_ctaphid);
 }
 
 // --- public API ------------------------------------------------------------------------

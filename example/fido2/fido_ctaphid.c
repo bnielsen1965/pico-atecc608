@@ -412,6 +412,23 @@ void fido2_ctaphid_init(fido2_ctaphid_t *s)
     s->next_cid = 1;   // first allocation is 2
 }
 
+void fido2_ctaphid_reset(fido2_ctaphid_t *s)
+{
+    // Protocol state only — the registered handlers stay. The USB layer
+    // calls this on every unmount/re-plug (the host's channels die with
+    // the connection); a full init here would clear the cbor/wink hooks
+    // registered at boot, so a re-plugged key would answer CTAP but WINK
+    // would never reach the LED.
+    memset(s->channels, 0, sizeof s->channels);
+    s->next_cid = 1;   // first allocation after a reset is 2
+
+    inflight_clear(s);
+    s->tx_cid         = 0;
+    s->last_keepalive = 0;
+    // msgbuf/respbuf need no wiping: their lengths are cleared above and
+    // every byte is written before it is read.
+}
+
 void fido2_ctaphid_set_cbor(fido2_ctaphid_t *s, fido2_cbor_cb_t cb, void *ctx)
 {
     s->cbor_cb  = cb;

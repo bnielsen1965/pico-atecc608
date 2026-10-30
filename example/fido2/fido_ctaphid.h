@@ -163,7 +163,16 @@ typedef struct {
     void          *wink_ctx;
 } fido2_ctaphid_t;
 
+// First boot: full zero, including the handler hooks (set them with the
+// set_* functions afterwards).
 void fido2_ctaphid_init(fido2_ctaphid_t *s);
+
+// Re-plug / USB unmount: the host's channels die with the connection, so
+// the protocol state (channels, in-flight message, CID cursor) starts
+// fresh and allocation restarts at 2 — but the registered cbor/wink
+// handlers survive. Use this, not init, after boot.
+void fido2_ctaphid_reset(fido2_ctaphid_t *s);
+
 void fido2_ctaphid_set_cbor(fido2_ctaphid_t *s, fido2_cbor_cb_t cb, void *ctx);
 void fido2_ctaphid_set_wink(fido2_ctaphid_t *s, fido2_wink_cb_t cb, void *ctx);
 

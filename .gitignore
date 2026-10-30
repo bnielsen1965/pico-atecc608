@@ -2,3 +2,6 @@ build/
 
 # compiled bench tool (rebuild per bench/README.md)
 bench/fido_desc_probe
+
+# python probe bytecode
+__pycache__/

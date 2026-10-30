@@ -8,8 +8,8 @@
 //
 // Startup contract (house style, deliberately NOT auto-provisioning):
 // probe the chip and require the config zone LOCKED and the identity
-// key present (atecc608_get_pubkey on slot 2 — the FIDO2 attestation
-// private key). If the chip is not provisioned, the app still
+// key present (atecc608_get_pubkey on slot 1 — the device identity
+// private key, the attestation signing half of the 1/2 pair). If the chip is not provisioned, the app still
 // enumerates over USB but answers nothing, slow-blinks the LED (GP25),
 // and says so on UART0. It never provisions.
 //
@@ -40,10 +40,14 @@ static const atecc608_cfg_t s_cfg = {
     .baud    = ATECC608_FAST_BAUD_HZ,
 };
 
-// The FIDO2 attestation key is the existing identity pair (slots 1/2);
-// the on-chip private key in slot 2 must be present for the app to
-// consider the chip provisioned.
-#define FIDO2_IDENTITY_SLOT 2
+// The FIDO2 attestation key is the existing device identity pair: the
+// private half lives in slot 1 (sign-external), the public half in
+// slot 2. The on-chip private key in slot 1 must be present for the
+// app to consider the chip provisioned: get_pubkey recomputes the
+// public key FROM the slot's private key (GenKey mode 0x00), and slot
+// 2 is public-key-only in the agreed layout — it can never hold one
+// (the console's genkey allowlist is 1/3/4/5/6/12).
+#define FIDO2_IDENTITY_SLOT 1
 
 // Startup probe: the chip answers AND the config zone is locked AND the
 // identity key is present.

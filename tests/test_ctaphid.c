@@ -530,6 +530,56 @@ static void t_wink(void)
     CHECK(rep_bcnt(p) == 0);
 }
 
+// reset (the unmount/re-plug path): protocol state starts fresh and the
+// handlers registered at boot survive. With a full init on this path, a
+// re-plugged key answers CTAP but WINK never reaches the hook — the
+// bench bug this test guards against.
+static void t_reset_preserves_handlers(void)
+{
+    fresh();
+    uint32_t cid = do_init(1000, FIDO2_BROADCAST_CID);
+    CHECK(cid == 2);
+
+    uint8_t pkt[FIDO2_REPORT_LEN];
+
+    // A stale in-flight message must not survive the reset either: start
+    // a two-packet PING and reset after only the first packet.
+    uint8_t data[60];
+    for (int i = 0; i < 60; i++) {
+        data[i] = (uint8_t)i;
+    }
+    build_init(pkt, cid, FIDO2_CMD_PING, 60, data, 60);
+    feed(1100, pkt);
+    CHECK(s_nreports == 1);   // INIT response only; PING still in flight
+
+    fido2_ctaphid_reset(&s);
+    s_nreports = 0;
+    s_winks    = 0;
+
+    // Allocation restarts at 2 on the fresh channel table ...
+    uint32_t cid2 = do_init(2000, FIDO2_BROADCAST_CID);
+    CHECK(cid2 == 2);
+
+    // ... and WINK reaches the hook (stale in-flight did not block it).
+    build_init(pkt, cid2, FIDO2_CMD_WINK, 0, NULL, 0);
+    feed(2100, pkt);
+    CHECK(s_winks == 1);
+    CHECK(rep_cmd(s_reports[1]) == FIDO2_CMD_WINK);
+
+    // The CBOR handler survives too: the stub's OK (0x00), not the
+    // no-handler fallback INVALID_COMMAND (0x11).
+    uint8_t st = 0x01;
+    build_init(pkt, cid2, FIDO2_CMD_CBOR, 1, &st, 1);
+    feed(2200, pkt);
+    CHECK(rep_cmd(s_reports[2]) == FIDO2_CMD_CBOR);
+    CHECK(s_reports[2][7] == FIDO2_CTAP_ERR_OK);
+
+    // init, by contrast, is the first-boot full wipe.
+    fido2_ctaphid_init(&s);
+    CHECK(s.cbor_cb == NULL);
+    CHECK(s.wink_cb == NULL);
+}
+
 // CANCEL: no response at all (Chromium does not wait for one).
 static void t_cancel(void)
 {
@@ -761,6 +811,7 @@ int main(void)
     t_cbor();
     t_msg_lock();
     t_wink();
+    t_reset_preserves_handlers();
     t_cancel();
     t_unknown_cmd();
     t_channel_busy();
