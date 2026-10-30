@@ -1,11 +1,30 @@
 # Plan: FIDO2 example — passkey authenticator
 
-**Current state (2026-10-30, evening: Phase 2 CODE-COMPLETE — host
-tests 7/7 green (test_cbor 167 checks, test_ctap 100 checks, + the 5
-pre-existing), Pico build clean (zero warnings), NOT yet bench-run;
-uf2 = build/example/fido2/pico-atecc608-fido2.uf2 md5
-e1c3e285b1c372cba5cbb0f3ea1f1d0f — REFASH REQUIRED. All Phase 2 work
-is UNCOMMITTED in the working tree. CRITICAL SPEC FIX found while
+**Current state (2026-10-30, late evening: Phase 2 BENCH ROUND 1:
+steps 1-3 (INIT/PING/WINK) PASS; GET_INFO failed — the first packet
+arrived perfect (CID, 0x90, BCNT=64, 57 data bytes) but the
+continuation packet never came. ROOT-CAUSED + FIXED: TinyUSB allows
+only ONE IN transfer in flight per endpoint; the state machine emits
+a multi-packet response with back-to-back sink calls from the OUT
+handler, and the old report_sink called tud_hid_report() directly —
+the second call silently failed (endpoint busy: the first report
+still awaits the host's ACK, visible only after the next tud_task)
+and the continuation was dropped. A dropped continuation is
+UNRECOVERABLE: the host never re-requests it (the old comment's
+"the host re-INITs / retries on its own timeouts" was wrong for this
+case). Fix in fido_hid.c (USB glue only; the pure-C state machine is
+untouched): an outgoing-report queue — 129 slots = the full 7609-byte
+message maximum (57 + 128*59 -> 129 packets), 8256 B static RAM
+(trivial on the RP2350's 520 KB); report_sink enqueues,
+fido_hid_tick (which runs after tud_task has seen the host's ACK)
+drains one report per ready endpoint; outq_flush() on umount (queued
+reports reference dead CIDs) and on init. Clean build (zero
+warnings), uf2 = build/example/fido2/pico-atecc608-fido2.uf2 md5
+1c499e548055e0c12e33089c0e6a80fe — REFASH AGAIN + re-run `sudo
+python3 bench/fido_probe.py`. Phase 2 proper is COMMITTED (a3de401);
+the queue fix commits with this update. Host tests were 7/7 green
+when Phase 2 landed (test_cbor 167 checks, test_ctap 100 checks, +
+the 5 pre-existing). CRITICAL SPEC FIX found while
 prepping the probe extension (needed the exact wire bytes): the CTAP2
 message is NOT a 6-byte header. The spec defines the command as
 `ins (1) | cbor params` and the response as `status (1) | cbor` —

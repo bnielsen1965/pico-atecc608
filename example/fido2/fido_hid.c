@@ -140,14 +140,62 @@ static void led_wink_cb(void *ctx)
     s_wink_until_ms = osal_time_millis() + 600;
 }
 
-// The state machine's report sink: one 64-byte IN report to the host.
+// --- deferred IN reports --------------------------------------------------------
+// TinyUSB allows ONE IN transfer in flight per endpoint: a
+// tud_hid_report() while the previous report still awaits the host's ACK
+// fails. The state machine emits a multi-packet response (GET_INFO's
+// 64-byte payload = 2 CTAPHID packets) with back-to-back sink calls from
+// the OUT handler, where only the just-armed first transfer is visible
+// — bench-verified 2026-10-30: the continuation was silently dropped and
+// the host's reassembly timed out. The sink therefore enqueues;
+// fido_hid_tick() (which runs after tud_task() has seen the host's ACK)
+// releases one report per ready endpoint. The queue spans the FULL
+// 7609-byte message maximum (57 + 128*59 -> 129 packets), so no
+// well-formed response can overflow; a drop would only follow a host
+// stalled for >129 ACK intervals, which the spec's message timeouts
+// already treat as a dead transaction.
+#define FIDO2_OUT_QUEUE_MAX 129
+static uint8_t  s_outq[FIDO2_OUT_QUEUE_MAX][FIDO2_REPORT_LEN];
+static uint16_t s_outq_head;   // next slot to write
+static uint16_t s_outq_tail;   // next slot to read
+static uint16_t s_outq_count;
+
+static void outq_push(const uint8_t report[FIDO2_REPORT_LEN])
+{
+    if (s_outq_count < FIDO2_OUT_QUEUE_MAX) {
+        memcpy(&s_outq[s_outq_head], report, FIDO2_REPORT_LEN);
+        s_outq_head = (uint16_t)((s_outq_head + 1u) % FIDO2_OUT_QUEUE_MAX);
+        s_outq_count++;
+    }
+    // else: dropped — see above.
+}
+
+static void outq_flush(void)
+{
+    s_outq_head = 0;
+    s_outq_tail = 0;
+    s_outq_count = 0;
+}
+
+static void outq_drain(void)
+{
+    while (0 != s_outq_count && tud_hid_ready()) {
+        if (!tud_hid_report(0, s_outq[s_outq_tail], FIDO2_REPORT_LEN)) {
+            break;   // cannot happen (ready checked); retry next tick
+        }
+        s_outq_tail = (uint16_t)((s_outq_tail + 1u) % FIDO2_OUT_QUEUE_MAX);
+        s_outq_count--;
+    }
+}
+
+// The state machine's report sink: enqueue one 64-byte IN report for
+// fido_hid_tick() to release (a direct send here would race the
+// endpoint — a dropped continuation is unrecoverable, the host never
+// re-requests it).
 static void report_sink(void *ctx, const uint8_t report[FIDO2_REPORT_LEN])
 {
     (void)ctx;
-    if (!tud_hid_report(0, report, FIDO2_REPORT_LEN)) {
-        // The report was dropped (no host transfer pending). Nothing to
-        // do — the host re-INITs / retries on its own timeouts.
-    }
+    outq_push(report);
 }
 
 // --- status LED ------------------------------------------------------------------
@@ -280,6 +328,8 @@ void tud_umount_cb(void)
     // init, a re-plugged key would answer CTAP but WINK would never reach
     // the LED and CBOR would silently take the no-handler path.
     fido2_ctaphid_reset(&s_ctaphid);
+    // Any queued reports reference this connection's CIDs — dead now.
+    outq_flush();
 }
 
 // --- public API ------------------------------------------------------------------------
@@ -291,6 +341,7 @@ void fido_hid_init(bool enabled)
 
     fido_ctap_ctx_init(&s_ctap_ctx);
     fido2_ctaphid_init(&s_ctaphid);
+    outq_flush();
     // The real CTAP2 dispatch (Phase 2: GET_INFO; unimplemented command
     // codes answer CTAP1_ERR_INVALID_COMMAND per the spec's MUST).
     fido2_ctaphid_set_cbor(&s_ctaphid, fido_ctap_dispatch, &s_ctap_ctx);
@@ -304,6 +355,9 @@ void fido_hid_init(bool enabled)
 void fido_hid_tick(void)
 {
     const uint32_t now_ms = osal_time_millis();
+    if (s_enabled) {
+        outq_drain();
+    }
     fido2_ctaphid_tick(&s_ctaphid, now_ms, report_sink, NULL);
     led_tick(now_ms);
 }
