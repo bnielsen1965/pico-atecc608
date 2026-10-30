@@ -1,6 +1,25 @@
 # Plan: FIDO2 example — passkey authenticator
 
-**Current state (2026-10-30, late evening: Phase 2 BENCH ROUND 1:
+**Current state (2026-10-30, night: PHASE 2 BENCH-VERIFIED —
+fido_probe.py FULL PASS (INIT/PING/WINK + GET_INFO: 64-byte KAT over
+2 CTAPHID packets, byte-for-byte, from the real Linux usbhid
+stack). The IN-report queue fix (5f1502e) is confirmed on the wire.
+Browser check (user): the key appears in Chrome's "Manage security
+keys" with per-key actions — that listing is itself the enumeration
+(CTAPHID INIT + CTAP2 GET_INFO from a real browser), so the Phase 2
+acceptance criterion is met. Button guidance given: "Sign-in data"
+= expect EMPTY (no passkeys registered yet), no error = good;
+"Fingerprints" = fine, mostly local data; "Create a PIN" = expect
+FAILURE (clientPin deliberately absent from GET_INFO — spec-correct
+no-PIN support, no PIN phase planned); "Reset your security key" =
+do NOT click as a test (authenticatorReset INS 0x07, unimplemented
+today, and in the Phase 4 build it would actually wipe the key).
+Phase 2 + fixes are committed (a3de401, 5f1502e); uf2 md5
+1c499e548055e0c12e33089c0e6a80fe is the verified build. NEXT: Phase 3
+(MAKE_CREDENTIAL) — the real end-to-end browser test (register
+passkey #1) waits on it.
+
+**Prior (2026-10-30, late evening: Phase 2 BENCH ROUND 1:
 steps 1-3 (INIT/PING/WINK) PASS; GET_INFO failed — the first packet
 arrived perfect (CID, 0x90, BCNT=64, 57 data bytes) but the
 continuation packet never came. ROOT-CAUSED + FIXED: TinyUSB allows
