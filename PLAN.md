@@ -1,9 +1,171 @@
 # Plan: FIDO2 example — passkey authenticator
 
-**Current state (2026-10-30, late night: PHASE 3 KICKED OFF — `up`
-console command built; browser-verification claim CORRECTED;
-attestation design DECIDED (self/surrogate packed)):**
+**Current state (2026-10-31: PHASE 3 — CHROME GET_INFO FAIL ROOT-CAUSED
++ FIXED in the host build: ReadCTAPGetInfoResponse REQUIRES each
+`algorithms` (0x0A) entry to be a WebAuthn PublicKeyCredentialParameters
+MAP {type:"public-key", alg:int}; we sent a bare int array [-7] →
+`!algorithm.is_map()` → nullopt → Chrome fell back to U2F (the stray
+WINK = needs_explicit_wink_). GET_INFO now sends
+[{"alg":-7,"type":"public-key"}]; 84-byte KATs updated (host tests +
+probe); ctest 7/7; build clean; BENCH PENDING: flash + probe FULL PASS
++ Chrome should now send `90` makeCredential with NO WINK):**
 
+- **CHROME PARSER READ COMPLETE — ROOT CAUSE CONFIRMED + FIXED
+  (2026-10-31, supersedes the "prime suspect" state below):** finished
+  reading ReadCTAPGetInfoResponse (device_response_converter.cc:378-857,
+  Chromium HEAD, re-fetched to /tmp/opencode/chrome-fido/ alongside
+  authenticator_get_info_response.{h,cc} +
+  authenticator_supported_options.h). THE EXACT FAILURE: the 0x0A
+  (algorithms) handler — `for (const auto& algorithm : algorithms) {
+  if (!algorithm.is_map()) return std::nullopt; ... const auto
+  type_it = map.find(CBOR("type")); if (type_it == map.end() ||
+  !type_it->second.is_string()) return std::nullopt; if (type !=
+  "public-key") continue; const auto alg_it = map.find(CBOR("alg"));
+  if (alg_it == map.end() || !alg_it->second.is_integer()) return
+  std::nullopt; ... }` — every entry MUST be a map carrying a string
+  "type" AND an integer "alg" (a WebAuthn PublicKeyCredentialParameters;
+  the CTAP v2.0 spec §5.4/§6.4 agrees: "algorithms — Sequence of
+  PublicKeyCredentialParameters"). Our `0a 81 26` = [-7] dies at
+  `!algorithm.is_map()`. EVERYTHING ELSE in our map verified clean
+  against the parser: key 1 versions (required ✓), key 3 aaguid 16 B
+  (required ✓ — note: I re-confirmed the spec table; aaguid IS 0x03,
+  maxMsgSize IS 0x05; the 0x70/0x71 keying I half-remembered does not
+  apply to this spec), key 4 options {"rk","up"} (known keys, bools ✓),
+  key 5 maxMsgSize uint ✓, keys 7/8 uints ✓, key 9 transports ["usb"]
+  ✓, key 0x0E (our firmwareVersion) simply not read by Chrome (unknown
+  keys ignored), key 0x14 (= decimal 20, our
+  remainingDiscoverableCredentials=4) read as uint ✓; the 0x0f
+  maxCredBlobLength ↔ credBlob-extension XOR consistency check passes
+  (neither present); the PIN-protocol gate is NOT triggered
+  (client_pin_availability defaults kNotSupported — we set no pin keys).
+  So the algorithms object form is the ONLY fix. **FIXED:**
+  fido_ctap.c handle_get_info now emits 0x0A = `81 A2 63 "alg" 26 64
+  "type" 6A "public-key"` (canonical key order alg < type); GET_INFO
+  payload is now 84 bytes (status + 83), still two CTAPHID packets
+  (57 + 27). KATs updated: tests/test_ctap.c (structural +
+  byte-pinned, now 84 bytes), bench/fido_probe.py (bcnt 84, 57+27
+  split, new expected hex). ctest 7/7; Pico build clean; uf2 md5
+  610b75d359047d0d35b02af610682384. **BENCH PENDING (user):** flash
+  that uf2, run `sudo python3 bench/fido_probe.py` (must FULL PASS the
+  new 84-byte KAT), then Chrome Register: EXPECT the WINK GONE and a
+  `90` CBOR makeCredential (INS 0x01) to appear — it will be answered
+  INVALID_COMMAND (0x01) since makeCredential is not yet implemented;
+  that is the expected Phase 3 boundary.
+- **DECISIVE CAPTURE + CHROME ROOT CAUSE (2026-10-30, supersedes the
+  "awaiting a decisive capture" state below):** user flashed md5
+  e531ebb7 and captured the full IN+OUT trace. THREE confirmations:
+  (1) NEW BUILD RUNNING (DBG OUT: present); (2) U2F FIX WORKS — the
+  `83` ENROLL is answered `83 00 02 69 86` (SW_COMMAND_NOT_ALLOWED,
+  spec-correct); (3) CHROME DOES NOT RETRY CTAP2 — the line after the
+  `69 86` is a NEW broadcast INIT (user clicked Register again); no
+  `90` makeCredential ever appears. So the spec's "SHOULD retry using
+  CTAP2" is NOT honored by Chrome 156: after the clean U2F error it
+  abandons. USER QUESTION "is it the web page code?": **NO** — verified
+  the full chain: config.js `authenticatorUserVerification:"required"`,
+  `authenticatorRequireResidentKey:false`,
+  `authenticatorAttachment:"cross-platform"`, `attestation:"direct"`,
+  `cryptoParams:[-7,-257]`; index.js:255-266 passes all through to
+  createFido2Lib; fido2-lib emits authenticatorSelection.userVerification.
+  The page sends clean CTAP2 options. CHROME'S ACTUAL DECISION
+  (device/fido/fido_device.cc, fetched this session): OnDeviceInfoReceived()
+  runs `get_info = response ? ReadCTAPGetInfoResponse(*response) :
+  nullopt; if (!get_info || !get_info->versions.contains(kCtap2)) {
+  supported_protocol_ = kU2f; needs_explicit_wink_ = true; } else {
+  supported_protocol_ = kCtap2; }` — i.e. Chrome goes U2F if the GetInfo
+  PARSER returns nullopt OR versions lacks FIDO_2_0, and sets
+  needs_explicit_wink_=true on that branch. THAT is the stray `88` WINK in
+  our capture (a CTAP2 makeCredential flow has no WINK) — PROOF Chrome took
+  the "device only supports U2F" path. So our 64-byte GET_INFO is failing
+  Chrome's CBOR parser (ReadCTAPGetInfoResponse in
+  device/fido/device_response_converter.cc:378). RULED OUT: (a) continuation
+  framing — CORRECT (5-byte header CID(4)+SEQ(1)+data(59), NO wLength;
+  verified vs CTAP v2.2 spec + yubikit-swift CONT_HEADER_SIZE=5; the
+  continuation data `0a 81 26 0e 01 14 04` lands exactly right in the
+  trace); (b) options map key 4 `{"rk":true,"up":true}` — text keys AND
+  "up" are VALID (CTAP v2.2 "rk/up/uv MUST be understood" + riot-os
+  CTAP_GET_INFO_RESP_OPTIONS_ID_UP="up" + real-device GetInfo dumps); (c)
+  versions key 1 ["FIDO_2_0"] + aaguid key 3 (16 B) — correct; the CBOR is
+  well-formed so cbor::Reader::Read succeeds. PRIME SUSPECT: `algorithms`
+  key 10 — we send `0a 81 26` = [-7] (bare int array) but real devices send
+  [{"alg":-7,"type":"public-key"}] (object array); IF ReadCTAPGetInfoResponse
+  requires the object form and returns nullopt on a bare int, that is the
+  failure. SECONDARY SUSPECT: pinTokenBlobSize key 14 = 1 (unusual; usually
+  64 or absent). **NEXT (resume here):** finish reading
+  ReadCTAPGetInfoResponse (device_response_converter.cc:378; I had reached
+  the options/key-4 bool checks at ~line 597 — still need maxMsgSize key 5,
+  …, algorithms key 10, …, key 14, up to the return at ~line 849) to find
+  the EXACT check that returns nullopt for our bytes; verify the `algorithms`
+  format against the CTAP2 spec (integer array vs object array); then fix
+  fido_ctap.c GetInfo + the KAT (tests/test_ctap.c t_get_info_bytes) +
+  bench/fido_probe.py's expected hex (line ~205), rebuild, host tests +
+  probe MUST stay FULL PASS, then re-bench in Chrome (expect the WINK to be
+  GONE and a `90` makeCredential to appear). Fetched sources this session
+  in /tmp/opencode (may be wiped on resume — re-fetch via
+  `curl -sL https://chromium.googlesource.com/chromium/src/+/HEAD/device/
+  fido/<file>?format=TEXT | base64 -d`): fido_device.cc (OnDeviceInfoReceived),
+  drc.cc (= device_response_converter.cc, ReadCTAPGetInfoResponse at :378),
+  getinfo.cc (= authenticator_get_info_response.cc). Throwaway diagnostic
+  /home/burnin/Projects/fido2-demonstration/public/websafe.html (a minimal
+  self-contained create() page) is now Moot (we know it's Chrome's parser,
+  not the page) but is a valid cross-check; safe to delete.
+- **Follow-up capture + Chromium decision logic (2026-10-30, supersedes
+  the "Chrome falls back to CTAP2" hope in the next bullet):** a second
+  capture STILL shows INIT → GET_INFO → WINK → `0x83` ENROLL and NO
+  `0x90` makeCredential after it — but the IN-only trace can't say what
+  the key ANSWERED the ENROLL (`69 86` fix vs a legacy `bf ..` error)
+  nor even whether the Pico is on the new build at all (the incoming
+  trace is in both builds). The reported HANG (not a clean error)
+  matches a legacy 0xBF reply, i.e. the OLD build — most likely the
+  flash never took. RESOLVED the "why U2F?" question against Chromium
+  source (device/fido/make_credential_task.cc, fetched): Chrome
+  downgrades a CTAP2 MakeCredential to a U2F register ONLY when
+  `CtapDeviceShouldUseU2fBecauseClientPinIsSet()` is true, which needs
+  (a) `userVerification != "required"`, (b) GET_INFO reporting
+  `U2F_V2`, AND (c) clientPin set — to dodge a PIN prompt. OUR device
+  reports none of those (versions=["FIDO_2_0"], options={rk,up}, no
+  clientPin) and the harness config is userVerification "required"
+  (fido2-lib main.js DOES emit authenticatorSelection.userVerification),
+  so per source Chrome SHOULD send CTAP2 makeCredential directly. It
+  does not — a contradiction the capture must settle. NEW BUILD
+  e531ebb7adc67b657cda505f0a8fbd23 adds an OUTGOING report trace (DBG
+  OUT: in outq_drain, main-loop context) next to the incoming one, so
+  the next capture is decisive: DBG OUT: present ⇒ new build; the
+  ENROLL reply's bytes 7-8 show `69 86` (fix) vs `bf ..` (legacy); and
+  a `DBG IN: ... 90` (makeCredential) following it is the win. If Chrome
+  still sends only `83` even on the new build, fall back to a Chrome
+  force-CTAP2 flag and/or a direct CTAP2 (hidraw) makeCredential probe.
+  Host tests 7/7; Pico build clean.
+
+- **Chrome registration hang — ROOT-CAUSED + FIXED (2026-10-30):** the
+  wire capture (bench/fido_watch.py, IN-only) showed every Register click
+  runs INIT ✓ → GET_INFO (64 B) ✓ → WINK ✓ → **`0x83` CTAPHID_ENROLL**
+  (BCNT 0x49 = 73) — a **U2F (CTAP1)** command, NOT a CTAP2
+  makeCredential (which would be `0x90`). The harness calls
+  `navigator.credentials.create()` (real WebAuthn), but Chrome runs the
+  registration through the legacy U2F path; the CTAP2-only key answered
+  the ENROLL with a CTAPHID `ERROR` (0xBF, INVALID_CMD) — a transport
+  error Chrome can't read as "no U2F" — so it waited on a U2F reply that
+  never came (the infinite "insert and touch"). TWEAKING THE HARNESS DID
+  NOT HELP: `config.js` `attestation: "none"→"direct"` left Chrome's wire
+  bytes byte-for-byte identical (still ENROLL) — attestation conveyance
+  is NOT Chrome's lever for U2F-vs-CTAP2. FIX (spec-correct, pure-C
+  fido_ctaphid.c): a CTAP2-only authenticator answers a U2F command with
+  the U2F status word **SW_COMMAND_NOT_ALLOWED (0x6986**, ISO 7816-4
+  "command not allowed"), framed `[SW1|SW2]` on the same command byte
+  (CTAP v2.0 §7.1.2); §7.2 "registration via U2F" says the platform then
+  "SHOULD retry using CTAP2 if present in the versions array" (our
+  GET_INFO reports FIDO_2_0). ROOT of the mislabel: the header had
+  `FIDO2_CMD_MSG=0x03`/`FIDO2_CMD_LOCK=0x04` — but 0x03 IS ENROLL and
+  0x04 IS VERIFY, so the ENROLL hit the bogus "MSG" case. Fixed the
+  command enum to the real CTAPHID set (MSG 0x00, MRK 0x02, ENROLL 0x03,
+  VERIFY 0x04, AUTHENTICATE 0x05, VERSION 0x07; removed the phantom
+  LOCK), added FIDO2_SW_COMMAND_NOT_ALLOWED, and dispatch() now answers
+  all five U2F commands via a new send_u2f_status() instead of
+  send_error(). Host test t_msg_lock → t_u2f_not_allowed (5 checks;
+  test_ctaphid 115 → 117); ctest 7/7; Pico build clean. RISK: Chrome's
+  retry is spec-"SHOULD" not "MUST" — if it doesn't retry, the
+  registration fails with a clean U2F error instead of hanging (the next
+  capture settles it either way).
 - **Phase 2 status, corrected:** the probe (fido_probe.py) is the
   plan's Phase 2 acceptance check ("a PC CTAP tool sees a valid
   authenticator") and it FULL-PASSED, so Phase 2 stands. The browser
@@ -64,17 +226,28 @@ attestation design DECIDED (self/surrogate packed)):**
   signs.
 - **Bench instructions for THIS build:** flash
   build/example/fido2/pico-atecc608-fido2.uf2 (md5
-  a60ce2a7d56747f54f99f10bb9d703f6); open a serial console on
-  /dev/ttyUSB0 @115200; watch the banner (now includes the `up` hint
-  line); type `up` + Enter → expect `fido2: user presence ('up')`;
-  type anything else → the unknown-command hint. Re-run
-  `sudo python3 bench/fido_probe.py` (must stay FULL PASS — GET_INFO is
-  unchanged). The `up` flag itself is consumed only once MakeCredential
-  lands.
-- Committed so far this phase: none yet (this update + the `up`
-  command commit together). Previous verified build uf2 md5
-  1c499e548055e0c12e33089c0e6a80fe (Phase 2). NEXT: MAKE_CREDENTIAL
-  request parsing + the UP-wait/keep-alive transaction flow.
+  610b75d359047d0d35b02af610682384) — it carries the U2F fix, the
+  algorithms-object GET_INFO fix, and the `// DBG-TMP` IN-report trace
+  (fido_hid.c: first 16 bytes of every incoming report — keep it for
+  this round). First `sudo python3 bench/fido_probe.py` (must FULL PASS
+  — note the GET_INFO step now expects 84 bytes over 57+27, and prints
+  the new map). Then open /dev/ttyUSB0 @115200; in Chrome click
+  Register 1-2×; paste back the `DBG IN:` (and `DBG OUT:`) lines.
+  EXPECTED now: NO WINK after GET_INFO (the GetInfo parser accepts us
+  → supported_protocol_ = kCtap2, needs_explicit_wink_ stays false) and
+  a `90` CBOR makeCredential (INS 0x01) appears where the `83` ENROLL
+  used to. makeCredential is not yet implemented, so the key answers it
+  with a CTAP2 INVALID_COMMAND status (0x01 — a clean error, not a
+  hang); that is the expected Phase 3 boundary and the `90` in the log
+  is the confirmation.
+- Committed so far this phase: the `up` command (98fc707), the U2F
+  SW_COMMAND_NOT_ALLOWED fix (e31e40d), and the algorithms-object
+  GET_INFO fix (f1608d5, HEAD). Only the `// DBG-TMP` trace
+  (fido_hid.c) is still UNCOMMITTED (throwaway diagnostic — stripped in
+  the makeCredential pass). NEXT: bench round above (probe FULL PASS +
+  Chrome sends `90`, no WINK), then implement MAKE_CREDENTIAL (request
+  parsing + the UP-wait/keep-alive transaction flow) and strip the
+  `// DBG-TMP` trace in the same pass.
 
 **Prior (2026-10-30, late evening: Phase 2 BENCH ROUND 1:
 steps 1-3 (INIT/PING/WINK) PASS; GET_INFO failed — the first packet
@@ -1092,19 +1265,22 @@ complete, pending bench)
   state). Empty payload -> 0x03; unknown ins -> 0x01 (the spec's MUST
   for an unimplemented command); stray params must be one well-formed
   CBOR item, else 0x12. Response = `status (1) | cbor`.
-- **GET_INFO** (0x04; 64-byte response = status + 63 CBOR): 0x01
-  versions `["FIDO_2_0"]`, 0x03 aaguid
+- **GET_INFO** (0x04; 84-byte response = status + 83 CBOR — grew from
+  64 when the algorithms entries became WebAuthn
+  PublicKeyCredentialParameters objects, which Chromium's GetInfo
+  parser REQUIRES — bare ints made it fall back to U2F; see Current
+  state): 0x01 versions `["FIDO_2_0"]`, 0x03 aaguid
   65f5107f-31a6-4785-9301-6788e10ec776 (demo uuid4, unregistered),
   0x04 options `{"rk":true,"up":true}`, 0x05 maxMessageSize 256, 0x07
   maxCredentialCountInList 128, 0x08 maxCredentialIdLength 64, 0x09
-  `["usb"]`, 0x0A `[-7]` (ES256), 0x0E firmwareVersion 1, 0x14
-  remainingDiscoverableCredentials 4 (static — make dynamic in Phase 3
-  once the cred DB exists).
+  `["usb"]`, 0x0A `[{"alg":-7,"type":"public-key"}]` (ES256), 0x0E
+  firmwareVersion 1, 0x14 remainingDiscoverableCredentials 4 (static —
+  make dynamic in Phase 3 once the cred DB exists).
 - **Bench (user action):** reflash uf2 (md5
   e1c3e285b1c372cba5cbb0f3ea1f1d0f), run the extended
   bench/fido_probe.py — step 4 sends the 1-byte GET_INFO request in a
-  0x90 (CBOR) packet, reads both response packets (57 + 7 data bytes),
-  and byte-compares the 64-byte payload against the KAT; the browser's
+  0x90 (CBOR) packet, reads both response packets (57 + 27 data bytes),
+  and byte-compares the 84-byte payload against the KAT; the browser's
   security-key enumeration should also see a valid authenticator.
 
 ### Phase 3 — MAKE_CREDENTIAL
