@@ -5,7 +5,7 @@
 // CTAP1_ERR_INVALID_LENGTH; stray parameter bytes must be one
 // well-formed CBOR item or the answer is CTAP2_ERR_INVALID_CBOR),
 // GET_INFO (the full response map decoded field by field with the codec
-// itself, plus a hand-computed 64-byte KAT; stray parameter maps are
+// itself, plus a hand-computed 84-byte KAT; stray parameter maps are
 // ignored), and the unimplemented-command answer
 // (CTAP1_ERR_INVALID_COMMAND, the spec's MUST for a command code the
 // device does not implement).
@@ -136,13 +136,24 @@ static void t_get_info_fields(void)
     CHECK(fido_cbor_dec_item(&d, &t, &u, &data, &dlen));
     CHECK(t == FIDO_CBOR_TEXT && dlen == 3 && 0 == memcmp(data, "usb", 3));
 
-    // 10: algorithms [-7] (COSE_ES256)
+    // 10: algorithms [{"alg": -7, "type": "public-key"}] (COSE_ES256)
+    // — WebAuthn PublicKeyCredentialParameters objects (Chromium's
+    // GetInfo parser rejects a bare integer entry).
     CHECK(fido_cbor_dec_item(&d, &t, &u, NULL, NULL));
     CHECK(t == FIDO_CBOR_UINT && u == 10);
     CHECK(fido_cbor_dec_item(&d, &t, &u, NULL, NULL));
     CHECK(t == FIDO_CBOR_ARRAY && u == 1);
     CHECK(fido_cbor_dec_item(&d, &t, &u, NULL, NULL));
+    CHECK(t == FIDO_CBOR_MAP && u == 2);
+    CHECK(fido_cbor_dec_item(&d, &t, &u, &data, &dlen));
+    CHECK(t == FIDO_CBOR_TEXT && dlen == 3 && 0 == memcmp(data, "alg", 3));
+    CHECK(fido_cbor_dec_item(&d, &t, &u, NULL, NULL));
     CHECK(t == FIDO_CBOR_NEGINT && u == 6);   // -(6 + 1) = -7
+    CHECK(fido_cbor_dec_item(&d, &t, &u, &data, &dlen));
+    CHECK(t == FIDO_CBOR_TEXT && dlen == 4 && 0 == memcmp(data, "type", 4));
+    CHECK(fido_cbor_dec_item(&d, &t, &u, &data, &dlen));
+    CHECK(t == FIDO_CBOR_TEXT && dlen == 10
+          && 0 == memcmp(data, "public-key", 10));
 
     // 14: firmwareVersion 1
     CHECK(fido_cbor_dec_item(&d, &t, &u, NULL, NULL));
@@ -161,7 +172,7 @@ static void t_get_info_fields(void)
 }
 
 // The full response pinned byte for byte (hand-computed, cross-checked
-// against an independent CBOR walk). Status + 63 payload bytes.
+// against an independent CBOR walk). Status + 83 payload bytes.
 static void t_get_info_bytes(void)
 {
     uint8_t req[64];
@@ -192,7 +203,14 @@ static void t_get_info_bytes(void)
         0x09,                         //   9: transports
             0x81, 0x63, 0x75, 0x73, 0x62,   // ["usb"]
         0x0A,                         //   10: algorithms
-            0x81, 0x26,               //   [-7]
+            0x81,                     //   array(1)
+            0xA2,                     //   map(2)  (PublicKeyCredentialParameters)
+            0x63, 0x61, 0x6C, 0x67,   //   "alg"
+            0x26,                     //   -7 (COSE_ES256)
+            0x64, 0x74, 0x79, 0x70, 0x65,   // "type"
+            0x6A,                     //   "public-key"
+            0x70, 0x75, 0x62, 0x6C, 0x69, 0x63,
+            0x2D, 0x6B, 0x65, 0x79,
         0x0E,                         //   14: firmwareVersion
             0x01,
         0x14,                         //   20: remainingDiscoverableCredentials

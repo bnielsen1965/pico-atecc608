@@ -36,7 +36,7 @@ void fido_ctap_ctx_init(fido_ctap_ctx_t *ctx)
 //   7  maxCredentialCountInList  128
 //   8  maxCredentialIdLength     64
 //   9  transports      ["usb"]
-//   10 algorithms      [-7]  (COSE_ES256)
+//   10 algorithms      [{"alg": -7, "type": "public-key"}]
 //   14 firmwareVersion 1
 //   20 remainingDiscoverableCredentials  4
 //
@@ -87,7 +87,15 @@ static void handle_get_info(const fido_ctap_ctx_t *ctx,
 
     fido_cbor_enc_uint(&e, 10);           // algorithms
     fido_cbor_enc_array(&e, 1);
+    // WebAuthn PublicKeyCredentialParameters objects, not bare
+    // integers — Chromium's GetInfo parser rejects a non-map entry
+    // (and falls back to U2F for the whole device). Map keys in
+    // canonical sorted order ("alg" < "type").
+    fido_cbor_enc_map(&e, 2);
+    fido_cbor_enc_text(&e, "alg");
     fido_cbor_enc_negint(&e, FIDO_CTAP_ALG_ES256);
+    fido_cbor_enc_text(&e, "type");
+    fido_cbor_enc_text(&e, "public-key");
 
     fido_cbor_enc_uint(&e, 14);           // firmwareVersion
     fido_cbor_enc_uint(&e, FIDO_CTAP_FW_VERSION);
@@ -97,7 +105,7 @@ static void handle_get_info(const fido_ctap_ctx_t *ctx,
 
     if (e.overflow) {
         // Cannot happen with the transport's 7609-byte response
-        // buffer (the map is 63 bytes); a hostile resp_max degrades
+        // buffer (the map is 83 bytes); a hostile resp_max degrades
         // to a status-only answer instead of a partial CBOR.
         resp[0] = FIDO_CTAP2_ERR_OTHER;
         return;
