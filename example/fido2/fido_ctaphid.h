@@ -36,17 +36,27 @@
 #define FIDO2_MAX_MSG        7609  // 57 + 128*59
 #define FIDO2_BROADCAST_CID  0xFFFFFFFFu
 
-// Command values (low 7 bits); the header byte on the wire is 0x80|cmd.
+// Command values (low 7 bits); the header byte on the wire is 0x80|cmd
+// (CTAP v2.0 §8.1.9.1). The U2F (CTAP1) commands 0x00 and 0x02-0x05 are
+// recognised so the device can answer them with the U2F status word that
+// tells a platform "no U2F here — use CTAP2" (see dispatch()); the earlier
+// build mislabeled 0x03/0x04 as MSG/LOCK and answered them with a CTAPHID
+// ERROR, which left the platform (Chrome) waiting on a U2F reply that
+// never came — the registration hang.
 enum {
-    FIDO2_CMD_PING      = 0x01,
-    FIDO2_CMD_MSG       = 0x03,   // U2F tunneling — not implemented
-    FIDO2_CMD_LOCK      = 0x04,   // U2F feature — not implemented
-    FIDO2_CMD_INIT      = 0x06,
-    FIDO2_CMD_WINK      = 0x08,
-    FIDO2_CMD_CBOR      = 0x10,
-    FIDO2_CMD_CANCEL    = 0x11,
-    FIDO2_CMD_KEEPALIVE = 0x3B,
-    FIDO2_CMD_ERROR     = 0x3F,
+    FIDO2_CMD_MSG          = 0x00,  // CTAPHID_MSG (U2F tunnel) — not impl.
+    FIDO2_CMD_PING         = 0x01,
+    FIDO2_CMD_MRK          = 0x02,  // U2F — not implemented
+    FIDO2_CMD_ENROLL       = 0x03,  // U2F — not implemented
+    FIDO2_CMD_VERIFY       = 0x04,  // U2F — not implemented
+    FIDO2_CMD_AUTHENTICATE = 0x05,  // U2F — not implemented
+    FIDO2_CMD_INIT         = 0x06,
+    FIDO2_CMD_VERSION      = 0x07,  // not implemented
+    FIDO2_CMD_WINK         = 0x08,
+    FIDO2_CMD_CBOR         = 0x10,
+    FIDO2_CMD_CANCEL       = 0x11,
+    FIDO2_CMD_KEEPALIVE    = 0x3B,
+    FIDO2_CMD_ERROR        = 0x3F,
 };
 
 // CTAP error codes (CTAP v2.0 8.1.9.1.6; same values as U2FHID 2.4).
@@ -68,6 +78,14 @@ enum {
 enum {
     FIDO2_CTAP_ERR_OK              = 0x00,
     FIDO2_CTAP_ERR_INVALID_COMMAND = 0x01,
+};
+
+// U2F (CTAP1) status word, ISO 7816-4 "command not allowed (no current
+// EF)". The answer a CTAP2-only authenticator gives to a U2F command, so
+// a conformant platform abandons U2F and retries CTAP2 (CTAP v2.0 §7.2
+// "registration via U2F": "…the platform SHOULD retry using CTAP2").
+enum {
+    FIDO2_SW_COMMAND_NOT_ALLOWED = 0x6986,
 };
 
 // INIT capability flags (CTAP v2.0 8.1.9.1.3).

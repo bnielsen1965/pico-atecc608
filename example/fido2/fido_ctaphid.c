@@ -123,6 +123,22 @@ static void send_empty(fido2_sink_t sink, void *sink_ctx,
     resp_send(&r, NULL, 0);
 }
 
+// U2F (CTAP1) error response: frame the 16-bit ISO 7816-4 status word as
+// [SW1 (MSB) | SW2 (LSB)] (CTAP v2.0 §7.1.2) on the U2F command that
+// arrived — the response command byte matches the request. A conformant
+// platform maps SW_COMMAND_NOT_ALLOWED to "U2F is not available" and falls
+// back to CTAP2 (CTAP v2.0 §7.2). This is the reply a CTAP2-only key must
+// give a U2F command: a CTAPHID ERROR here would leave the platform waiting
+// on a U2F reply that will never come (the Chrome registration hang).
+static void send_u2f_status(fido2_sink_t sink, void *sink_ctx,
+                            uint32_t cid, uint8_t cmd, uint16_t sw)
+{
+    const uint8_t data[2] = { (uint8_t)(sw >> 8), (uint8_t)(sw & 0xFFu) };
+    fido2_resp_t r;
+    resp_init(&r, sink, sink_ctx, cid, cmd, 2);
+    resp_send(&r, data, 2);
+}
+
 // --- channel table -----------------------------------------------------------
 
 static int channel_find(fido2_ctaphid_t *s, uint32_t cid)
@@ -258,16 +274,17 @@ static void dispatch(fido2_ctaphid_t *s, fido2_sink_t sink, void *sink_ctx)
         break;
     }
     case FIDO2_CMD_MSG:
-        // U2F tunneling: this is a CTAP2-only device (capability NMSG).
-        if (0 == len) {
-            send_error(sink, sink_ctx, cid, FIDO2_ERR_INVALID_LENGTH);
-        } else {
-            send_error(sink, sink_ctx, cid, FIDO2_ERR_INVALID_CMD);
-        }
-        break;
-    case FIDO2_CMD_LOCK:
-        // A U2F feature; not implemented.
-        send_error(sink, sink_ctx, cid, FIDO2_ERR_INVALID_CMD);
+    case FIDO2_CMD_MRK:
+    case FIDO2_CMD_ENROLL:
+    case FIDO2_CMD_VERIFY:
+    case FIDO2_CMD_AUTHENTICATE:
+        // U2F (CTAP1) command on a CTAP2-only device. Answer with the U2F
+        // status word SW_COMMAND_NOT_ALLOWED (0x6986) so a conformant
+        // platform abandons U2F and retries CTAP2 (CTAP v2.0 §7.2). (MSG is
+        // already excluded by the NMSG capability bit; the direct U2F
+        // commands have no such bit, so the status word is the signal.)
+        send_u2f_status(sink, sink_ctx, cid, cmd,
+                        FIDO2_SW_COMMAND_NOT_ALLOWED);
         break;
     case FIDO2_CMD_CANCEL:
         // No response (CTAP v2.0 8.1.9.1.7): there is no pending CBOR in

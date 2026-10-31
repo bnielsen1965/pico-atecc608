@@ -164,6 +164,22 @@ static int is_error(int idx, uint32_t cid, uint8_t err)
            p[7] == err;
 }
 
+// True when report `idx` is a U2F status-word response to `cid` on command
+// `cmd`, carrying the 2-byte status [sw1 | sw2] (BCNT = 2).
+static int is_u2f_status(int idx, uint32_t cid, uint8_t cmd,
+                         uint8_t sw1, uint8_t sw2)
+{
+    if (idx >= s_nreports) {
+        return 0;
+    }
+    const uint8_t *p = s_reports[idx];
+    return rep_cid(p) == cid &&
+           rep_cmd(p) == cmd &&
+           rep_bcnt(p) == 2 &&
+           p[7] == sw1 &&
+           p[8] == sw2;
+}
+
 // Send INIT (broadcast or specific) and return the CID the response
 // carries (0 if no response came).
 static uint32_t do_init(uint32_t now, uint32_t cid)
@@ -490,26 +506,40 @@ static void t_cbor(void)
     }
 }
 
-// U2F tunneling and U2F lock: a CTAP2-only device answers INVALID_CMD
-// (MSG with bcnt 0 keeps the reference's INVALID_LENGTH check first).
-static void t_msg_lock(void)
+// U2F (CTAP1) commands on a CTAP2-only device: MSG, MRK, ENROLL, VERIFY
+// and AUTHENTICATE are all answered with the U2F status word
+// SW_COMMAND_NOT_ALLOWED (0x6986), framed as a 2-byte [SW1|SW2] response on
+// the same command byte, so a conformant platform abandons U2F and retries
+// CTAP2 (CTAP v2.0 §7.2). This is the exact exchange that was hanging the
+// browser — Chrome sends CTAPHID_ENROLL (0x83) and the device must reply
+// with the status word (not a CTAPHID ERROR) for the platform to switch to
+// CTAP2 makeCredential.
+static void t_u2f_not_allowed(void)
 {
     fresh();
     uint32_t cid = do_init(1000, FIDO2_BROADCAST_CID);
     uint8_t pkt[FIDO2_REPORT_LEN];
+    uint8_t data[4] = {0x00, 0x11, 0x22, 0x33};   // plausible U2F payload
 
-    uint8_t data[4] = {0x80, 0x00, 0x00, 0x04};
-    build_init(pkt, cid, FIDO2_CMD_MSG, 4, data, 4);
+    build_init(pkt, cid, FIDO2_CMD_ENROLL, 4, data, 4);
     feed(1100, pkt);
-    CHECK(is_error(1, cid, FIDO2_ERR_INVALID_CMD));
+    CHECK(is_u2f_status(1, cid, FIDO2_CMD_ENROLL, 0x69, 0x86));
 
-    build_init(pkt, cid, FIDO2_CMD_MSG, 0, NULL, 0);
+    build_init(pkt, cid, FIDO2_CMD_MSG, 4, data, 4);
     feed(1200, pkt);
-    CHECK(is_error(2, cid, FIDO2_ERR_INVALID_LENGTH));
+    CHECK(is_u2f_status(2, cid, FIDO2_CMD_MSG, 0x69, 0x86));
 
-    build_init(pkt, cid, FIDO2_CMD_LOCK, 1, data, 1);
+    build_init(pkt, cid, FIDO2_CMD_MRK, 0, NULL, 0);
     feed(1300, pkt);
-    CHECK(is_error(3, cid, FIDO2_ERR_INVALID_CMD));
+    CHECK(is_u2f_status(3, cid, FIDO2_CMD_MRK, 0x69, 0x86));
+
+    build_init(pkt, cid, FIDO2_CMD_VERIFY, 4, data, 4);
+    feed(1400, pkt);
+    CHECK(is_u2f_status(4, cid, FIDO2_CMD_VERIFY, 0x69, 0x86));
+
+    build_init(pkt, cid, FIDO2_CMD_AUTHENTICATE, 4, data, 4);
+    feed(1500, pkt);
+    CHECK(is_u2f_status(5, cid, FIDO2_CMD_AUTHENTICATE, 0x69, 0x86));
 }
 
 // WINK: empty response + the hook fires.
@@ -809,7 +839,7 @@ int main(void)
     t_seq_rules();
     t_unknown_cid();
     t_cbor();
-    t_msg_lock();
+    t_u2f_not_allowed();
     t_wink();
     t_reset_preserves_handlers();
     t_cancel();
