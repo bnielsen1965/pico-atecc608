@@ -179,9 +179,9 @@ def main():
         # The CTAPHID_CBOR (0x90) payload IS the CTAP2 message: one
         # command byte (0x04 = GET_INFO; it takes no parameters, CTAP
         # v2.1 §6.4/§8.1) — no extra header. The response is
-        # status(1)=0x00 + the 83-byte CBOR map = 84 payload bytes, which
+        # status(1)=0x00 + the 84-byte CBOR map = 85 payload bytes, which
         # spans two CTAPHID packets: 57 data bytes in the first (CMD +
-        # BCNT header) and 27 in a continuation (CID + SEQ header, no BCNT).
+        # BCNT header) and 28 in a continuation (CID + SEQ header, no BCNT).
         pkt = got_cid + bytes([0x90]) + (1).to_bytes(2, 'big') \
             + b'\x04' + bytes(56)
         write_report(fd, pkt)
@@ -193,7 +193,7 @@ def main():
             'response must come back on the allocated CID'
         assert r1[4] == 0x90, f'expected CBOR response, cmd={r1[4]:#04x}'
         bcnt = int.from_bytes(r1[5:7], 'big')
-        assert bcnt == 84, f'GET_INFO payload must be 84 bytes, got {bcnt}'
+        assert bcnt == 85, f'GET_INFO payload must be 85 bytes, got {bcnt}'
         payload = bytearray(r1[7:64])        # first 57 payload bytes
         r2 = read_report(fd)
         if len(r2) != 64:
@@ -201,19 +201,19 @@ def main():
         assert r2[0:4] == got_cid, \
             'continuation must come back on the allocated CID'
         assert r2[4] == 0x00, f'continuation SEQ must be 0, got {r2[4]:#04x}'
-        payload += r2[5:32]                  # the remaining 27 payload bytes
+        payload += r2[5:33]                  # the remaining 28 payload bytes
         expected = bytes.fromhex(
             '00aa0181684649444f5f325f30035065f5107f31a6478593016788e10ec776'
             '04a262726bf5627570f505190100071880081840098163757362'
             '0a81a263616c672664747970656a7075626c69632d6b65790e011404')
-        assert len(payload) == 84
+        assert len(payload) == 85
         if bytes(payload) != expected:
             print(f'      got      {bytes(payload).hex()}')
             print(f'      expected {expected.hex()}')
             sys.exit('GET_INFO: response does not match the expected map')
         print(f'GET_INFO -> cid={r1[0:4].hex()} status=0x{r1[7]:02x} '
-              f'{bcnt} bytes over 2 packets (57+27)')
-        print('      ok (map matches the 84-byte KAT: versions, aaguid,')
+              f'{bcnt} bytes over 2 packets (57+28)')
+        print('      ok (map matches the 85-byte KAT: versions, aaguid,')
         print('           options, transports, ES256 {alg,type}, fw=1, 4 slots)')
 
         print('PASS — Phase 1 transport + Phase 2 GET_INFO verified')

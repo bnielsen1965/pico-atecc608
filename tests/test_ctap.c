@@ -5,7 +5,7 @@
 // CTAP1_ERR_INVALID_LENGTH; stray parameter bytes must be one
 // well-formed CBOR item or the answer is CTAP2_ERR_INVALID_CBOR),
 // GET_INFO (the full response map decoded field by field with the codec
-// itself, plus a hand-computed 84-byte KAT; stray parameter maps are
+// itself, plus a hand-computed 85-byte KAT; stray parameter maps are
 // ignored), and the unimplemented-command answer
 // (CTAP1_ERR_INVALID_COMMAND, the spec's MUST for a command code the
 // device does not implement).
@@ -172,7 +172,7 @@ static void t_get_info_fields(void)
 }
 
 // The full response pinned byte for byte (hand-computed, cross-checked
-// against an independent CBOR walk). Status + 83 payload bytes.
+// against an independent CBOR walk). Status + 84 payload bytes.
 static void t_get_info_bytes(void)
 {
     uint8_t req[64];

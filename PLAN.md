@@ -6,9 +6,10 @@
 MAP {type:"public-key", alg:int}; we sent a bare int array [-7] →
 `!algorithm.is_map()` → nullopt → Chrome fell back to U2F (the stray
 WINK = needs_explicit_wink_). GET_INFO now sends
-[{"alg":-7,"type":"public-key"}]; 84-byte KATs updated (host tests +
-probe); ctest 7/7; build clean; BENCH PENDING: flash + probe FULL PASS
-+ Chrome should now send `90` makeCredential with NO WINK):**
+[{"alg":-7,"type":"public-key"}]; 85-byte KATs updated (host tests +
+probe); ctest 7/7; build clean; probe VERIFIED on the wire (byte-for-byte
+match, 85 B = 57+28); BENCH PENDING: Chrome should now send `90`
+makeCredential with NO WINK):**
 
 - **CHROME PARSER READ COMPLETE — ROOT CAUSE CONFIRMED + FIXED
   (2026-10-31, supersedes the "prime suspect" state below):** finished
@@ -41,13 +42,15 @@ probe); ctest 7/7; build clean; BENCH PENDING: flash + probe FULL PASS
   So the algorithms object form is the ONLY fix. **FIXED:**
   fido_ctap.c handle_get_info now emits 0x0A = `81 A2 63 "alg" 26 64
   "type" 6A "public-key"` (canonical key order alg < type); GET_INFO
-  payload is now 84 bytes (status + 83), still two CTAPHID packets
-  (57 + 27). KATs updated: tests/test_ctap.c (structural +
-  byte-pinned, now 84 bytes), bench/fido_probe.py (bcnt 84, 57+27
+  payload is now 85 bytes (status + 84), still two CTAPHID packets
+  (57 + 28). KATs updated: tests/test_ctap.c (structural +
+  byte-pinned, now 85 bytes), bench/fido_probe.py (bcnt 85, 57+28
   split, new expected hex). ctest 7/7; Pico build clean; uf2 md5
   610b75d359047d0d35b02af610682384. **BENCH PENDING (user):** flash
   that uf2, run `sudo python3 bench/fido_probe.py` (must FULL PASS the
-  new 84-byte KAT), then Chrome Register: EXPECT the WINK GONE and a
+  new 85-byte KAT — VERIFIED 2026-10-31: device payload matches
+  byte-for-byte, bcnt=85), then Chrome Register: EXPECT the WINK GONE
+  and a
   `90` CBOR makeCredential (INS 0x01) to appear — it will be answered
   INVALID_COMMAND (0x01) since makeCredential is not yet implemented;
   that is the expected Phase 3 boundary.
@@ -229,10 +232,10 @@ probe); ctest 7/7; build clean; BENCH PENDING: flash + probe FULL PASS
   610b75d359047d0d35b02af610682384) — it carries the U2F fix, the
   algorithms-object GET_INFO fix, and the `// DBG-TMP` IN-report trace
   (fido_hid.c: first 16 bytes of every incoming report — keep it for
-  this round). First `sudo python3 bench/fido_probe.py` (must FULL PASS
-  — note the GET_INFO step now expects 84 bytes over 57+27, and prints
-  the new map). Then open /dev/ttyUSB0 @115200; in Chrome click
-  Register 1-2×; paste back the `DBG IN:` (and `DBG OUT:`) lines.
+  this round). `sudo python3 bench/fido_probe.py` (must FULL PASS —
+  note the GET_INFO step now expects 85 bytes over 57+28; VERIFIED
+  2026-10-31 on the wire). Then open /dev/ttyUSB0 @115200; in Chrome
+  click Register 1-2×; paste back the `DBG IN:` (and `DBG OUT:`) lines.
   EXPECTED now: NO WINK after GET_INFO (the GetInfo parser accepts us
   → supported_protocol_ = kCtap2, needs_explicit_wink_ stays false) and
   a `90` CBOR makeCredential (INS 0x01) appears where the `83` ENROLL
@@ -1265,7 +1268,7 @@ complete, pending bench)
   state). Empty payload -> 0x03; unknown ins -> 0x01 (the spec's MUST
   for an unimplemented command); stray params must be one well-formed
   CBOR item, else 0x12. Response = `status (1) | cbor`.
-- **GET_INFO** (0x04; 84-byte response = status + 83 CBOR — grew from
+- **GET_INFO** (0x04; 85-byte response = status + 84 CBOR — grew from
   64 when the algorithms entries became WebAuthn
   PublicKeyCredentialParameters objects, which Chromium's GetInfo
   parser REQUIRES — bare ints made it fall back to U2F; see Current
@@ -1279,8 +1282,8 @@ complete, pending bench)
 - **Bench (user action):** reflash uf2 (md5
   e1c3e285b1c372cba5cbb0f3ea1f1d0f), run the extended
   bench/fido_probe.py — step 4 sends the 1-byte GET_INFO request in a
-  0x90 (CBOR) packet, reads both response packets (57 + 27 data bytes),
-  and byte-compares the 84-byte payload against the KAT; the browser's
+  0x90 (CBOR) packet, reads both response packets (57 + 28 data bytes),
+  and byte-compares the 85-byte payload against the KAT; the browser's
   security-key enumeration should also see a valid authenticator.
 
 ### Phase 3 — MAKE_CREDENTIAL

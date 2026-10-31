@@ -105,7 +105,7 @@ static void handle_get_info(const fido_ctap_ctx_t *ctx,
 
     if (e.overflow) {
         // Cannot happen with the transport's 7609-byte response
-        // buffer (the map is 83 bytes); a hostile resp_max degrades
+        // buffer (the map is 84 bytes); a hostile resp_max degrades
         // to a status-only answer instead of a partial CBOR.
         resp[0] = FIDO_CTAP2_ERR_OTHER;
         return;
