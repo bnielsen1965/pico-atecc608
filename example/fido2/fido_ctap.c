@@ -17,6 +17,7 @@ static const uint8_t s_aaguid[16] = {
 
 void fido_ctap_ctx_init(fido_ctap_ctx_t *ctx)
 {
+    memset(ctx, 0, sizeof *ctx);   // user_present starts false
     memcpy(ctx->aaguid, s_aaguid, sizeof s_aaguid);
 }
 

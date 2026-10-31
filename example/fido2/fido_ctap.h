@@ -25,6 +25,7 @@
 
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "fido_ctaphid.h"   // fido2_cbor_cb_t (the handler contract)
@@ -104,6 +105,12 @@ enum {
 // phases extend this (credential store, ATECC handles).
 typedef struct {
     uint8_t aaguid[16];   // the claimed AAGUID (fixed per firmware)
+    // User presence (Phase 3): the app records a "touch" here — today
+    // the UART0 console's 'up' command, later a physical button on a
+    // free GPIO. A handler that requires UP (MakeCredential,
+    // GetAssertion) checks the flag while waiting and clears it when
+    // the touch is consumed.
+    volatile bool user_present;
 } fido_ctap_ctx_t;
 
 // Fill the context with this firmware's identity (the fixed AAGUID).

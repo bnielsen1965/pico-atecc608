@@ -324,12 +324,31 @@ static void t_unimplemented(void)
     }
 }
 
+// --- context ---------------------------------------------------------------------
+
+// The user-presence flag (Phase 3) is app-written, handler-consumed
+// state: a fresh context must start with no touch pending, and re-init
+// must clear a stale one.
+static void t_ctx_init(void)
+{
+    fido_ctap_ctx_t ctx;
+
+    fido_ctap_ctx_init(&ctx);
+    CHECK(0 == memcmp(ctx.aaguid, s_aaguid, 16));
+    CHECK(!ctx.user_present);
+
+    ctx.user_present = true;
+    fido_ctap_ctx_init(&ctx);
+    CHECK(!ctx.user_present);
+}
+
 int main(void)
 {
     fido_ctap_ctx_init(&s_ctx);
     // The context must carry the AAGUID the KATs expect.
     CHECK(0 == memcmp(s_ctx.aaguid, s_aaguid, 16));
 
+    t_ctx_init();
     t_get_info_fields();
     t_get_info_bytes();
     t_get_info_with_params();

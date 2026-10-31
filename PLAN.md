@@ -1,23 +1,80 @@
 # Plan: FIDO2 example — passkey authenticator
 
-**Current state (2026-10-30, night: PHASE 2 BENCH-VERIFIED —
-fido_probe.py FULL PASS (INIT/PING/WINK + GET_INFO: 64-byte KAT over
-2 CTAPHID packets, byte-for-byte, from the real Linux usbhid
-stack). The IN-report queue fix (5f1502e) is confirmed on the wire.
-Browser check (user): the key appears in Chrome's "Manage security
-keys" with per-key actions — that listing is itself the enumeration
-(CTAPHID INIT + CTAP2 GET_INFO from a real browser), so the Phase 2
-acceptance criterion is met. Button guidance given: "Sign-in data"
-= expect EMPTY (no passkeys registered yet), no error = good;
-"Fingerprints" = fine, mostly local data; "Create a PIN" = expect
-FAILURE (clientPin deliberately absent from GET_INFO — spec-correct
-no-PIN support, no PIN phase planned); "Reset your security key" =
-do NOT click as a test (authenticatorReset INS 0x07, unimplemented
-today, and in the Phase 4 build it would actually wipe the key).
-Phase 2 + fixes are committed (a3de401, 5f1502e); uf2 md5
-1c499e548055e0c12e33089c0e6a80fe is the verified build. NEXT: Phase 3
-(MAKE_CREDENTIAL) — the real end-to-end browser test (register
-passkey #1) waits on it.
+**Current state (2026-10-30, late night: PHASE 3 KICKED OFF — `up`
+console command built; browser-verification claim CORRECTED;
+attestation design DECIDED (self/surrogate packed)):**
+
+- **Phase 2 status, corrected:** the probe (fido_probe.py) is the
+  plan's Phase 2 acceptance check ("a PC CTAP tool sees a valid
+  authenticator") and it FULL-PASSED, so Phase 2 stands. The browser
+  side is UNVERIFIED, not verified: the previous entry's "the key
+  appears in Chrome's Manage security keys" was wrong — the user never
+  saw the key in that list. That dialog lists keys from Chrome's own
+  WebAuthn records (keys Chrome has actually used), not a live scan of
+  what is plugged in; an empty list for a brand-new key is expected and
+  proves nothing. The live check is a real WebAuthn operation's key
+  picker (below).
+- **Browser verification (user decision): use the local
+  `../fido2-demonstration` harness** (Node/Express + fido2-lib,
+  https://localhost:8080, self-signed cert — accept the warning), NOT a
+  Google-account passkey. Flow: `cd ../fido2-demonstration && node
+  index.js`; open https://localhost:8080; enter username + display
+  name; click **Register** → Chrome's "choose a security key" picker is
+  the detection moment — "Pico ATECC608 FIDO2" listed = the browser
+  saw the key (INIT + GET_INFO through a real browser stack). Phase 2
+  firmware: clicking it then fails at MAKE_CREDENTIAL (the expected
+  boundary); Phase 3 firmware: the full register flow should complete.
+  Config facts (read from its config.js): rp.id "localhost", origin
+  https://localhost:8080, userVerification "required" (auto-UV sets the
+  UV flag), cryptoParams [-7,-257] (the key offers -7 only),
+  attestation "none" (a conveyance PREFERENCE; fido2-lib validates
+  whatever fmt arrives — see the attestation decision below).
+- **Phase 3 piece #1 — UART0 `up` console command (code done):** the
+  key has no physical touch button, so user presence is driven from
+  UART0 @115200: typing `up` sets the new `fido_ctap_ctx_t.user_present`
+  flag (zeroed by fido_ctap_ctx_init) and prints a confirmation;
+  unknown commands print a hint. Non-blocking 16-byte line reader in
+  fido_hid.c (CR or LF terminates; terminal echoes, the device does
+  not), polled from fido_hid_tick() via
+  stdio_getchar_timeout_us(0); the banner gained a hint line. A
+  physical button on a free GPIO can feed the same flag later without
+  touching the CTAP layer. MakeCredential (next) consumes the flag with
+  the spec's wait-for-UP + keep-alive + timeout semantics. Host tests
+  7/7 green (test_ctap 100 → 103 checks: ctx init zeroes/clears the
+  flag); Pico build clean, zero warnings.
+- **Attestation design decision (supersedes the Phase 3 section below,
+  verified against WebAuthn v2 §6.5.3/§8.2 text, fetched to
+  /tmp/opencode/webauthn2.html, and against the fido2-lib source in
+  the harness's node_modules):** use SELF ("surrogate") packed
+  attestation — omit `x5c` entirely; `sig` = chip Sign by the
+  CREDENTIAL key (the slot 3-6 key just generated) over
+  SHA-256(authData ‖ clientDataHash). The old plan (`x5c: []` signed
+  by the slot-1 identity key) is wrong for this harness: in fido2-lib's
+  packed.js an EMPTY x5c array is JS-truthy, so it takes the "basic"
+  path and fails (no attCert to verify with); omitting x5c takes the
+  surrogate path, which verifies sig with the credential public key.
+  WebAuthn §8.2 (packed) makes x5c optional in the CDDL and defines
+  exactly this branch: "If x5c is not present, self attestation is in
+  use... Verify that sig is a valid signature over the concatenation of
+  authenticatorData and clientDataHash using the credential public key
+  with alg... return attestation type Self and an empty attestation
+  trust path." §6.5.3: self = "surrogate basic attestation... uses the
+  credential private key to create the attestation signature." Slot 1
+  (identity) keeps its provisioning-marker role only; it no longer
+  signs.
+- **Bench instructions for THIS build:** flash
+  build/example/fido2/pico-atecc608-fido2.uf2 (md5
+  a60ce2a7d56747f54f99f10bb9d703f6); open a serial console on
+  /dev/ttyUSB0 @115200; watch the banner (now includes the `up` hint
+  line); type `up` + Enter → expect `fido2: user presence ('up')`;
+  type anything else → the unknown-command hint. Re-run
+  `sudo python3 bench/fido_probe.py` (must stay FULL PASS — GET_INFO is
+  unchanged). The `up` flag itself is consumed only once MakeCredential
+  lands.
+- Committed so far this phase: none yet (this update + the `up`
+  command commit together). Previous verified build uf2 md5
+  1c499e548055e0c12e33089c0e6a80fe (Phase 2). NEXT: MAKE_CREDENTIAL
+  request parsing + the UP-wait/keep-alive transaction flow.
 
 **Prior (2026-10-30, late evening: Phase 2 BENCH ROUND 1:
 steps 1-3 (INIT/PING/WINK) PASS; GET_INFO failed — the first packet
@@ -867,7 +924,9 @@ of labour).
    discoverable credentials.
 3. **Register** a passkey on any site (MAKE_CREDENTIAL): a fresh EC P-256
    key is generated on the chip (next free slot 3–6); the browser receives
-   basic ("packed") attestation signed by the device identity key (slot 1).
+   self ("packed" surrogate) attestation — no x5c, `sig` over
+   SHA-256(authData ‖ clientDataHash) by the credential key itself
+   (see the Phase 3 attestation decision).
 4. **Log out / log in** (GET_ASSERTION): the chip signs the challenge
    digest with the credential key; the CTAP sync counter increments
    (littlefs by default; chip Counter 0 in chip-counter mode); the browser
@@ -879,19 +938,28 @@ of labour).
    chip-counter mode it lives on the chip, equally reset-proof).
 
 > **Test harness:** `../fido2-demonstration` (Node/Express + fido2-lib
-> v3.5.6) — register + login over HTTPS on :8080. Note its config sets
-> `authenticatorUserVerification: "required"` (satisfied by auto-UV, which
-> sets the UV flag; relax to `"preferred"` if a browser/RP ever complains)
-> and it compares each assertion counter against the value stored at
-> registration (the "rollback" check the increment-first ordering in
-> Phase 4 satisfies).
+> v3.5.6) — register + login over HTTPS on :8080. USER DECISION
+> (2026-10-30): all browser verification goes through this harness,
+> NOT a Google-account passkey. `cd ../fido2-demonstration && node
+> index.js`, open https://localhost:8080 (accept the self-signed cert
+> warning), enter username + display name, click Register. The key
+> DETECTION moment is Chrome's "choose a security key" picker: "Pico
+> ATECC608 FIDO2" listed = the browser saw the key. Note its config
+> sets `authenticatorUserVerification: "required"` (satisfied by
+> auto-UV, which sets the UV flag; relax to `"preferred"` if a
+> browser/RP ever complains) and it compares each assertion counter
+> against the value stored at registration (the "rollback" check the
+> increment-first ordering in Phase 4 satisfies). Its
+> `attestation: "none"` is a conveyance preference, not a server-side
+> fmt filter — fido2-lib validates whatever fmt the response carries
+> (see the Phase 3 attestation decision).
 
 ## Division of labour
 
 | Concern | Where |
 |---|---|
 | 4 credential private keys | slots 3–6, on-chip GenKey, never leave the chip |
-| Attestation key | existing identity pair (slots 1/2), "packed" statement, `x5c: []` |
+| Attestation key | **the credential key itself** (slot 3-6) — self/surrogate "packed" statement, NO `x5c` (decision 2026-10-30; the slot-1 identity pair is a provisioning marker only) |
 | CTAP global counter | **littlefs file `/f2_cnt` by default** (dev-friendly, resettable by RESET); a **build flag** `FIDO2_COUNTER_CHIP` switches it to **chip Counter 0** (hardware-monotonic, not reset by RESET, not in a flash dump). One counter shared by all four credentials (CTAP2 is per-authenticator, not per-credential) |
 | CTAP2 protocol, CBOR, authData, command dispatch | Pico |
 | SHA-256(authData ‖ clientDataHash) | RP2350 hardware SHA-256 if this pico-sdk fork exposes it; else a small pure-C SHA-256 (host KAT'd) — resolve in Phase 1 |
@@ -1047,12 +1115,15 @@ complete, pending bench)
 - **Slot allocation:** next free slot 3–6 per the littlefs DB (full →
   `CTAP2_ERR_CODE_KEYSTORE_FULL`).
 - On-chip **GenKey** → `read_pubkey` → COSE_Key.
-- **Attestation:** statement type `"packed"`, alg ES256, attestationKey =
-  the identity public point recomputed from slot 1 via `get_pubkey(1)`
-  (slot 2 was meant to store this point, but the bench chip never
-  received it and the data-zone lock makes writing it impossible now;
-  the recomputed point is identical), `x5c: []` (basic attestation),
-  `sig` = chip Sign by slot 1 over SHA-256(authData ‖ clientDataHash).
+- **Attestation (DECIDED 2026-10-30, see Current state):** statement
+  type `"packed"`, alg ES256, **no `x5c`** (SELF / surrogate
+  attestation per WebAuthn v2 §8.2 — "If x5c is not present, self
+  attestation is in use"), `sig` = chip Sign by the **credential key**
+  (the slot 3-6 key just generated) over SHA-256(authData ‖
+  clientDataHash). The earlier slot-1-identity-key + `x5c: []` design
+  was wrong for the fido2-demonstration harness (fido2-lib's packed.js
+  treats an empty x5c array as truthy → the "basic" path → no attCert
+  → verification failure) and is superseded.
 - **AAGUID:** fixed 16-byte demo constant (pick a UUID, record it here).
 - **authData:** rpIdHash(32) ‖ flags(UP|AT) ‖ counter(4 BE, the CTAP sync counter —
   read, *not* incremented) ‖ AAGUID(16) ‖ credIdLen(2) ‖ credId ‖ COSE
@@ -1063,7 +1134,9 @@ complete, pending bench)
 - Keep total responses ≤ 256 B (a long credId could push it; the browser
  's typical 32–64 B credId is fine).
 - **Host KATs:** authData layout, COSE_Key encoding, DB record round-trip.
-- **Bench:** register passkey #1 in the browser.
+- **Bench:** register passkey #1 in the `../fido2-demonstration`
+  harness (user types `up` on the UART0 console when Chrome shows
+  "insert and touch").
 
 ### Phase 4 — GET_ASSERTION (+ RESET)
 

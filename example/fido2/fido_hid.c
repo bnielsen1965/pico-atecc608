@@ -227,6 +227,52 @@ static void led_tick(uint32_t now_ms)
     gpio_put(FIDO2_LED_PIN, on);
 }
 
+// --- user-presence console (UART0) ---------------------------------------------------
+// The key has no physical touch button yet, so user presence is driven
+// from the UART0 console (115200 8N1): typing 'up' records a touch for
+// the CTAP layer to consume (Phase 3 MakeCredential; GetAssertion in a
+// later phase). A physical button on a free GPIO can feed the same flag
+// later without touching the CTAP layer.
+//
+// Non-blocking by construction: stdio_getchar_timeout_us(0) yields at
+// most one character per call (0-255, or PICO_ERROR_TIMEOUT), so the
+// main loop's 1 ms cadence bounds the work to the bytes that actually
+// arrived. The terminal echoes what the user types; this side prints
+// only the result. Both CR and LF terminate a line (a CRLF terminal
+// sends both; the second sees an empty line and does nothing).
+#define FIDO2_CONSOLE_LINE_MAX 16
+static char   s_console_line[FIDO2_CONSOLE_LINE_MAX];
+static size_t s_console_len;
+
+static void console_line_done(void)
+{
+    if (0 != s_console_len) {
+        if (0 == strcmp(s_console_line, "up")) {
+            s_ctap_ctx.user_present = true;
+            printf("fido2: user presence ('up')\n");
+        } else {
+            printf("fido2: unknown console command '%s' — try 'up'\n",
+                   s_console_line);
+        }
+    }
+    s_console_len = 0;
+}
+
+static void console_tick(void)
+{
+    int c;
+    while (0 <= (c = stdio_getchar_timeout_us(0))) {
+        if (('\n' == c) || ('\r' == c)) {
+            console_line_done();
+        } else if ((0x20 <= c) && (c <= 0x7e) &&
+                   (s_console_len < FIDO2_CONSOLE_LINE_MAX - 1u)) {
+            s_console_line[s_console_len++] = (char)c;
+            s_console_line[s_console_len] = '\0';
+        }
+        // else: dropped (control chars, NUL, non-ASCII bytes).
+    }
+}
+
 // --- TinyUSB callbacks ---------------------------------------------------------------
 
 uint8_t const *tud_descriptor_device_cb(void)
@@ -355,6 +401,10 @@ void fido_hid_init(bool enabled)
 void fido_hid_tick(void)
 {
     const uint32_t now_ms = osal_time_millis();
+    // The console works in both states: when the chip is not
+    // provisioned the device answers no CTAP, but the command still
+    // gets its confirmation print.
+    console_tick();
     if (s_enabled) {
         outq_drain();
     }

@@ -84,6 +84,8 @@ int main(void)
 
     printf("pico-atecc608-fido2: ATECC608 FIDO2 authenticator "
            "(Phase 2: CTAPHID + CTAP2 GET_INFO)\n");
+    printf("UART0 console: type 'up' to record a key touch (user "
+           "presence)\n");
 
     atecc608_status_t st = atecc608_init(&s_cfg);
     if (ATECC608_OK != st) {
