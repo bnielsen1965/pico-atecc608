@@ -1,16 +1,126 @@
 # Plan: FIDO2 example — passkey authenticator
 
-**Current state (2026-10-31: PHASE 3 — CHROME GET_INFO FAIL ROOT-CAUSED
-+ FIXED in the host build: ReadCTAPGetInfoResponse REQUIRES each
-`algorithms` (0x0A) entry to be a WebAuthn PublicKeyCredentialParameters
-MAP {type:"public-key", alg:int}; we sent a bare int array [-7] →
-`!algorithm.is_map()` → nullopt → Chrome fell back to U2F (the stray
-WINK = needs_explicit_wink_). GET_INFO now sends
-[{"alg":-7,"type":"public-key"}]; 85-byte KATs updated (host tests +
-probe); ctest 7/7; build clean; probe VERIFIED on the wire (byte-for-byte
-match, 85 B = 57+28); BENCH PENDING: Chrome should now send `90`
-makeCredential with NO WINK):**
+**Current state (2026-10-31: PHASE 3 — MAKE_CREDENTIAL FULLY IMPLEMENTED
+(host side): request parsing per v2.0 §5.1, the deferred UP-wait
+transaction (keep-alives, CANCEL, timeout), on-chip keygen, packed
+SELF-attestation, the 4-record credential DB with persist-first littlefs
+files, and the app wiring. Two REAL bugs caught by the new host tests
+BEFORE the bench: (1) the makeCredential parser used `u` for both the
+top-level map count and every nested header read, so any container key
+clobbered the loop bound and the remaining keys read as trailing bytes
+(0x12) — no multi-key request, let alone Chrome's, could ever parse;
+(2) the cred record's CRC was encoded big-endian in the file but held in
+a native uint32 struct field, so decode failed on every little-endian
+build (RP2350 included) — the DB could never survive a reboot. Both
+fixed; ctest 9/9; Pico build clean; uf2 md5 cf3c824ebabf3d5285be08e1fb741a30
+(carries the uncommitted `// DBG-TMP` trace for the bench round). BENCH
+PENDING: Chrome Register on fido2-demonstration with `up` typed on
+/dev/ttyUSB0 @115200 — registration should now COMPLETE):**
 
+- **PHASE 3 IMPLEMENTED — makeCredential, end to end (2026-10-31,
+  supersedes the "makeCredential not yet implemented" boundary below):**
+  the full register flow is now on the host side and unit-tested:
+  (a) `fido_ctap.c` — `parse_make_credential` per v2.0 §5.1 (top-level
+  integer keys; clientDataHash 32 B else 0x15; rp.id ≤255 else 0x15;
+  user.id/name/displayName required ≤64/32/32 else 0x14/0x15;
+  pubKeyCredParams entry alg −7 with type absent or "public-key" else
+  0x26; excludeList ≤32 entries, pointers into the request buffer;
+  pinUvAuthToken present → 0x2A immediately (no clientPin advertised);
+  options "up" present → 0x2C recorded, "uv":true → 0x2B recorded,
+  "rk" stored, unknown skipped; enterpriseAttestation → 0x2B recorded;
+  trailing bytes → 0x12), then the spec's deferred error order —
+  excluded (checked only AFTER the UP wait, → 0x19) → unsupported alg
+  (0x26) → first recorded option error. A valid request commits a
+  pending transaction (credId = 32 chip-RNG bytes; deadline =
+  clock()+30000 ms) and defers (`*resp_len = 0`);
+  `fido_ctap_tick(ctx, cancelled, ...)` runs each main-loop pass:
+  cancel → 0x2D, wrap-safe timeout → 0x2F, UP consumed → `mc_create`.
+  `mc_create`: rk requests overwrite the (rpIdHash,userHandle) record in
+  place, else the first free of 4 (full → 0x28); chip GenKey in slot
+  idx+3; authData = rpIdHash ‖ 0x41 ‖ counter(4 BE, counter 0 read NOT
+  incremented in Phase 3) ‖ AAGUID ‖ credIdLen ‖ credId ‖ COSE_Key(77);
+  packed SELF-attestation (no x5c) — the CREDENTIAL key signs
+  SHA-256(authData ‖ clientDataHash); the record is persisted FIRST
+  through the store's save hook (a failed persistence leaves the store
+  unchanged and the registration fails 0x7F — the chip slot is
+  re-generable, so the next request self-heals). RESPONSE LAYOUT
+  DECISION: the v2.1 map {1:"packed", 2:authData, 3:{1:-7, 2:sig}} is
+  emitted even though we advertise versions=["FIDO_2_0"] — Chrome's
+  ReadCTAPMakeCredentialResponse and python-fido2 both require exactly
+  that shape unconditionally (the v2.0 spec table's 1/2/3 =
+  fmt/authData/attStmt-without-fmt is parsed by no current client);
+  documented in fido_ctap.c. (b) `fido_ctaphid.c` — the
+  deferred-transaction contract: a cbor callback returning `*resp_len
+  == 0` keeps its channel as `tx_cid` (no response sent); keep-alives
+  via `fido2_ctaphid_keepalive()` (throttled to one per 500 ms, status
+  FIDO2_KEEPALIVE_UP_NEEDED 0x02 while the app waits for UP); CANCEL on
+  the tx channel records `cancelled` (no response — CANCEL is exempt
+  from the busy rules; CANCEL on a foreign channel is ignored); a
+  channel-sync INIT on the tx channel answers INIT AND records
+  cancelled; a new initial packet on the tx channel → INVALID_SEQ, on
+  any other → CHANNEL_BUSY; the tx channel is protected from LRU
+  eviction; `fido2_ctaphid_complete()` frames the late response,
+  sends it, clears tx_cid + cancelled (no-op when idle);
+  `fido_ctap_abort()` on umount. (c) New pure-C modules:
+  `fido_cred.{h,c}` (236-byte record: slot/rpIdHash/credId≤64/
+  userHandle≤64/name≤32/displayName≤32 + CRC-32 over the preceding
+  bytes as a native-endian uint32 — the vault's /io_key.bin convention;
+  store = 4 records + persist-first save/erase hooks +
+  `fido_cred_store_load` for boot), `fido_cose.{h,c}` (77-byte
+  COSE_Key ES256, canonical labels 1,3,−1,−2,−3),
+  `fido_sha256.{h,c}` (pure-C SHA-256, FIPS KATs). (d) `fido_hid.c` —
+  ATECC608 backend vtable (genkey/sign/counter-0/rand/clock), littlefs
+  at the same 0x80000 offset (mount-existing, format on first boot),
+  one file per slot `/f2_<slot>` (236 B), DB loaded at boot,
+  `fido_ctap_abort` in `tud_umount_cb`, and the tick loop in
+  `fido_hid_tick`: while a transaction is pending, emit the UP-wait
+  keep-alive and run `fido_ctap_tick(cancelled)`; on completion hand
+  the response to `fido2_ctaphid_complete`.
+  **TWO REAL BUGS CAUGHT BY THE NEW HOST TESTS (both would have broken
+  the bench):** (1) `parse_make_credential` read every nested
+  container header (map/array count, a boolean) into `u` — the same
+  variable the top-level loop iterated over — so after the first
+  container key the bound shrank and the remaining keys were seen as
+  trailing bytes (0x12 INVALID_CBOR): the default 4-key test request
+  failed, and Chrome's request would too (its pkcp entry carries BOTH
+  "type" and "alg", its excludeList can hold N entries, its options map
+  can hold several — every one of those paths had the same clobber at
+  its level). Fixed by capturing each level's count in a separate
+  `const uint64_t` before its loop (top level, rp, user, pkcp
+  entries+keys, excludeList entries+keys, options; the option boolean
+  is now read into its own variable). (2) `fido_cred_record_encode`
+  wrote the CRC as big-endian bytes, but the struct field is a native
+  `uint32_t` — on any little-endian build (x86 host AND the RP2350)
+  decode's crc_ok compared the byte-swapped value and EVERY record
+  failed, i.e. the persisted DB could never be reloaded after a reboot.
+  Fixed: the CRC is a plain native-endian field (the vault's
+  convention; the file is only ever read back on the same chip).
+  (The new test KATs themselves needed offline recomputation too: CBOR
+  −1/−2/−3 encode as 0x20/0x21/0x22, not 0xD1/0xD2/0xD3 — my first
+  pass had the COSE labels wrong, and bytes(164) is the 2-byte `58
+  A4`, making the full response 248 B, not 249.)
+  **Status:** ctest 9/9 — test_ctap 352 checks (the 14 makeCredential
+  tests pin the full 248-byte response, the 164-byte authData and the
+  77-byte COSE against offline Python-computed KATs: rpIdHash =
+  SHA-256("example.com"), the 22-case error table, the error ORDER
+  (excluded+bad-alg defers → 0x19 after UP; bad-alg beats options),
+  rk overwrite, excluded hit/miss, store full, backend failures,
+  exact-deadline timeout, no-clock, cancel, stale UP, pending
+  lifecycle, tiny buffer); test_cred (CRC KATs, round-trip, byte-flip
+  rejection, every field boundary, persist-first); test_sha256 (FIPS
+  vectors + split updates); test_ctaphid now also covers the deferred
+  contract (hold + 500 ms keep-alive throttle, complete() multi-packet
+  framing + release, CANCEL/INIT-sync cancel, busy rules, LRU
+  protection). Pico build clean; uf2 md5
+  cf3c824ebabf3d5285be08e1fb741a30. GET_INFO is byte-identical (the
+  85-byte KAT is untouched) so the probe must stay FULL PASS.
+  **Bench (user):** flash that uf2, `sudo python3 bench/fido_probe.py`
+  (must FULL PASS), then Chrome Register on fido2-demonstration — when
+  it shows "insert and touch", type `up` on /dev/ttyUSB0 @115200;
+  EXPECT the registration to COMPLETE (the passkey appears in the key
+  list; the second Register with the same account overwrites it — the
+  rk path). On success: strip the `// DBG-TMP` trace, commit the clean
+  fido_hid.c, record the new uf2 md5.
 - **CHROME PARSER READ COMPLETE — ROOT CAUSE CONFIRMED + FIXED
   (2026-10-31, supersedes the "prime suspect" state below):** finished
   reading ReadCTAPGetInfoResponse (device_response_converter.cc:378-857,
