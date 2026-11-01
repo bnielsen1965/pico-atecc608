@@ -1,21 +1,62 @@
 # Plan: FIDO2 example — passkey authenticator
 
-**Current state (2026-10-31: PHASE 3 — MAKE_CREDENTIAL FULLY IMPLEMENTED
-(host side): request parsing per v2.0 §5.1, the deferred UP-wait
-transaction (keep-alives, CANCEL, timeout), on-chip keygen, packed
-SELF-attestation, the 4-record credential DB with persist-first littlefs
-files, and the app wiring. Two REAL bugs caught by the new host tests
-BEFORE the bench: (1) the makeCredential parser used `u` for both the
-top-level map count and every nested header read, so any container key
-clobbered the loop bound and the remaining keys read as trailing bytes
-(0x12) — no multi-key request, let alone Chrome's, could ever parse;
-(2) the cred record's CRC was encoded big-endian in the file but held in
-a native uint32 struct field, so decode failed on every little-endian
-build (RP2350 included) — the DB could never survive a reboot. Both
-fixed; ctest 9/9; Pico build clean; uf2 md5 cf3c824ebabf3d5285be08e1fb741a30
-(carries the uncommitted `// DBG-TMP` trace for the bench round). BENCH
-PENDING: Chrome Register on fido2-demonstration with `up` typed on
-/dev/ttyUSB0 @115200 — registration should now COMPLETE):**
+**Current state (2026-10-31: BENCH ROUND 1 FAILED → ROOT CAUSE FOUND +
+FIXED. The fido2-demonstration harness omits user.id — it sends
+user = {"name": "dummy"} with an EMPTY clientDataJSON — and the
+parser's spec-strict MISSING_PARAMETER (0x14) is what Chrome saw. Fix:
+lenient user sub-fields + a synthesized 32-byte TRNG user handle when
+user.id is absent. ctest 9/9 (test_ctap 401 checks); Pico build clean;
+uf2 md5 c1f28a92b7b4ebac4e9d3b05e8077138 (carries an EXTENDED uncommitted
+`// DBG-TMP` trace: full reassembled-message dump + full 64-byte reports
+in both directions). BENCH ROUND 2 PENDING: Chrome Register on
+fido2-demonstration with `up` typed on /dev/ttyUSB0 @115200 — the
+registration should now COMPLETE):**
+
+- **BENCH ROUND 1: 0x14 MISSING_PARAMETER → ROOT CAUSE = THE HARNESS
+  OMITS user.id (2026-10-31, supersedes the "BENCH PENDING" state
+  above):** probe FULL PASS (GET_INFO byte-identical, the 85-byte KAT
+  frozen). Chrome Register → 91-byte makeCredential → 1-byte reply
+  0x14. **The full 91-byte request was reconstructed from the DBG-TMP
+  trace — every visible byte fits:** `01` (INS = MAKE_CREDENTIAL, the
+  CTAP v2.1 numbering) + map(4) { 1: clientDataHash = SHA-256("") — the
+  harness sends an EMPTY clientDataJSON (it talks raw CTAP2, not
+  WebAuthn), 2: rp = {"id": "example.com"}, 3: user = {"name": "dummy"}
+  — NO user.id, NO displayName, 4: pkcp = [{alg: -7, type:
+  "public-key"}] } (91 = 57 first-packet + 34 continuation; the
+  continuation's visible bytes `6e 61 6d 65 65 64 75 6d 6d 79 04` =
+  "name"+"dummy"+key 4 pin the user map to a1 with exactly one entry).
+  The old parser correctly (per the spec) required user.id + name +
+  displayName → 0x14. **The transport is fully exonerated:** the
+  91-byte 2-packet message reassembled correctly (the parser read deep
+  into the message, past the first 57 bytes), and Chrome's GET_INFO is
+  byte-identical to the probe's (BCNT 1, payload 0x04 — the v2.1 INS
+  byte, not a stray parameter). **Fix — lenient user sub-fields:** this
+  device has no UV, so the user entity is storage metadata only:
+  user.id / name / displayName are all now OPTIONAL; a missing user.id
+  gets a synthesized 32-byte handle from the chip TRNG (same rand hook,
+  right next to the credId mint), so the record stays self-consistent
+  and rk overwrites keep working; absent name/displayName stay empty.
+  Still errors: the user KEY itself missing (key 3) → 0x14;
+  present-but-wrong-type field → 0x11; oversized id>64 / name>32 /
+  displayName>32 → 0x15; present-but-EMPTY id → 0x15. The user handle
+  appears NOWHERE in the 248-byte response, so every existing KAT is
+  untouched. **Status:** new test t_mc_lenient_user (the harness shape:
+  name-only user + pkcp WITH "type": "public-key"; the empty user map;
+  the id-only user) — each defers, then UP → the byte-identical 248-byte
+  s_mc_resp KAT + the stored-record checks (synthesized handle = 0xA5+i
+  under the fake backend, name/displayName as provided); the 3
+  now-success error rows removed ("user without id/name/displayName" —
+  "missing user" stays); test_ctap 401 checks; ctest 9/9; Pico build
+  clean; uf2 md5 c1f28a92b7b4ebac4e9d3b05e8077138 (the DBG-TMP trace is
+  EXTENDED, still uncommitted: a full reassembled-message dump before
+  dispatch, full 64-byte reports IN and OUT). **Bench (user):** flash
+  that uf2, `sudo python3 bench/fido_probe.py` (must FULL PASS), then
+  Chrome Register on fido2-demonstration — type `up` on /dev/ttyUSB0
+  @115200; EXPECT the registration to COMPLETE. If it still fails, the
+  trace now carries the full request + full response bytes (next
+  suspect: Chrome's acceptance of the v2.1 response layout). On
+  success: strip the `// DBG-TMP` trace, rebuild, record the clean uf2
+  md5, commit code + PLAN.md separately.
 
 - **PHASE 3 IMPLEMENTED — makeCredential, end to end (2026-10-31,
   supersedes the "makeCredential not yet implemented" boundary below):**
