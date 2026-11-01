@@ -135,11 +135,17 @@ typedef void (*fido2_sink_t)(void *ctx, const uint8_t report[FIDO2_REPORT_LEN]);
 // CTAP2 dispatch hook: process one complete CTAPHID_CBOR message. Fill
 // resp with the full response — status byte first, then payload (just
 // the status byte on error) — and set *resp_len (<= resp_max). The
-// transport frames and sends it verbatim. While the callback runs the
-// transaction is "active": fido2_ctaphid_keepalive() emits keep-alives
-// on its channel, and CANCEL clears it. Phase 1 installs a stub that
-// answers FIDO2_CTAP_ERR_INVALID_COMMAND; Phase 2 installs the CTAP
-// dispatch.
+// transport frames and sends it verbatim. A handler may instead DEFER
+// the response: return with *resp_len == 0 (the CTAP layer's
+// MakeCredential does this while it waits for user presence) and finish
+// later with fido2_ctaphid_complete(). While the callback runs — and,
+// for a deferred response, until complete — the transaction is
+// "active": fido2_ctaphid_keepalive() emits keep-alives on its
+// channel, a CANCEL on its channel is recorded (the app reads it with
+// fido2_ctaphid_cancelled() and completes with CTAP2 0x2D), an INIT on
+// its channel is treated as a cancel (channel-sync aborts the pending
+// transaction), and no other message is accepted on any channel
+// (CHANNEL_BUSY, or INVALID_SEQ on the transaction's own channel).
 typedef void (*fido2_cbor_cb_t)(void *ctx,
                                 const uint8_t *req, uint32_t req_len,
                                 uint8_t *resp, uint32_t resp_max,
@@ -168,9 +174,14 @@ typedef struct {
     uint32_t inflight_tick;   // last packet of the message (busy timeout)
 
     // The transaction the CTAP layer is processing (set around the cbor
-    // callback); keep-alives go to this channel.
+    // callback; left set for a DEFERRED response until
+    // fido2_ctaphid_complete). Keep-alives go to this channel.
     uint32_t tx_cid;
     uint32_t last_keepalive;
+    // A CANCEL (or a channel-sync INIT) arrived for the active
+    // transaction; the app answers it by completing with CTAP2
+    // CTAP2_ERR_KEEPALIVE_CANCEL (0x2D).
+    bool cancelled;
 
     // Message buffer (received) and response scratch (CBOR response).
     uint8_t msgbuf[FIDO2_MAX_MSG];
@@ -208,8 +219,22 @@ void fido2_ctaphid_tick(fido2_ctaphid_t *s, uint32_t now_ms,
 
 // Emit a keep-alive on the current transaction's channel, throttled to
 // one per FIDO2_KEEPALIVE_PERIOD_MS; a no-op when no transaction is
-// active. The CTAP layer calls this from its handlers while processing
-// (nothing calls it in Phase 1 — the stub CBOR handler returns at once).
+// active (synchronous or deferred). The app's main loop calls this
+// while a deferred transaction waits (Phase 3: status
+// FIDO2_KEEPALIVE_UP_NEEDED during the user-presence wait).
 void fido2_ctaphid_keepalive(fido2_ctaphid_t *s, uint32_t now_ms,
                              uint8_t status,
                              fido2_sink_t sink, void *sink_ctx);
+
+// True when a CANCEL (or a channel-sync INIT) arrived for the active
+// (deferred) transaction — the app finishes it with CTAP2
+// CTAP2_ERR_KEEPALIVE_CANCEL (0x2D).
+bool fido2_ctaphid_cancelled(const fido2_ctaphid_t *s);
+
+// Complete a deferred transaction: frame and send resp (status byte
+// first) as the CBOR response on the transaction's channel and release
+// the channel (a new message may start again). No-op when no deferred
+// transaction is active; resp_len is clamped to FIDO2_MAX_MSG.
+void fido2_ctaphid_complete(fido2_ctaphid_t *s, const uint8_t *resp,
+                            uint32_t resp_len,
+                            fido2_sink_t sink, void *sink_ctx);

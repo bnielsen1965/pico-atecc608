@@ -7,7 +7,10 @@ add_executable(pico-atecc608-fido2
     fido_hid.c
     fido_ctaphid.c
     fido_ctap.c
+    fido_cred.c
+    fido_cose.c
     fido_cbor.c
+    fido_sha256.c
 )
 
 # tusb_config.h (this directory) must be reachable as a bare include from
@@ -21,6 +24,7 @@ target_link_libraries(pico-atecc608-fido2
     atecc608::atecc608
     tinyusb_device
     pico_unique_id   # 8-byte unique ID -> USB serial string
+    pico-littlefs    # credential DB (/f2_<slot>), same volume as console/vault
 )
 
 # Debug console on UART0 only — the USB interface is the HID key, so no

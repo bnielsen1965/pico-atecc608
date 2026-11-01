@@ -8,7 +8,14 @@
 // MESSAGE_TIMEOUT, CHANNEL_BUSY, INVALID_CHANNEL), the channel rules
 // (unknown CIDs auto-accepted, one in-flight message at a time, LRU
 // eviction so broadcast INIT can never fail), the 750 ms busy timeout
-// (and its reset by continuation packets), and keep-alive throttling.
+// (and its reset by continuation packets), and keep-alive throttling —
+// plus the deferred-transaction contract (Phase 3): a CBOR handler that
+// defers (resp_len 0) holds its channel with no immediate response,
+// UP-wait keep-alives flow at the 500 ms throttle, a CANCEL (or a
+// channel-sync INIT) on that channel records a cancel, the busy rules
+// apply to it (CANCEL exempt), the channel is never LRU-evicted while
+// the transaction is active, and fido2_ctaphid_complete() frames the
+// late response and releases the channel.
 
 #include <stdio.h>
 #include <string.h>
@@ -57,9 +64,12 @@ static void wink_cb(void *ctx)
 
 // The CBOR handler under test: answers CTAP2_OK (status byte only) and —
 // when s_keepalive_calls is armed — emits keep-alives at 100 ms steps to
-// exercise the transport's throttling.
+// exercise the transport's throttling. s_defer makes it DEFER (resp_len
+// 0): the transport must hold the channel for a later
+// fido2_ctaphid_complete().
 static int s_keepalive_calls = 0;
 static uint32_t s_stub_now = 0;
+static int s_defer = 0;
 
 static void cbor_stub(void *ctx, const uint8_t *req, uint32_t req_len,
                       uint8_t *resp, uint32_t resp_max, uint32_t *resp_len)
@@ -71,6 +81,10 @@ static void cbor_stub(void *ctx, const uint8_t *req, uint32_t req_len,
         s_stub_now += 100;
         fido2_ctaphid_keepalive(&s, s_stub_now, FIDO2_KEEPALIVE_PROCESSING,
                                 sink, NULL);
+    }
+    if (s_defer) {
+        *resp_len = 0;
+        return;
     }
     if (resp_max >= 1) {
         resp[0] = FIDO2_CTAP_ERR_OK;
@@ -87,6 +101,7 @@ static void fresh(void)
     s_winks = 0;
     s_keepalive_calls = 0;
     s_stub_now = 0;
+    s_defer = 0;
 }
 
 // --- packet builders / parsers -------------------------------------------------------
@@ -827,6 +842,223 @@ static void t_channel_eviction(void)
     CHECK(verify_ping_resp(s_nreports - 1, 2, data, 3) == 1);
 }
 
+// --- deferred transactions (Phase 3) ------------------------------------------------------
+
+// True when `cid` has a slot in the channel table (the struct is fully
+// exposed; the tests already reach into its state).
+static int channel_known(uint32_t cid)
+{
+    for (int i = 0; i < FIDO2_MAX_CHANNELS; i++) {
+        if (s.channels[i].cid == cid) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// INIT a channel, then send it a single-packet CBOR message that the
+// stub defers; returns the channel's CID.
+static uint32_t start_deferred(uint32_t now)
+{
+    const uint32_t cid = do_init(now, FIDO2_BROADCAST_CID);
+    s_defer = 1;
+    uint8_t pkt[FIDO2_REPORT_LEN];
+    uint8_t data[4] = {0xA1, 0x01, 0x02, 0x03};
+    build_init(pkt, cid, FIDO2_CMD_CBOR, 4, data, 4);
+    feed(now + 100, pkt);
+    return cid;
+}
+
+// A deferred CBOR holds its channel with no immediate response; the
+// UP-wait keep-alives are throttled to one per 500 ms; complete()
+// frames the late response (multi-packet) and releases the channel.
+static void t_deferred(void)
+{
+    fresh();
+    const uint32_t cid = start_deferred(1000);
+
+    // No response yet (only the INIT's), no cancel recorded.
+    CHECK(s_nreports == 1);
+    CHECK(!fido2_ctaphid_cancelled(&s));
+
+    // UP-wait keep-alives: 2000 goes out (period since the dispatch),
+    // 2400 is throttled, 2600 goes out again.
+    fido2_ctaphid_keepalive(&s, 2000, FIDO2_KEEPALIVE_UP_NEEDED, sink, NULL);
+    fido2_ctaphid_keepalive(&s, 2400, FIDO2_KEEPALIVE_UP_NEEDED, sink, NULL);
+    fido2_ctaphid_keepalive(&s, 2600, FIDO2_KEEPALIVE_UP_NEEDED, sink, NULL);
+    CHECK(s_nreports == 3);
+    for (int i = 1; i <= 2; i++) {
+        const uint8_t *p = s_reports[i];
+        CHECK(rep_cid(p) == cid);
+        CHECK(rep_cmd(p) == FIDO2_CMD_KEEPALIVE);
+        CHECK(rep_bcnt(p) == 1);
+        CHECK(p[7] == FIDO2_KEEPALIVE_UP_NEEDED);
+    }
+
+    // complete(): the 200-byte response is framed as 4 packets
+    // (57 + 59 + 59 + 25).
+    uint8_t resp[200];
+    for (int i = 0; i < 200; i++) {
+        resp[i] = (uint8_t)i;
+    }
+    const int before = s_nreports;
+    fido2_ctaphid_complete(&s, resp, sizeof resp, sink, NULL);
+    CHECK(s_nreports == before + 4);
+    {
+        const uint8_t *p = s_reports[before];
+        CHECK(rep_cid(p) == cid);
+        CHECK(rep_cmd(p) == FIDO2_CMD_CBOR);
+        CHECK(rep_bcnt(p) == 200);
+        CHECK(0 == memcmp(&p[FIDO2_INIT_HDR_LEN], resp, FIDO2_INIT_DATA_LEN));
+    }
+    {   // and the last packet carries the tail
+        const uint8_t *p = s_reports[before + 3];
+        CHECK(0 == memcmp(&p[FIDO2_CONT_HDR_LEN], &resp[175], 25));
+    }
+
+    // The channel is released: a new (non-deferred) CBOR answers at once.
+    s_defer = 0;
+    uint8_t pkt[FIDO2_REPORT_LEN];
+    uint8_t data[4] = {0xA1, 0x01, 0x02, 0x03};
+    build_init(pkt, cid, FIDO2_CMD_CBOR, 4, data, 4);
+    feed(3000, pkt);
+    CHECK(s_nreports == before + 5);
+    CHECK(rep_cid(s_reports[before + 4]) == cid);
+    CHECK(rep_cmd(s_reports[before + 4]) == FIDO2_CMD_CBOR);
+    CHECK(s_reports[before + 4][7] == FIDO2_CTAP_ERR_OK);
+}
+
+// complete() with no deferred transaction is a no-op (no report).
+static void t_complete_idle(void)
+{
+    fresh();
+    const uint8_t resp[1] = {FIDO2_CTAP_ERR_OK};
+    fido2_ctaphid_complete(&s, resp, 1, sink, NULL);
+    CHECK(s_nreports == 0);
+    CHECK(!fido2_ctaphid_cancelled(&s));
+}
+
+// CANCEL: ignored on a foreign channel, recorded on the transaction's
+// channel (still no response), and the app's 0x2D completion releases
+// the channel and clears the flag.
+static void t_deferred_cancel(void)
+{
+    fresh();
+    const uint32_t cid = start_deferred(1000);
+    uint8_t pkt[FIDO2_REPORT_LEN];
+
+    build_init(pkt, 3, FIDO2_CMD_CANCEL, 0, NULL, 0);
+    feed(1500, pkt);
+    CHECK(s_nreports == 1);
+    CHECK(!fido2_ctaphid_cancelled(&s));
+
+    build_init(pkt, cid, FIDO2_CMD_CANCEL, 0, NULL, 0);
+    feed(1600, pkt);
+    CHECK(s_nreports == 1);           // a CANCEL gets no response
+    CHECK(fido2_ctaphid_cancelled(&s));
+
+    // The app finishes the transaction with KEEPALIVE_CANCEL (0x2D).
+    const uint8_t resp[1] = {0x2D};
+    fido2_ctaphid_complete(&s, resp, 1, sink, NULL);
+    CHECK(s_nreports == 2);
+    CHECK(rep_cid(s_reports[1]) == cid);
+    CHECK(rep_cmd(s_reports[1]) == FIDO2_CMD_CBOR);
+    CHECK(rep_bcnt(s_reports[1]) == 1);
+    CHECK(s_reports[1][7] == 0x2D);
+    CHECK(!fido2_ctaphid_cancelled(&s));
+
+    // Released: a new message on the channel works again.
+    s_defer = 0;
+    uint8_t data[3] = {1, 2, 3};
+    send_ping(2000, cid, data, 3);
+    CHECK(1 == verify_ping_resp(2, cid, data, 3));
+}
+
+// The busy rules apply to a deferred channel exactly as to an in-flight
+// one (INVALID_SEQ on the channel itself, CHANNEL_BUSY on others) —
+// except CANCEL is exempt — and stray continuations are dropped.
+static void t_deferred_busy(void)
+{
+    fresh();
+    const uint32_t cid = start_deferred(1000);
+    uint8_t pkt[FIDO2_REPORT_LEN];
+    uint8_t data[3] = {1, 2, 3};
+
+    build_init(pkt, cid, FIDO2_CMD_PING, 3, data, 3);
+    feed(1500, pkt);
+    CHECK(is_error(1, cid, FIDO2_ERR_INVALID_SEQ));
+
+    build_init(pkt, 3, FIDO2_CMD_PING, 3, data, 3);
+    feed(1600, pkt);
+    CHECK(is_error(2, 3, FIDO2_ERR_CHANNEL_BUSY));
+
+    // CANCEL is exempt from the busy rules (it aborts the transaction).
+    build_init(pkt, cid, FIDO2_CMD_CANCEL, 0, NULL, 0);
+    feed(1700, pkt);
+    CHECK(s_nreports == 3);
+    CHECK(fido2_ctaphid_cancelled(&s));
+
+    // A stray continuation (no in-flight message) is dropped silently.
+    build_cont(pkt, cid, 0, data, 3);
+    feed(1800, pkt);
+    CHECK(s_nreports == 3);
+}
+
+// A channel-sync INIT on the transaction's channel gets the normal 17-byte
+// INIT response AND records the transaction as cancelled; a broadcast INIT
+// during the wait still allocates a fresh channel.
+static void t_deferred_init_sync(void)
+{
+    fresh();
+    const uint32_t cid = start_deferred(1000);
+
+    const int before = s_nreports;
+    CHECK(cid == do_init(1500, cid));
+    CHECK(s_nreports == before + 1);
+    CHECK(fido2_ctaphid_cancelled(&s));
+
+    const uint8_t resp[1] = {0x2D};
+    fido2_ctaphid_complete(&s, resp, 1, sink, NULL);
+    CHECK(s_nreports == before + 2);
+    CHECK(s_reports[before + 1][7] == 0x2D);
+    CHECK(!fido2_ctaphid_cancelled(&s));
+
+    // A broadcast INIT still works during a deferred wait.
+    fresh();
+    start_deferred(1000);
+    CHECK(3 == do_init(1500, FIDO2_BROADCAST_CID));
+    CHECK(!fido2_ctaphid_cancelled(&s));
+}
+
+// LRU eviction never drops the channel of an active (deferred)
+// transaction, so a broadcast INIT can still allocate while the device
+// waits for a touch.
+static void t_deferred_eviction(void)
+{
+    fresh();
+    const uint32_t cid = start_deferred(1000);   // CID 2, the oldest entry
+
+    // Fill the table with 7 more channels (2..9 = all 8 slots).
+    for (int i = 0; i < FIDO2_MAX_CHANNELS - 1; i++) {
+        const uint32_t c = do_init(2000 + (uint32_t)i, FIDO2_BROADCAST_CID);
+        CHECK(c == (uint32_t)(3 + i));
+    }
+    CHECK(channel_known(cid));
+
+    // The next allocation must evict — CID 3 is the oldest unprotected
+    // entry; the transaction's channel (2) survives.
+    CHECK((FIDO2_MAX_CHANNELS + 2) == do_init(3000, FIDO2_BROADCAST_CID));
+    CHECK(channel_known(cid));
+    CHECK(!channel_known(3));
+
+    // And the transaction is still live on it (a new PING is refused).
+    uint8_t pkt[FIDO2_REPORT_LEN];
+    uint8_t data[3] = {1, 2, 3};
+    build_init(pkt, cid, FIDO2_CMD_PING, 3, data, 3);
+    feed(4000, pkt);
+    CHECK(is_error(s_nreports - 1, cid, FIDO2_ERR_INVALID_SEQ));
+}
+
 // --- main ------------------------------------------------------------------------------
 
 int main(void)
@@ -849,6 +1081,12 @@ int main(void)
     t_busy_timeout();
     t_keepalive();
     t_channel_eviction();
+    t_deferred();
+    t_complete_idle();
+    t_deferred_cancel();
+    t_deferred_busy();
+    t_deferred_init_sync();
+    t_deferred_eviction();
 
     printf("%s: %d checks, %d failures\n",
            (s_failures == 0) ? "PASS" : "FAIL", s_checks, s_failures);

@@ -34,6 +34,12 @@
 
 #include "tusb.h"
 
+#include "atecc608/atecc608.h"
+#include "atecc608/atecc608_crypto.h"
+#include "atecc608/atecc608_prov.h"
+
+#include "pico_littlefs.h"
+
 #include "fido_ctap.h"
 #include "fido_ctaphid.h"
 
@@ -273,6 +279,103 @@ static void console_tick(void)
     }
 }
 
+// --- ATECC608 key backend (the CTAP layer's vtable) -------------------------------
+// The CTAP layer (fido_ctap.h) knows no chip: it calls these hooks.
+// Slots 3-6 hold the credential key pairs (slot 1 is the device
+// identity key, provisioning-only — the CTAP layer never touches it).
+
+static int be_genkey(void *dev, uint8_t slot, uint8_t pub[64])
+{
+    (void)dev;
+    return (ATECC608_OK == atecc608_genkey(slot, pub)) ? 0 : -1;
+}
+
+static int be_sign(void *dev, uint8_t slot, const uint8_t digest[32],
+                   uint8_t sig[64])
+{
+    (void)dev;
+    return (ATECC608_OK == atecc608_sign(slot, digest, sig)) ? 0 : -1;
+}
+
+static uint32_t be_counter(void *dev)
+{
+    (void)dev;
+    uint32_t v = 0;
+    // Counter 0 = the "FIDO2 signature count" (docs/BRINGUP.md). Phase 3
+    // READS it (the authData signCount); Phase 4 increments it per
+    // signature. A read failure degrades to 0 — the counter is
+    // advisory, not security-critical.
+    if (ATECC608_OK != atecc608_counter_read(0, &v)) {
+        v = 0;
+    }
+    return v;
+}
+
+static int be_rand(void *dev, uint8_t *buf, uint32_t len)
+{
+    (void)dev;
+    return (ATECC608_OK == atecc608_random(buf, len)) ? 0 : -1;
+}
+
+static uint32_t be_clock(void *dev)
+{
+    (void)dev;
+    return osal_time_millis();
+}
+
+// --- credential DB on littlefs (/f2_<slot>) ------------------------------------------
+// One fixed-size file per credential slot: the 236-byte record image
+// (fido_cred.h — CRC-32 checked, the vault's /io_key.bin convention).
+// Same flash layout as the console/vault apps (littlefs @ 0x80000), so
+// a reflashed fido2 keeps its credentials. The store (in the CTAP
+// context) persists through these hooks BEFORE it changes RAM — a
+// failed flash write leaves RAM and flash in agreement.
+
+static void cred_path(char *out, size_t out_max, uint8_t slot)
+{
+    snprintf(out, out_max, "/f2_%u", (unsigned)slot);
+}
+
+static int cred_save(void *priv, uint8_t slot, const fido_cred_record_t *rec)
+{
+    (void)priv;
+    char path[8];
+    uint8_t img[FIDO_CRED_FILE_SIZE];
+    cred_path(path, sizeof path, slot);
+    fido_cred_record_encode(rec, img);
+    return pico_lfs_write_file(path, img, sizeof img);
+}
+
+static int cred_erase(void *priv, uint8_t slot)
+{
+    (void)priv;
+    char path[8];
+    cred_path(path, sizeof path, slot);
+    // A missing file is not an error (nothing to erase).
+    const int st = pico_lfs_remove(path);
+    return (0 == st || -LFS_ERR_NOENT == st) ? 0 : st;
+}
+
+// Boot-load: read /f2_3../f2_6 and install the well-formed records
+// (a missing file = an empty slot; a corrupt file = an empty slot +
+// the record will be overwritten on the next registration).
+static void cred_load_db(fido_ctap_ctx_t *ctx)
+{
+    for (int i = 0; i < FIDO_CRED_MAX; i++) {
+        const uint8_t slot = (uint8_t)(i + FIDO_CRED_SLOT_MIN);
+        char path[8];
+        uint8_t img[FIDO_CRED_FILE_SIZE];
+        fido_cred_record_t rec;
+        cred_path(path, sizeof path, slot);
+        if ((int)sizeof img != pico_lfs_read_file(path, img, sizeof img)) {
+            continue;   // no file (first boot) — slot empty
+        }
+        if (fido_cred_record_decode(img, &rec) && rec.slot == slot) {
+            fido_cred_store_load(&ctx->creds, i, &rec);
+        }
+    }
+}
+
 // --- TinyUSB callbacks ---------------------------------------------------------------
 
 uint8_t const *tud_descriptor_device_cb(void)
@@ -374,6 +477,12 @@ void tud_umount_cb(void)
     // init, a re-plugged key would answer CTAP but WINK would never reach
     // the LED and CBOR would silently take the no-handler path.
     fido2_ctaphid_reset(&s_ctaphid);
+    // A deferred (user-presence-waiting) MakeCredential can no longer be
+    // completed — the host's channel is gone; drop it without a response
+    // so a re-plug starts clean. (The stored credentials and the chip's
+    // keys are untouched — nothing was minted yet; the key pair is only
+    // generated AFTER the touch.)
+    fido_ctap_abort(&s_ctap_ctx);
     // Any queued reports reference this connection's CIDs — dead now.
     outq_flush();
 }
@@ -386,10 +495,37 @@ void fido_hid_init(bool enabled)
     pico_get_unique_board_id_string(s_serial, sizeof s_serial);
 
     fido_ctap_ctx_init(&s_ctap_ctx);
+    // The key backend: the ATECC608 (see the section above).
+    s_ctap_ctx.keys = (fido_ctap_key_ops_t) {
+        .genkey  = be_genkey,
+        .sign    = be_sign,
+        .counter = be_counter,
+        .rand    = be_rand,
+        .clock   = be_clock,
+    };
+    // The credential DB on littlefs, one file per record.
+    s_ctap_ctx.creds.save  = cred_save;
+    s_ctap_ctx.creds.erase = cred_erase;
+    // The credential DB's littlefs volume (the console/vault pattern:
+    // mount a formatted volume, format on first boot).
+    if (0 == pico_lfs_init(NULL)) {
+        if (0 != pico_lfs_mount_existing()) {
+            printf("littlefs: no formatted volume — formatting (one-time; can take a while)...\n");
+            if (0 != pico_lfs_mount()) {
+                printf("littlefs mount FAILED — credential persistence unavailable.\n");
+            } else {
+                printf("littlefs: fresh volume formatted.\n");
+            }
+        }
+        if (pico_lfs_is_mounted()) {
+            cred_load_db(&s_ctap_ctx);
+        }
+    }
     fido2_ctaphid_init(&s_ctaphid);
     outq_flush();
-    // The real CTAP2 dispatch (Phase 2: GET_INFO; unimplemented command
-    // codes answer CTAP1_ERR_INVALID_COMMAND per the spec's MUST).
+    // The real CTAP2 dispatch (Phase 3: GET_INFO + MakeCredential —
+    // the latter defers its response until user presence; unimplemented
+    // command codes answer CTAP1_ERR_INVALID_COMMAND per the spec's MUST).
     fido2_ctaphid_set_cbor(&s_ctaphid, fido_ctap_dispatch, &s_ctap_ctx);
     fido2_ctaphid_set_wink(&s_ctaphid, led_wink_cb, NULL);
 
@@ -407,6 +543,23 @@ void fido_hid_tick(void)
     console_tick();
     if (s_enabled) {
         outq_drain();
+        // A deferred (user-presence-waiting) MakeCredential: keep the
+        // client alive (UP_NEEDED keep-alives, throttled) and drive the
+        // state machine; the moment it finishes, complete the response
+        // over the transport (which releases the channel).
+        if (fido_ctap_pending(&s_ctap_ctx)) {
+            fido2_ctaphid_keepalive(&s_ctaphid, now_ms,
+                                    FIDO2_KEEPALIVE_UP_NEEDED,
+                                    report_sink, NULL);
+            uint8_t resp[FIDO_CTAP_MC_RESP_MAX];
+            uint32_t rlen = 0;
+            if (1 == fido_ctap_tick(&s_ctap_ctx,
+                                    fido2_ctaphid_cancelled(&s_ctaphid),
+                                    resp, sizeof resp, &rlen)) {
+                fido2_ctaphid_complete(&s_ctaphid, resp, rlen,
+                                       report_sink, NULL);
+            }
+        }
     }
     fido2_ctaphid_tick(&s_ctaphid, now_ms, report_sink, NULL);
     led_tick(now_ms);

@@ -165,8 +165,12 @@ static void channel_touch(fido2_ctaphid_t *s, uint32_t now_ms, uint32_t cid)
     int free_slot = -1;
     int oldest    = -1;
     for (i = 0; i < FIDO2_MAX_CHANNELS; i++) {
-        if (s->inflight && s->channels[i].cid == s->inflight_cid) {
-            continue;   // never evict the in-flight channel
+        if ((s->inflight && s->channels[i].cid == s->inflight_cid) ||
+            (0 != s->tx_cid && s->channels[i].cid == s->tx_cid)) {
+            // Never evict an active channel (a message being received,
+            // or a deferred transaction being processed) — its response
+            // is still in flight.
+            continue;
         }
         if (0 == s->channels[i].cid) {
             if (free_slot < 0) {
@@ -257,12 +261,21 @@ static void dispatch(fido2_ctaphid_t *s, fido2_sink_t sink, void *sink_ctx)
         uint32_t resp_len = 1;
         s->tx_cid         = cid;   // keep-alives now target this channel
         s->last_keepalive = 0;
+        s->cancelled      = false; // a fresh transaction
         if (s->cbor_cb) {
             s->cbor_cb(s->cbor_ctx, s->msgbuf, len,
                        s->respbuf, sizeof s->respbuf, &resp_len);
         } else {
             s->respbuf[0] = FIDO2_CTAP_ERR_INVALID_COMMAND;
             resp_len      = 1;
+        }
+        if (0 == resp_len) {
+            // DEFERRED (fido2_cbor_cb_t): the handler parks the response
+            // (a MakeCredential waiting for user presence). The channel
+            // stays active until fido2_ctaphid_complete() — keep-alives
+            // flow, CANCEL/INIT are recorded (fido2_ctaphid_cancelled),
+            // no other message is accepted.
+            break;
         }
         s->tx_cid = 0;
         if (resp_len > sizeof s->respbuf) {
@@ -287,9 +300,14 @@ static void dispatch(fido2_ctaphid_t *s, fido2_sink_t sink, void *sink_ctx)
                         FIDO2_SW_COMMAND_NOT_ALLOWED);
         break;
     case FIDO2_CMD_CANCEL:
-        // No response (CTAP v2.0 8.1.9.1.7): there is no pending CBOR in
-        // a synchronous transport, and clients do not wait for one.
-        s->tx_cid = 0;
+        // No response (CTAP v2.0 8.1.9.1.7; clients do not wait for
+        // one). A CANCEL on a channel with an active (deferred)
+        // transaction is recorded for the app, which completes it with
+        // CTAP2 CTAP2_ERR_KEEPALIVE_CANCEL (0x2D); a CANCEL on any
+        // other channel is ignored (spec).
+        if (0 != s->tx_cid && cid == s->tx_cid) {
+            s->cancelled = true;
+        }
         break;
     default:
         send_error(sink, sink_ctx, cid, FIDO2_ERR_INVALID_CMD);
@@ -317,6 +335,13 @@ static void input_init(fido2_ctaphid_t *s, uint32_t now_ms, uint32_t cid,
     // in-flight message on that channel (CTAP v2.0 8.1.9.1.3).
     if (s->inflight && cid == s->inflight_cid) {
         inflight_clear(s);
+    }
+
+    // A sync on a channel with a deferred (user-presence-waiting)
+    // transaction aborts it — record it as a cancel, exactly like a
+    // CANCEL; the app completes the transaction with CTAP2 0x2D.
+    if (0 != s->tx_cid && cid == s->tx_cid) {
+        s->cancelled = true;
     }
 
     uint32_t reply_cid = cid;
@@ -365,6 +390,19 @@ static void input_init_packet(fido2_ctaphid_t *s, uint32_t now_ms,
         }
         // A different channel wants to start while this one is busy.
         send_error(sink, sink_ctx, cid, FIDO2_ERR_CHANNEL_BUSY);
+        return;
+    }
+
+    if (FIDO2_CMD_CANCEL != cmd && 0 != s->tx_cid) {
+        // A deferred CTAP transaction is still processing on tx_cid —
+        // it is the one active message, so the same rules as for an
+        // in-flight one apply. CANCEL is exempt: it is the client's way
+        // of aborting that very transaction (and it gets no response).
+        if (cid == s->tx_cid) {
+            send_error(sink, sink_ctx, cid, FIDO2_ERR_INVALID_SEQ);
+        } else {
+            send_error(sink, sink_ctx, cid, FIDO2_ERR_CHANNEL_BUSY);
+        }
         return;
     }
 
@@ -442,6 +480,7 @@ void fido2_ctaphid_reset(fido2_ctaphid_t *s)
     inflight_clear(s);
     s->tx_cid         = 0;
     s->last_keepalive = 0;
+    s->cancelled      = false;
     // msgbuf/respbuf need no wiping: their lengths are cleared above and
     // every byte is written before it is read.
 }
@@ -505,4 +544,27 @@ void fido2_ctaphid_keepalive(fido2_ctaphid_t *s, uint32_t now_ms,
     resp_init(&r, sink, sink_ctx, s->tx_cid, FIDO2_CMD_KEEPALIVE, 1);
     resp_send(&r, &status, 1);
     s->last_keepalive = now_ms;
+}
+
+bool fido2_ctaphid_cancelled(const fido2_ctaphid_t *s)
+{
+    return s->cancelled;
+}
+
+void fido2_ctaphid_complete(fido2_ctaphid_t *s, const uint8_t *resp,
+                            uint32_t resp_len,
+                            fido2_sink_t sink, void *sink_ctx)
+{
+    if (0 == s->tx_cid) {
+        return;   // no deferred transaction to complete
+    }
+    const uint32_t cid = s->tx_cid;
+    s->tx_cid    = 0;
+    s->cancelled = false;
+    if (resp_len > FIDO2_MAX_MSG) {
+        resp_len = FIDO2_MAX_MSG;
+    }
+    fido2_resp_t r;
+    resp_init(&r, sink, sink_ctx, cid, FIDO2_CMD_CBOR, resp_len);
+    resp_send(&r, resp, resp_len);
 }

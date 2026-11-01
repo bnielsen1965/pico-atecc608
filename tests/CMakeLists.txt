@@ -176,13 +176,36 @@ target_compile_options(test_cbor PRIVATE -Wall -Wextra)
 add_test(NAME test_cbor COMMAND $<TARGET_FILE:test_cbor>)
 
 # The fido2 example's CTAP2 dispatch (example/fido2/fido_ctap.c) is
-# likewise pure C: the 6-byte header validation (length, version,
-# wLength), GET_INFO (the full response map, decoded field by field,
-# plus a hand-computed byte KAT), and the unimplemented-command answer
-# (CTAP1_ERR_INVALID_COMMAND, the spec's MUST).
+# likewise pure C: GET_INFO (the full response map, decoded field by
+# field, plus a hand-computed byte KAT), the unimplemented-command
+# answer (CTAP1_ERR_INVALID_COMMAND, the spec's MUST), and
+# MakeCredential (the full request parse, the error table, the deferred
+# user-presence state machine, and the response — byte-pinned authData,
+# COSE key and packed signature, against a deterministic key-backend
+# fake).
 add_executable(test_ctap test_ctap.c
             ${MOD_ROOT}/example/fido2/fido_ctap.c
-            ${MOD_ROOT}/example/fido2/fido_cbor.c)
+            ${MOD_ROOT}/example/fido2/fido_cred.c
+            ${MOD_ROOT}/example/fido2/fido_cose.c
+            ${MOD_ROOT}/example/fido2/fido_cbor.c
+            ${MOD_ROOT}/example/fido2/fido_sha256.c)
 target_include_directories(test_ctap PRIVATE ${MOD_ROOT}/example/fido2)
 target_compile_options(test_ctap PRIVATE -Wall -Wextra)
 add_test(NAME test_ctap COMMAND $<TARGET_FILE:test_ctap>)
+
+# The fido2 example's SHA-256 (example/fido2/fido_sha256.c) is pure C:
+# the FIPS 180-4 known-answer vectors (including the million-'a' vector)
+# and the split-update paths (block boundaries).
+add_executable(test_sha256 test_sha256.c ${MOD_ROOT}/example/fido2/fido_sha256.c)
+target_include_directories(test_sha256 PRIVATE ${MOD_ROOT}/example/fido2)
+target_compile_options(test_sha256 PRIVATE -Wall -Wextra)
+add_test(NAME test_sha256 COMMAND $<TARGET_FILE:test_sha256>)
+
+# The fido2 example's credential store (example/fido2/fido_cred.c) is
+# pure C: the 236-byte record image (CRC-32 round-trip + corruption and
+# range validation) and the store operations (alloc/find/insert/erase,
+# the persist-first rule, the boot-load path).
+add_executable(test_cred test_cred.c ${MOD_ROOT}/example/fido2/fido_cred.c)
+target_include_directories(test_cred PRIVATE ${MOD_ROOT}/example/fido2)
+target_compile_options(test_cred PRIVATE -Wall -Wextra)
+add_test(NAME test_cred COMMAND $<TARGET_FILE:test_cred>)
