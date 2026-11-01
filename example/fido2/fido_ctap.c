@@ -293,7 +293,15 @@ static uint8_t parse_make_credential(fido_ctap_ctx_t *ctx,
             break;
         }
         case 3: {   // user
-            bool has_id = false, has_name = false, has_disp = false;
+            // The sub-fields are OPTIONAL on this device: the
+            // fido2-demonstration harness (the FIDO Alliance's own demo
+            // tool) sends user = {"name": "dummy"} — no user.id, no
+            // displayName — and the spec-strict
+            // CTAP2_ERR_MISSING_PARAMETER failed Chrome registration
+            // there (bench round 1). This device has no UV, so the user
+            // entity is storage metadata only: a request without user.id
+            // gets a synthesized 32-byte handle (below, with the credId
+            // mint); absent name/displayName stay empty.
             if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL) ||
                 FIDO_CBOR_MAP != t) {
                 return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
@@ -314,7 +322,6 @@ static uint8_t parse_make_credential(fido_ctap_ctx_t *ctx,
                     }
                     m.p.user_handle_len = (uint8_t)dlen;
                     memcpy(m.p.user_handle, data, dlen);
-                    has_id = true;
                 } else if (4 == dlen && 0 == memcmp(data, "name", 4)) {
                     if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen) ||
                         FIDO_CBOR_TEXT != t) {
@@ -325,7 +332,6 @@ static uint8_t parse_make_credential(fido_ctap_ctx_t *ctx,
                     }
                     m.p.name_len = (uint8_t)dlen;
                     memcpy(m.p.name, data, dlen);
-                    has_name = true;
                 } else if (11 == dlen &&
                            0 == memcmp(data, "displayName", 11)) {
                     if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen) ||
@@ -337,15 +343,11 @@ static uint8_t parse_make_credential(fido_ctap_ctx_t *ctx,
                     }
                     m.p.display_name_len = (uint8_t)dlen;
                     memcpy(m.p.display_name, data, dlen);
-                    has_disp = true;
                 } else {   // "icon" and friends: not needed
                     if (!fido_cbor_dec_skip(&d)) {
                         return FIDO_CTAP2_ERR_INVALID_CBOR;
                     }
                 }
-            }
-            if (!has_id || !has_name || !has_disp) {
-                return FIDO_CTAP2_ERR_MISSING_PARAMETER;
             }
             m.has_user = true;
             break;
@@ -572,6 +574,18 @@ static uint8_t parse_make_credential(fido_ctap_ctx_t *ctx,
     if (NULL == ctx->keys.rand ||
         0 != ctx->keys.rand(ctx->keys.dev, m.p.cred_id, FIDO_MC_CRED_ID_LEN)) {
         return FIDO_CTAP2_ERR_OTHER;
+    }
+
+    // The user handle: the request's user.id when present; a request
+    // without it (the fido2-demonstration harness) gets a synthesized
+    // 32-byte handle from the same TRNG, so the credential record stays
+    // self-consistent and rk overwrites keep working.
+    if (0 == m.p.user_handle_len) {
+        m.p.user_handle_len = FIDO_MC_CRED_ID_LEN;
+        if (0 != ctx->keys.rand(ctx->keys.dev, m.p.user_handle,
+                                FIDO_MC_CRED_ID_LEN)) {
+            return FIDO_CTAP2_ERR_OTHER;
+        }
     }
 
     mc_begin(ctx, &m.p);

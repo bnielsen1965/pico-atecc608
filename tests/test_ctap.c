@@ -721,12 +721,6 @@ static void t_mc_error_table(void)
           FIDO_CTAP2_ERR_LIMIT_EXCEEDED },
         { "missing user",               { .no_user = 1 },
           FIDO_CTAP2_ERR_MISSING_PARAMETER },
-        { "user without id",            { .user_no_id = 1 },
-          FIDO_CTAP2_ERR_MISSING_PARAMETER },
-        { "user without name",          { .user_no_name = 1 },
-          FIDO_CTAP2_ERR_MISSING_PARAMETER },
-        { "user without displayName",   { .user_no_disp = 1 },
-          FIDO_CTAP2_ERR_MISSING_PARAMETER },
         { "user.id 65 bytes",           { .user_id_len = 65 },
           FIDO_CTAP2_ERR_LIMIT_EXCEEDED },
         { "user.name 33 bytes",         { .name_len = 33 },
@@ -858,6 +852,79 @@ static void t_mc_happy(void)
     // insert() computed a valid CRC over the stored record.
     CHECK(r->crc32 == fido_cred_crc32((const uint8_t *)r,
                                       FIDO_CRED_FILE_SIZE - 4));
+}
+
+// The lenient user sub-fields (bench round 1 fix): the
+// fido2-demonstration harness sends user = {"name": …} — no user.id,
+// no displayName (and pkcp entries WITH "type": "public-key"). The
+// sub-fields are optional on this device; a missing user.id is
+// synthesized as a 32-byte handle from the TRNG (the fake: 0xA5+i).
+// The user handle never appears in the response, so with the same
+// cdh/RP the 248-byte KAT is unchanged (s_mc_resp).
+static void t_mc_lenient_user(void)
+{
+    fido_ctap_ctx_t ctx;
+    mc_install(&ctx);
+    mc_reset();
+    uint8_t req[512];
+    uint8_t resp[FIDO_CTAP_MC_RESP_MAX];
+    uint32_t tlen = 0;
+
+    // Case 1: the harness shape — user with only "name", pkcp with
+    // "type": "public-key". Deferred, then the full KAT response; the
+    // stored handle is the synthesized one.
+    {
+        mc_opts_t o = { .user_no_id = 1, .user_no_disp = 1, .pkcp_type = 1 };
+        const uint32_t n = build_mc(req, sizeof req, &o);
+        CHECK(0 == mc_dispatch(&ctx, req, n, resp, sizeof resp));
+        CHECK(fido_ctap_pending(&ctx));
+        ctx.user_present = true;
+        CHECK(1 == fido_ctap_tick(&ctx, false, resp, sizeof resp, &tlen));
+        CHECK(tlen == sizeof s_mc_resp);
+        CHECK(0 == memcmp(resp, s_mc_resp, sizeof s_mc_resp));
+        CHECK(ctx.creds.present[0]);
+        const fido_cred_record_t *r = &ctx.creds.rec[0];
+        CHECK(r->user_handle_len == FIDO_MC_CRED_ID_LEN);
+        for (int i = 0; i < FIDO_MC_CRED_ID_LEN; i++) {
+            CHECK(r->user_handle[i] == (uint8_t)(0xA5 + i));
+        }
+        CHECK(0 == memcmp(r->name, "user", 4));
+        CHECK(r->name_len == 4);
+        CHECK(r->display_name_len == 0);
+    }
+
+    // Case 2: user = {} (an empty map) — also accepted.
+    {
+        mc_opts_t o = { .user_no_id = 1, .user_no_name = 1, .user_no_disp = 1 };
+        const uint32_t n = build_mc(req, sizeof req, &o);
+        CHECK(0 == mc_dispatch(&ctx, req, n, resp, sizeof resp));
+        CHECK(fido_ctap_pending(&ctx));
+        ctx.user_present = true;
+        CHECK(1 == fido_ctap_tick(&ctx, false, resp, sizeof resp, &tlen));
+        CHECK(tlen == sizeof s_mc_resp);
+        CHECK(0 == memcmp(resp, s_mc_resp, sizeof s_mc_resp));
+        CHECK(ctx.creds.present[1]);
+        const fido_cred_record_t *r = &ctx.creds.rec[1];
+        CHECK(r->user_handle_len == FIDO_MC_CRED_ID_LEN);
+        CHECK(r->name_len == 0 && r->display_name_len == 0);
+    }
+
+    // Case 3: user with only "id" — the request handle is used as-is
+    // (no synthesis), name/displayName stay empty.
+    {
+        mc_opts_t o = { .user_no_name = 1, .user_no_disp = 1 };
+        const uint32_t n = build_mc(req, sizeof req, &o);
+        CHECK(0 == mc_dispatch(&ctx, req, n, resp, sizeof resp));
+        CHECK(fido_ctap_pending(&ctx));
+        ctx.user_present = true;
+        CHECK(1 == fido_ctap_tick(&ctx, false, resp, sizeof resp, &tlen));
+        CHECK(tlen == sizeof s_mc_resp);
+        CHECK(ctx.creds.present[2]);
+        const fido_cred_record_t *r = &ctx.creds.rec[2];
+        CHECK(r->user_handle_len == sizeof s_user_id);
+        CHECK(0 == memcmp(r->user_handle, s_user_id, sizeof s_user_id));
+        CHECK(r->name_len == 0 && r->display_name_len == 0);
+    }
 }
 
 // The rk option: a (rp, user) credential is overwritten IN PLACE — the
@@ -1219,6 +1286,7 @@ int main(void)
     t_mc_error_table();
     t_mc_error_order();
     t_mc_happy();
+    t_mc_lenient_user();
     t_mc_rk_overwrite();
     t_mc_excluded();
     t_mc_store_full();
