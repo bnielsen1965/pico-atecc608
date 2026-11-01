@@ -1,16 +1,91 @@
 # Plan: FIDO2 example — passkey authenticator
 
-**Current state (2026-10-31: BENCH ROUND 1 FAILED → ROOT CAUSE FOUND +
-FIXED. The fido2-demonstration harness omits user.id — it sends
-user = {"name": "dummy"} with an EMPTY clientDataJSON — and the
-parser's spec-strict MISSING_PARAMETER (0x14) is what Chrome saw. Fix:
-lenient user sub-fields + a synthesized 32-byte TRNG user handle when
-user.id is absent. ctest 9/9 (test_ctap 401 checks); Pico build clean;
-uf2 md5 c1f28a92b7b4ebac4e9d3b05e8077138 (carries an EXTENDED uncommitted
-`// DBG-TMP` trace: full reassembled-message dump + full 64-byte reports
-in both directions). BENCH ROUND 2 PENDING: Chrome Register on
-fido2-demonstration with `up` typed on /dev/ttyUSB0 @115200 — the
-registration should now COMPLETE):**
+**Current state (2026-10-31: BENCH ROUND 2 — THE DEVICE NOW COMPLETES
+makeCredential END TO END (keep-alives → `up` → full 248-byte success
+response on the wire, BCNT 0x00F8, status 0x00) but CHROME REJECTS THE
+RESPONSE ("Your device can't be used with this site / localhost may
+require a newer or different kind of device"). Decoding the response
+from the trace found THREE spec violations in authData, each
+independently fatal: (1) credIdLen encoded 2 bytes where the spec says
+1 (Chrome reads 0x00 → empty credId → reject — the immediate killer);
+(2) COSE_Key malformed — x at -2, y at -3, plus a bogus "crv" pair at
+-1 (RFC 8152: x = -1, y = -2; "crv" is not a COSE label); (3) flags =
+0x41 "UP | AT bit 6" — no AT flag exists, bits 4-7 are reserved MUST-be
+0. Code is UNCHANGED since 250b41e/0cc6abc; TOMORROW = fix the three
+bugs + recompute the two KATs (authData 164→161 B, response 248→245
+B) + bench round 3):**
+
+- **BENCH ROUND 2: response sent end-to-end, Chrome rejects its CONTENT
+  — THREE authData spec violations found by decoding the trace
+  (2026-10-31, supersedes the BENCH ROUND 2 PENDING state above):**
+  probe FULL PASS; the lenient-user fix is VINDICATED — the 91-byte
+  request parsed, deferred, kept Chrome alive (0xBB, 1 B, payload
+  0x02 = UP_NEEDED, 500 ms throttle visible in the trace), `up`
+  completed it, and the full 5-packet response went out (BCNT 0x00F8
+  = 248, status 0x00, SEQ 0-3, no gaps). Chrome then showed "Your
+  device can't be used with this site / localhost may require a newer
+  or different kind of device" and sent nothing more. **The response,
+  decoded from the trace (the AAGUID straddles the packet 1→2
+  boundary, pinning the parse; pasted line 1 is missing 11 bytes =
+  counter(4) + AAGUID[0..6], the rest is complete and self-consistent),
+  is structurally the "perfect" v2.1 map {1: "packed", 2:
+  authData(164), 3: {1: -7, 2: sig(64)}} — but authData carries three
+  spec violations, each independently fatal to Chrome:**
+  (1) **credIdLen is emitted as 2 bytes (00 20) — the spec is 1
+  octet** (WebAuthn §6.1: attestationData = aaguid || credIdLen (1 B)
+  || credId || COSE_Key): fido_ctap.c:632-647 built
+  "credIdLen(2, BE)". Chrome reads credIdLen = 0x00 → empty credId →
+  reject. This is the immediate killer.
+  (2) **COSE_Key is malformed** (fido_cose.c emits map(5)): {1: 2, 3:
+  -7, -1: 1 /* "crv" */, -2: X, -3: Y} — RFC 8152 §3.1 puts x at -1 and
+  y at -2; "crv" is a JWK concept, not a COSE label (the curve is
+  implied by kty/alg), so the bogus pair squats on x's slot with an
+  integer value → Chrome's key parse dies at x. Correct: map(2) {1: 2,
+  3: -7, -1: X(32), -2: Y(32)} = **75 bytes** (FIDO_COSE_ES256_LEN
+  77 → 75).
+  (3) **flags = 0x41, documented in-code as "UP (bit 0) | AT (bit
+  6)"** — there is no AT flag; WebAuthn §6.1 bits 4-7 are reserved
+  MUST-be-0 (UP=0x01, UV=0x02, BE=0x04, BS=0x08). fido_ctap.c:638 →
+  0x01 (UP only).
+  **After the fix:** authData = 161 B (32+1+4+16+1+32+75), response =
+  **245 B** (58 A1 header; FIDO_CTAP_MC_RESP_MAX = 288 keeps
+  working). KAT impact: s_authdata 164→161 B and s_mc_resp 248→245 B
+  (new attestation digest + fake sig = digest‖digest — recomputable
+  offline); every test that asserts sizeof s_mc_resp / 248 follows
+  automatically; GET_INFO + the probe's frozen 85-byte KAT untouched.
+  **Round 2 context:** the test ran against a LOCALHOST page (the
+  error names it; the trace rpIdHash da271d56…878b matches none of
+  "localhost"/"example.com"/"fido2-demonstration.com"/"127.0.0.1" —
+  the page sets its own rp.id; ASK THE USER WHICH PAGE). Round 1's
+  uf2 md5 c1f28a92b7b4ebac4e9d3b05e8077138 is what ran.
+  **TOMORROW, in order:**
+  1. Fix the three bugs: fido_ctap.c:638 (0x41 → 0x01 + comment),
+     fido_ctap.c:632-647 (drop the extra credIdLen high byte, comment
+     "credIdLen(2, BE)" → "credIdLen(1)", buffer size 2 → 1),
+     fido_cose.c (map(5) → map(2): x at -1, y at -2, drop the "crv"
+     pair), fido_cose.h (FIDO_COSE_ES256_LEN 77 → 75).
+  2. Recompute the KATs OFFLINE (Python; verify the new layout against
+     the spec text, not just against our old output) and update
+     test_ctap.c (s_authdata, s_mc_resp, the 248-byte comments, any
+     length assertions).
+  3. ctest 9/9, Pico build, new uf2 md5 → PLAN, BENCH ROUND 3: flash,
+     probe FULL PASS, Register on the SAME localhost page as round 2,
+     `up`, paste the FULL trace — this time including the DBG MSG
+     request line and all complete 64-byte lines (round 2's pasted
+     line 1 lost 11 bytes, and the request/cdh was not pasted).
+  4. OPTIONAL offline verification (before or after round 3): parse a
+     round-3 response in Python (cbor2) — assert the spec layout,
+     extract the COSE key + sig, verify ECDSA P-256 over
+     SHA-256(authData ‖ cdh) with the cdh from the DBG MSG dump. This
+     is the ONE check the fake backend can never do: it proves the
+     ATECC608 signature pipeline (raw r‖s, 64 B, signable key) with a
+     REAL key. (Round 2's real signature can't be verified from the
+     paste — the counter bytes sit in the truncated region and the cdh
+     wasn't pasted; if ever needed, reconstruct with the
+     counter=00000000 assumption, counter 0 is read-only in Phase 3.)
+  5. On success: strip the `// DBG-TMP` hunks from fido_hid.c,
+     rebuild, record the clean uf2 md5, commit code + PLAN.md
+     separately.
 
 - **BENCH ROUND 1: 0x14 MISSING_PARAMETER → ROOT CAUSE = THE HARNESS
   OMITS user.id (2026-10-31, supersedes the "BENCH PENDING" state
