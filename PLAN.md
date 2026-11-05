@@ -5,6 +5,10 @@ history lives in the git log — this file was committed at every phase, so
 keep entries forward-looking: when a phase lands, compress its narrative
 into a one-line History bullet.
 
+(2026-11-05: the settled C7–C17 narrative blocks were pruned per this
+rule — their root causes live in the History bullets, the Settled
+decisions register, and the git log.)
+
 ## Ground rules (2026-11-03 — in force for all further work)
 
 1. **USB timing is critical.** Core 1 is dedicated to stable USB
@@ -13,7 +17,7 @@ into a one-line History bullet.
 2. **Flash writes pause all cores.** Only initiate a littlefs/flash write
    from a stable point (no in-flight USB transaction, queues drained).
 3. **Spec of record:** `example/fido2/fido-client-to-authenticator-protocol-
-   v2.3-ps-2026-0226.pdf` (CTAP v2.3 PS). Verify protocol details against
+   v2.3-ps-20260226.pdf` (CTAP v2.3 PS). Verify protocol details against
    it, not memory.
 4. **FIDO2/CTAP2 only — no U2F assumptions.** Do not carry U2F command
    values or outside-CTAP knowledge into the CTAP2 path; the U2F/FIDO2
@@ -116,18 +120,19 @@ into a one-line History bullet.
      register exists so each question is answered once, against the
      primary source, and then treated as fixed. A register entry is only
      superseded by new primary-source evidence, never by memory.
+13. **Flash verification.** The Pico **reboots the moment the uf2 write
+    completes** — the BOOTSEL volume disappearing right after `cp` is
+    the SUCCESS signal, not a failure. Do NOT read the volume back
+    after the copy (it's already gone); the `[ -d
+    /run/media/burnin/RP2350 ]` check is unreliable (the automounter
+    creates a transient placeholder). Verify the flash via the INIT fw
+    version (the probe) + post-reboot HID enumeration (`lsusb` / `findmnt
+    -t vfat`), never a volume read-back.
 
 ## Current state (2026-11-05) — **BROWSER REGISTRATION PASSES ON BOTH HARNESS: C18 (webauthn.io) and C19 (xorengineering.com/fido2/) on fw 1.0.5.** The C17 `UserActionTimeout` was round timing, not firmware (the fix: `up` within ~2 s of the Register click). The temporary diagnostic scaffolding (the `diag` console command + the `DBG mc:` prints) is removed and rebuilt (uf2 md5 `b837ed7f5f6754e67b05ac0aab6372b9`, ctest 9/9; the wire is unchanged — still fw 1.0.5). The register half of the demo is DONE. **NEXT: Phase 4 — getAssertion + RESET (login).** PAUSED here.
 
-- **C16 root cause (FIXED in code):** Firefox's authenticator-rs `COSEKeyVisitor` expects the **5-entry** COSE key `{1:kty, 3:alg, -1:crv, -2:x, -3:y}`; we were emitting the RFC 9053 **4-entry** `{1:kty, 3:crv, -1:x, -2:y}`. Firefox read our label `−1` (x, a byte array) where it expects the curve **i64** → the exact C16 RUST_LOG error `invalid type: byte array, expected i64`. Fix: emit the 5-entry layout `a5 01 02 03 26 20 01 21 58 20 <x32> 22 58 20 <y32>` (kty=2, alg=−7, crv=1, x, y). `FIDO_COSE_ES256_LEN` 75→77; authData 162→164 B; makeCredential response 252→254 B (BCNT 0x00FC→0x00FE). **This SUPERSEDES SD-3** (the 4-entry "canonical" form is precisely what Firefox rejects) — the correct layout is now **SD-5**.
-- **Flashed + verified (fw 1.0.5, uf2 md5 `24df233af54519a4043c2691381b74b7`):** `bench/fido_probe.py` FULL PASS (fw=1.0.5, caps=0x07, 81-B GET_INFO KAT). `bench/fido_mc.py` E2E **PASS**: 254-B response over 5 packets, 5-entry COSE key passes every structural assert, packed signature **VALID** under the raw-digest P-256 ECDSA verify (the C15 false-alarm trap avoided). Store wiped at the end. (Bench bug fixed this round: `fido_mc.py` called an undefined `sha256(...)` → now `hashlib.sha256(...).digest()`; the bench stays dependency-free.)
-- **C17 browser round (webauthn.io, `RUST_LOG=authenticator=debug firefox 2> /tmp/opencode/c17_fx.log`):** the C16 parse error is **GONE** (0 hits for `byte array, expected i64`). New, earlier failure: `[WARN authenticator::ctap2] ... CommandError: Unexpected code: UserActionTimeout (None)` = CTAP2 status **0x0A** = the **30-s user-presence window expired** before `up` reached the device (the gap between the dialog opening and the agent's `up` exceeded 30 s). The device's UP mechanism is sound (E2E passes; it acks `up`), so this is a **round-timing issue, not a firmware/COSE bug.** The `up` the agent sent after the timeout had no pending makeCredential to complete (it just set the presence flag). **Open observation:** the user reported the Pico LED was NOT blinking when the dialog opened — yet the device WAS in the UP-wait phase (it returned UserActionTimeout after 30 s), so check whether the makeCredential keep-alives drive the LED at all (WINK does; keep-alives may not — cosmetic, not the failure cause).
-- **Flash learning (operational):** the Pico **reboots the moment the uf2 write completes** — the BOOTSEL volume disappearing right after `cp` is the SUCCESS signal, not a failure. Do NOT read the volume back after the copy (it's already gone). Verify the flash via the INIT fw version (the probe), not a volume read-back. The `[ -d /run/media/burnin/RP2350 ]` check is unreliable (the automounter creates a transient placeholder); trust `findmnt -t vfat` + the post-reboot HID enumeration.
-
-**C18 round record (2026-11-05, webauthn.io, fw 1.0.5, `RUST_LOG=authenticator=debug firefox 2> /tmp/opencode/c18_fx.log`):** preconditions per the prior NEXT list — the console port had reset to 9600 again (bridge re-enumeration) and was recovered per ground rules 7/11, probe FULL PASS (fw 1.0.5, caps 0x07, 81-B KAT), store wiped (0 records). User clicked Register → agent sent `up` ~2 s later. Device: `genkey slot=3 -> OK`, `sign slot=3 -> OK`, `cred_save /f2_3 -> OK`; the browser consumed the 254-B response. webauthn.io reported **registration success** (it verifies the attestation server-side). RUST_LOG: zero `byte array, expected i64`, zero `UserActionTimeout`; the trailing `Statemachine was cancelled` / `Transaction was cancelled` lines are the post-success teardown, not an error. **The page then offers an AUTHENTICATION test — do NOT click it until Phase 4:** getAssertion is unimplemented; the dispatch `default:` answers a clean 1-byte `INVALID_COMMAND` (0x14) (fido_ctap.c:913). The store now holds 1 credential (slot 3) — wipe before the next round.
-
-**C19 round record (2026-11-05, xorengineering.com/fido2/, fw 1.0.5, same RUST_LOG Firefox — log delta from byte 1284 of c18_fx.log):** store wiped first (1 record — C18’s webauthn.io credential); user clicked Register → agent `up` ~2 s later; device `genkey/sign/cred_save OK` (slot 3); the page reports **success** (fido2-lib server-side verification — a different client path than C18’s py_webauthn). Log delta clean: device found, register process started, zero errors/warnings. **Both harnesses now pass — the register half of the demo is done.**
-
+- **How we got here (the C13–C17 arc — settled):** C13 re-keyed GET_INFO to the CTAP 2.1+ numbering (fw 1.0.4); C14 fixed the COSE `crv` to 1; C16 fixed the COSE layout to the 5-entry CTAP2-wire form (fw 1.0.5 — **SD-5**); the wire was then verified by probe + `fido_mc.py` E2E (real raw-digest ECDSA check). C17, the first browser round after the C16 fix, failed only on **round timing** — `UserActionTimeout`: the 30-s UP window expired before `up` arrived. No further firmware/COSE bug has been found since. Full narrative: the History section.
+- **C18 (webauthn.io) + C19 (xorengineering.com/fido2/): registration SUCCESS on both harnesses** (2026-11-05, fw 1.0.5). The C17 fix was pure protocol: `up` within ~2 s of the Register click (inside the 30-s window). RUST_LOG clean on both (zero `byte array, expected i64`, zero `UserActionTimeout`). Caveat: the webauthn.io page then offers an “authentication test” — getAssertion is Phase 4 (unimplemented; a clean 1-byte `INVALID_COMMAND` today), so do not click it until then.
 **NEXT (register passes on both harness — Phase 4 = login):**
 1. **Phase 4 — getAssertion + RESET** per the Phase 4 section: lookup by (rpIdHash, credId) or resident enumeration for an empty allowList; authData = rpIdHash ‖ flags(UP|CRED_ID) ‖ counter ‖ credIdLen(**1** B — getAssertion, unlike makeCredential’s 2) ‖ credId; counter increment BEFORE building authData; chip-signs SHA-256(rpIdHash ‖ clientDataHash); RESET wipes the littlefs DB. Bench: the webauthn.io page offers its **authentication test right after a register** — the natural first Phase 4 E2E (same fast-`up` pattern), then the xorengineering.com login, replug + reflash survival, strictly increasing counter.
 2. After Phase 4: Phase 5 (hardening + docs). Commit per phase; keep this file’s Current state current.
@@ -274,616 +279,6 @@ new primary-source evidence.
   structurally-valid COSE key, check the ENTRY COUNT / LABELS against the
   client's actual visitor, not just the RFC.
 
-**C12b root-cause record (2026-11-03; supersedes the "emit both key
-numberings" caveat in the C11 analysis below — dual keys are impossible,
-see fix). PARTIALLY SUPERSEDED (2026-11-04, C13):** the "emit 2.0–2.2
-keys" half of the fix below was WRONG — the CTAP 2.0 spec table is what
-no one uses; every shipping device and client (including this Firefox)
-parses the 2.1+ numbering, and 1.0.4 re-keys the map to it. The caps
-0x07 half was right and stands. See the C13 root-cause record in the
-resume section.** the C12b capture (/tmp/opencode/roundC12_firefox.usb, 17:53,
-dev 25) on the verified 1.0.1 firmware shows INIT (fw 1.0.1 ✓, caps 0x0D),
-GET_INFO (84 B, byte-identical KAT), then a U2F version-check (MSG 0x83,
-APDU `00 03 00 00` padded to 7 B) answered `69 86` — and NO makeCredential
-ever. Two gates, each alone fatal, both encoding mismatches (the 2.3 spec
-of record itself defines the new numberings — GET_INFO table §6.4
-lines ~2285–2400 of /tmp/opencode/ctap23.txt: versions 0x01, extensions
-0x02, aaguid 0x03, options 0x04, maxMsgSize 0x05, …, transports 0x09,
-algorithms 0x0A, firmwareVersion 0x0E uint; INIT caps §11.2.9.1.3: WINK
-0x01, CBOR 0x04, NMSG 0x08):
- 1. **caps 0x0D**: 2.0–2.2 clients put CBOR at 0x02 → clear in 0x0D →
-    U2F-only classification → U2F probe → `69 86` → give up.
- 2. **GET_INFO 2.3 keys**: 2.0–2.2 clients read 0x09 as `algorithms` →
-    get `["usb"]` (type-matches as an array, content invalid) → "no
-    usable algorithms" → no makeCredential.
- Command numbers are FINE (0x10 CBOR / 0x11 CANCEL / 0x3B KEEPALIVE /
- 0x06 INIT / 0x08 WINK are the 2.1/2.2/2.3 values; the C12b capture proves
- Firefox sends 0x90). **Fix: emit the 2.0–2.2 wire encoding** (every
- shipping client parses it; no shipping 2.3 client exists as of 2026-11):
- caps 0x07 (WINK 0x01 | CBOR 0x02 | NMSG 0x04); GET_INFO map(9):
- aaguid 0x01, versions 0x02 `["FIDO_2_0"]`, options 0x03 `{rk,up}`,
- maxMsgSize 0x04 256, maxCredentialCountInList 0x06 128,
- maxCredentialIdLength 0x07 64, transports 0x08 `["usb"]`, algorithms
- 0x09 `[{alg:-7,type:"public-key"}]`, firmwareVersion 0x0D `[1,0,2]`
- array — 85 bytes (map(9) is the 1-byte CBOR form 0xA9; bstr(16) is
- 0x50), 2 packets 57+28. A future 2.3-only client reading 0x07 sees
- WINK|CBOR without NMSG and may probe CTAPHID_MSG — we answer `69 86`, it
- falls back to CTAP2 (harmless); its GET_INFO parse finds none of our
- fields (harmless while no such client ships). **7-byte `0x83` anomaly
- RESOLVED: not a bug.** tshark verbose (c12b_verbose.txt): frame 41 =
- URB_SUBMIT, Endpoint 0x01 **Direction OUT** — the 7-byte report is
- Firefox's own U2F version-check request; frame 44 = URB_COMPLETE IN with
- our 2-byte `69 86`. The earlier "device emits a 7-byte reply" attribution
- came from /tmp/opencode/usbmon_seq.py, which had a broken usbmon
- header layout (the 64-bit record is 16-B timestamp + 36-B header + 36-B
- URB; the file is PCAP-framed) and had never run successfully.
- **Pre-browser validation plan (SUPERSEDED by the record below —
- libfido2 1.16 is a 2.3 client; use `bench/fido_mc.py` instead):** after
- reflash, `fido2-cred -n xorengineering.com /dev/hidrawN` (libfido2 1.16
- reference client, 2.0–2.2 numberings) + agent-sent `up` via console = a
- full E2E makeCredential before spending a browser round; wipe afterwards.
-
-**C10 status-byte regression + libfido2 1.16 findings — RESOLVED
- (2026-11-03):** after the 1.0.2 reflash the probe FULL-PASSED (fw=1.0.2,
- caps=0x07, 85-B KAT), but `FIDO_DEBUG=7 fido2-token -I` exposed the THIRD
- bug: libfido2 sends GET_INFO (the caps fix works — the device is now
- classified CBOR-capable), receives all 85 bytes, then
- `cbor_parse_reply: blob[0]=0xa9` → `fido_dev_cbor_info_wait: 169` →
- `falling back to u2f`. The source is decisive (obtained with
- `dnf download --source libfido2` — the Fedora SRPM worked where
- GitHub/Yubico were blocked; extracted at /tmp/opencode/libfido2-1.16.0/):
-   * `src/cbor.c cbor_parse_reply()`: `if (blob[0] != FIDO_OK) { r =
-     blob[0]; goto fail; }` — the 0x00 CTAP status byte BEFORE the CBOR
-     payload is REQUIRED; any other first byte is returned as the error
-     code (0xA9 = 169).
-   * Spec of record §11.2.9.1.2 CTAPHID_CBOR "Response at success":
-     `DATA = CTAP status code, DATA+1 = n bytes of CBOR encoded data`.
- So the C10 change to "bare CBOR" was a misdiagnosis (the third stacked
- bug, after the C11/C12 stale-firmware process failures and the 2.3
- encoding). The error paths were already correct (a single status byte —
- exactly what cbor_parse_reply reads as the error code).
- **Fix (fw 1.0.3):** `resp[0] = FIDO_CTAP2_OK` + encode the CBOR at
- resp+1, `*resp_len = 1 + e.len` on BOTH success paths (handle_get_info,
- mc_create in fido_ctap.c); GET_INFO 86 B (57+29), makeCredential 252 B
- (57+59+59+59+18); KATs re-pinned (test_ctap.c: 86-B GET_INFO byte KAT
- `00 a9 … 0d 83 01 00 03` + field test, 252-B MC KAT, authData now at
- resp+13; fido_probe.py 86 B / 57+29 / fw [1,0,3]); ctest 9/9; the host
- `/tmp/opencode/dbg_getinfo` helper (recompiled) prints the
- byte-identical `00 a9 … 0d 83 01 00 03`.
- **libfido2 1.16 is a CTAP 2.3 client — the `fido2-cred` E2E is
- unusable:** `src/fido/param.h` FIDO_CAP_WINK 0x01 / FIDO_CAP_CBOR 0x04 /
- FIDO_CAP_NMSG 0x08 (2.3 positions); `src/info.c parse_reply_element`
- uses the 2.3 GET_INFO key numbers (versions=1, extensions=2, aaguid=3,
- options=4, maxMsgSize=5, …, transports=9, algorithms=10, fwVersion=14)
- with NO legacy fallback — `cbor_map_iter` aborts on the first mismatch,
- and our 2.0–2.2 key 1 = aaguid bytes(16) → `decode_string_array` -1 →
- parse failure → U2F fallback, ALWAYS. The dual-key impossibility has
- materialized in a real client. Consequences: (a) the browsers (2.0–2.2
- clients) are unaffected — the acceptance test stands; (b)
- `fido2-cred`/`fido2-token` will always classify the key U2F-only —
- EXPECTED, not a firmware failure; (c) caps 0x07 remains the right single
- value: 2.0–2.2 clients see WINK|CBOR|NMSG, and libfido2 1.16 sees CBOR
- set at 0x04 (our legacy NMSG bit overlaps its 2.3 CBOR position —
- without it, 1.16 would not even attempt GET_INFO). **The fido2-token
- display quirk is fully explained (cosmetic only):**
- `fido_dev_is_fido2()` = `flags & 0x04`; on the parse failure
- `fido_dev_force_u2f()` clears 0x04 → fido2-token prints
- `0x03 (wink, nocbor, msg)` with the 2.3 legend. Never trust the display
- string; trust FIDO_DEBUG traces + the probe. **Replacement E2E:
- `bench/fido_mc.py`** (new): INIT (asserts fw 1.0.3, caps 0x07) →
- GET_INFO (86-B KAT) → makeCredential with the EXACT 190-B Firefox C1
- request (byte-verified against s_firefox_c1_req in test_ctap.c) →
- console `up` at ~2 s → the 252-B response over 5 packets (BCNT 0x00FC,
- SEQ 0–3) → full attestation validation (packed, flags 0x41, AAGUID,
- 32-B credId, 75-B COSE_Key, attStmt alg -7 / sig 64 B) → `wipe`.
- Verified offline before pausing: syntax, MC_REQ == KAT, and the
- validation block passes verbatim against the 252-B KAT. Note: the
- firmware computes rpIdHash = SHA-256(rp.id) from the rp.id string
- (fido_ctap.c:600-601) and IGNORES the provided rpIdHash field — the
- E2E asserts SHA-256("xorengineering.com") in authData.
-
-**C11 capture analysis (the evidence):** the 13-s capture contains NO
-makeCredential exchange at all — only the initial probe: INIT req/resp
-(CID=3, proto 2, **FW 1.0.0**, caps 0x0D), a 1-byte CBOR `0x04`
-(INVALID_SEQ) reply, the 84-B GET_INFO (57+27 split, byte-identical to
-the KAT), a 7-B `0x83` U2F reply `00 03 00 00 00 00 00`, and a 2-B `0x83`
-`69 86` U2F reply. Two of those five wire artifacts CANNOT be produced by
-the current source: (a) the 1-byte CBOR `0x04` — fido_ctap_dispatch never
-returns CTAP2_ERR_INVALID_SEQ; (b) the 7-B U2F reply —
-`send_u2f_status()` emits exactly 2 bytes (69 86). The device is running
-an intermediate C5–C10-era build; the 15:11 flash did not take (BOOTSEL
-not held / stale file). **The rk/PIN hypothesis is dead on the evidence:**
-the "rk": true bytes seen in the capture are the GET_INFO `options` map —
-CORRECT per the CTAP 2.3 spec, which renumbered the GET_INFO keys
-(options=0x04, maxMsgSize=0x05, pinUvAuthProtocols=0x06,
-maxCredentialCountInList=0x07, maxCredentialIdLength=0x08, transports=0x09,
-algorithms=0x0A, firmwareVersion=0x0E,
-remainingDiscoverableCredentials=0x14; our 84-B KAT matches the 2.3 table
-exactly). Firefox (a 2.0–2.2 client) does not parse the 2.3 keys, so it
-never saw rk:true; its own makeCredential request carried options
-{rk:false}; and our authData flags are 0x41 (UP|AT) with the RK/ED bit
-CLEAR. No "Firefox requires a PIN for resident keys" rule was found (web
-search; PIN-less YubiKey resident keys work in Firefox). **Interop
-caveat:** because we emit ONLY the 2.3 key numbers, 2.0–2.2 browsers read
-NONE of our capability fields (options/maxMsgSize/transports/algorithms
-all land on wrong-typed keys and are ignored); if a browser round ever
-fails for GET_INFO-related reasons, emit BOTH key numberings (dual keys in
-one CBOR map is legal). **2.3 command numbering verified against the spec
-of record** (TOC + body): INIT=0x06, PING=0x01, WINK=0x08, CBOR=0x10,
-CANCEL=0x11, KEEPALIVE=0x3B, ERROR=0x3F — the firmware already follows
-2.3 (the 0xBB keep-alive and 0x90 CBOR seen in the C11 wire are the 2.3
-values, not stale 2.0 values). **PIN decision: DEFER** (concrete plan in
-the Phase 6 section) — it is not the cause of this hang and the demo runs
-UV "preferred" / rk not required; revisit only if a verified-firmware
-round still fails.
-
-**C9 history (superseded context) —** the C9 wire (/tmp/opencode/roundC9_firefox.usb; the key renumbered to **bus 5 dev 15** = tshark `5.15.1`, UART still `5.5.1`) is device-clean all the way through: open at 4.0 s, INIT (17-B resp, CID=3, proto 2, caps 0x0d), GET_INFO (85 B, 2 pkts), the 190-B makeCredential in 4 OUT pkts (4.081–4.093 s, SEQ 0,1,2), then two keep-alives `00 00 00 03 82 02 00 00 …` at 4.117 s / 4.601 s (484 ms apart) — and **Firefox stopped polling at 4.604 s, 2.5 ms after keep-alive #2, with NO CANCEL on the wire** (abrupt teardown, not a user-cancel). The user's `up` (UART `u`,`p`,`\r` at 6.77–7.87 s) then completed fully on the device (`fido2: user presence ('up')`, `genkey slot=3 -> OK`, `sign slot=3 -> OK`, `cred_save /f2_3 -> OK`) — the 252-B response went to an endpoint nobody polled (the round-B stale-client pattern). **Root cause — two compounding keep-alive defects, both proven against Firefox's vendored CTAP2 stack in `dom/webauthn/authenticator/` of the `mozilla-firefox/firefox` GitHub repo (a modified authenticator-rs; sparse clone at /tmp/opencode/fxrepo):** (1) **the keep-alive IS a normal BCNT-framed CTAPHID message** — `U2FHIDInit::read` (u2ftypes.rs) reads frame[5..7] as a 2-byte BE BCNT and frame[7..] as data; the spec's "contains a single byte" means a 1-byte *payload*, not an omitted BCNT. Our C8 "fix" (BCNT-less `82 02 …`) makes Firefox read BCNT = 0x0200 = **512**: after keep-alive #1, `u2f_read` blocks demanding a continuation with SEQ 0, and keep-alive #2's CMD byte (0x82) is then read as the SEQ → `Err("invalid sequence number")` → the `?` aborts the transaction with no CANCEL (exactly the 2.5-ms-after-ka#2 wire signature; ka#1 was "tolerated" only because the client was blocked waiting for its phantom continuation). (2) **this Firefox build's keep-alive command is 0xBB, not the spec's 0x82**: consts.rs `CTAPHID_KEEPALIVE: u8 = TYPE_INIT | 0x3b` (= 0xBB), and the `From<u8>` match is EXACT, so `0x82` → `HIDCmd::Unknown(0x82)` → returned from the `sendrecv` loop as a "response" → `send_cbor_cancellable` sees `cmd != Cbor` → `Err(UnexpectedCmd(0x82))`. This single constant explains ALL THREE rounds: C7 `bb 00 01 3b` → 0xBB = Keepalive → tolerated 22 s (later aborted by the unrelated SEQ bug); C8 `82 00 01 02` → Unknown(0x82) with a clean BCNT=1 parse → `UnexpectedCmd` → immediate abort, no dialog; C9 `82 02 00 00` → Unknown(0x82), BCNT=512 → continuation hang → dead on ka#2 with the dialog up. **The C8 "no BCNT / status read as 0x00 RFU" diagnosis was WRONG** — the C8 wire `82 00 01 02` had the RIGHT framing; only the command byte was wrong for this Firefox. **Fix (QUEUED, not implemented): restore the BCNT=1 framing `[CID 4B BE][CMD][0x00 0x01][status][zeros]` (status at p[7]) AND set the keep-alive command to 0xBB → wire `00 00 00 03 bb 00 01 02 00 …` to match this Firefox.** **OPEN RISK before committing to 0xBB:** it deviates from the FIDO spec (0x82) — and real tokens send 0x82 and (presumably) work in Firefox, which this code reading does NOT explain (a 0x82 keep-alive during a real token's UP wait should hit the same `Unknown(0x82)` → `UnexpectedCmd` path). Verify before flashing: the user's exact Firefox version vs the tip code in /tmp/opencode/fxrepo (the clone is depth-1, no history), a web search for a Firefox keep-alive 0x82/0xBB bug report, and whether a 0x82-tolerant read path exists elsewhere in the tree (only `transport/hid.rs`, `u2ftypes.rs`, `consts.rs` were read). Chrome (the later round) probably follows the spec's 0x82 — 0xBB could break Chrome, which decides whether the command byte must be browser-aware. **Housekeeping: the C9 round LEFT A CREDENTIAL IN THE STORE** (`/f2_3` — the device completed + saved on the user's `up` even though Firefox was already gone) → wipe before the next round. All code changes remain uncommitted (including the C9 BCNT-less keep-alive framing now to be reverted); tests/test_ctaphid.c keep-alive checks are pinned to the BCNT-less shape (status at p[5], p[6]==0) and must be re-pinned with the fix. Flashed uf2 is still md5 `302c211baaed653f01c9d8b36ba1a962` (the C9 build). The 600-s fd watcher has expired.
-
-A fresh usbmon capture of BOTH browsers, decoded with a clean CTAPHID
-framer, exposed **five** independent defects. Bugs 1–2 are response
-*content*; bug 3 is the *transport* root cause of the C7 abort (the
-continuation SEQ — fixed 2026-11-03, see the corrected bullet); bug 4 is a
-*keep-alive* spec defect (malformed on the wire, but TOLERATED by the
-browser — not the abort cause); bug 5 is a *delivery* bug (the valid
-response split across 30 s because the host stops polling mid-response):
-
-- **CTAPHID continuation SEQ (THE BLOCKER — resolved 2026-11-03 after two
-  misreadings).** ACT 1: `resp_send()` emitted an incrementing SEQ
-  (`pkt[4] = r->seq++`) — which was SPEC-CORRECT all along. ACT 2: a
-  C3-era observation ("the host stops after the first continuation, on
-  `0x01`") was misread as "continuations must be `0x00`" (citing a
-  nonexistent "§6.1" rule), and `pkt[4] = 0x00` was forced for every
-  continuation. ACT 3: the C7 capture settled it — CTAP 2.0 §8.1.5.4
-  (Packet sequencing) / ITU-T X.1278 require the continuation byte to be
-  a sequence number **starting at 0, incrementing by one to 0x7f**
-  (bit 7 always clear). The C7 wire shows pkt 2 SEQ `0x00` (accepted) and
-  pkt 3 SEQ `0x00` (should be `0x01`); Firefox aborted reassembly exactly
-  there (175 B of the 252-B response, fd closed 82 µs later). The ACT-2
-  premise is re-read in light of bug 5: in that era the device's own 1 ms
-  / `DBG-TMP` gaps let the host's tight re-poll read a ZLP, and the stop
-  was (mis)attributed to the `0x01`. GET_INFO (85 B) always had a single
-  `0x00` 1st continuation — valid in BOTH acts — which is why short
-  responses looked fine throughout. **Fix (final): `resp_send()` emits
-  SEQ 0, 1, 2, … (& 0x7f)**; the input parser (`input_continuation`)
-  already required the incrementing SEQ, so both directions are now
-  symmetric. test_ctaphid.c PING-echo verifier re-pinned to the
-  incrementing SEQ; `t_ping_multipacket` (200 B / 7609 B) is the live
-  regression guard.
-- **COSE_Key `crv` was `1` (0x01), not `−1` (0x20).** fido_cose.c emitted
-  `fido_cbor_enc_uint(&e, 1)` for the crv *value*. P-256 is crv `−1` per
-  RFC 8152; a browser validating the EC2 key rejects an unknown curve.
-  Fixed → `fido_cbor_enc_negint(&e, -1)`. Same length (1 B).
-- **attStmt used integer keys `{1: alg, 2: sig}`.** WebAuthn L3 and the
-  FIDO-certified reference (pico-fido2 `cbor_make_credential.c:641-644`)
-  both use **text** keys `"alg"` / `"sig"`. Fixed → text keys. Grows the
-  response 248 → 254 B.
-- **Keep-alive was malformed on BOTH counts (fixed 2026-11-03; NOT the C7
-  abort cause).** The C7 wire carried `… bb 00 01 3b …`: CMD **0xBB** and
-  status **0x3B**. The spec defines a dedicated CTAPHID **KEEPALIVE
-  command 0x02** (wire `0x82`) with its own 1-byte status — **PROCESSING
-  0x01 / UP_NEEDED 0x02** (CTAP 2.1/2.2; the same status table appears in
-  the 2.0 id spec). The intermediate "fix" recorded in this file (statuses
-  `0x21`/`0x3B` as "CTAP2 error codes", citing "§8.1.9.1.5") was a
-  misreading — in the 2.0 PS that section is CTAPHID_CANCEL, and the CTAP2
-  error codes are not keep-alive statuses; it produced the wire
-  `… bb 00 01 3b …`, still non-conformant (wrong CMD AND wrong status).
-  **Fix: fido_ctaphid.h `FIDO2_CMD_KEEPALIVE` 0x3B→0x02 and statuses
-  0x21/0x3B→0x01/0x02** (the `82 00 01 02` wire shape recorded here was itself the later-found
-C8 abort cause — the 2-byte BCNT the spec's KEEPALIVE does not have;
-final wire `… 82 02 00 00 …`, see the C8 history bullet); the tests use
-  the symbolic names and `rep_cmd()` strips the 0x80 bit, so no test
-  edits were needed. C7 shows Firefox TOLERATED all 6 malformed
-  keep-alives (it aborted only on the SEQ mismatch, 629 ms after the last
-  keep-alive), so this was spec debt, not the blocker. (Note: yubikit
-  maps keepalive to 0x3B — the likely source of our original 0x3B value;
-  fido2, the CTAP 2.1/2.2 specs, and real tokens use 0x02, so we follow
-  the spec.)
-
-- **Multi-packet delivery stalled: the main loop slept 1 ms between reports
-   (LAST BLOCKER).** fido_hid.c enqueues the 5 response reports and
-   `outq_drain()` (in `fido_hid_tick()`) releases one per host-ACK; main.c
-   then `sleep_ms(1)`. So there is a ~1 ms gap between the host ACKing report
-   N and the device arming report N+1. Firefox, staying in its CTAPHID
-   reassembly loop (valid `0x00` continuations), re-polls tightly right after
-   reading report N and lands in that gap, reading a **zero-length report**.
-   Firefox treats a ZLP as end-of-message, **stops polling the IN endpoint**,
-   and the remaining reports sit in the FIFO until the channel resets. Wire
-   (roundC3, Firefox): reports 1–3 at 655.429–655.465, a ZLP at 655.465, then
-   **no HID IN tokens for 30.6 s** until Chrome's INIT at 686.134 flushes
-   reports 4–5. 30 s = Firefox's WebAuthn operation timeout. (With the old
-   incrementing-SEQ bug Firefox *exited* the loop on the invalid `0x01` before
-   polling into a gap, so all 5 drained in 76 ms — which is why the stall only
-   appeared once continuations became valid `0x00`.) Chrome's `.dummy`
-   probe makeCredential also delivered all 5 in 76 ms (its driver tolerates
-   the gap), which is why Chrome's delivery looked fine while its real
-   registration never even sent a makeCredential. Fixed → main.c spins (no
-   `sleep_ms`) while `fido_hid_tx_pending()` is true, so the next report is
-   armed the instant the host ACKs the previous one; idle time still sleeps.
-   New accessor `fido_hid_tx_pending()` in fido_hid.c/.h.
-
-   **The spin fix was INSUFFICIENT (round C4 still stalled).** The 16–20 ms
-   inter-packet gap was NOT the host's poll interval — it was the device's
-   own `DBG-TMP` `printf` in `outq_drain()` (a 64-byte hex dump ≈ 200 chars
-   at 115200 baud ≈ 17 ms) blocking the main loop. The loop wasn't sleeping;
-   it was stuck in UART transmit, so the next report was never armed inside
-   the host's ~80 µs tight re-poll window. **Real fix → strip the `DBG-TMP`
-   prints** (the `DBG OUT` trace in `outq_drain()`, the `DBG IN` trace in
-   `tud_hid_set_report_cb()`, and the `dbg_dispatch()` wrapper). `outq_drain()`
-   now arms the next report in ~1–10 µs (main-loop iteration, no blocking).
-   The spin-while-TX-pending (`fido_hid_tx_pending()`) is KEPT as the fast
-   idle path. The usbmon capture (not the UART trace) is the wire trace of
-   record.
-
-With bugs 1–5 fixed, the on-wire response is complete (254 B),
-structurally correct, and its attestation signature **verifies**
-(ECDSA over SHA-256(authData ‖ clientDataHash) against the COSE public key
-— confirmed offline). flags=0x41 (UP|AT) and 2-B credIdLen remain correct
-and unchanged.
-
-The "incompatible" (earlier round) vs "hung on insert/touch" (this round)
-difference is NOT a code regression — both rounds had the SEQ bug and both
-delivered a 116-B truncation; it is just Chrome's varying handling of an
-unparseable response. flags=0x41 (UP|AT) and 2-B credIdLen remain correct
-and unchanged.
-
-**Resolved (2026-11-03):** the INPUT parser validates an incrementing
-continuation SEQ (`input_continuation`) — which is what the spec requires
-(§8.1.5.4), so it was always right; the OUTPUT side was the non-conformant
-one (constant `0x00`) until the `resp_send()` SEQ fix above. Both
-directions are now spec-correct and symmetric. The old "latent INVALID_SEQ
-on long requests" concern was the misreading speaking: a host sending
-constant-`0x00` continuations would be the non-conformant party.
-
-**Done:** fido_ctaphid.c continuation SEQ fix (incrementing 0..0x7f per
-§8.1.5.4 — supersedes the C3-era constant-`0x00` "fix"); fido_cose.c crv
-fix; fido_ctap.c attStmt text keys; fido_ctaphid.h keep-alive CMD 0x02 +
-statuses 0x01/0x02 (later C8 fix: framed without the BCNT, wire
-`… 82 02 …`); main.c spin-while-TX-pending +
-fido_hid.c/.h `fido_hid_tx_pending()`; fido_hid.c `DBG-TMP` prints stripped
-(delivery-stall fix — the `printf` was blocking the main loop ~17 ms/report);
-test_ctap.c KATs re-pinned; test_ctaphid.c PING-echo verifier re-pinned to
-the incrementing SEQ. ctest 9/9.
-
-**Then the DUAL-CORE delivery fix** (C5 showed the print-strip alone left a
-fatal ZLP at +87 µs after pkt 3): fido_hid.c/.h split into `fido_usb_core1_task()`
-(core 1 tight spin: `tud_task()` + `outq_drain()`) and `fido_card_tick()` (core 0:
-CTAP dispatch, ATECC608, CTAPHID timeouts, console, LED); the old single
-`fido_hid_tick()`/`fido_hid_tx_pending()` are gone. `s_outq`/`s_cmdq` are now
-lock-free SPSC ring queues (acquire/release atomics) — `tud_hid_set_report_cb`
-(core 1) enqueues into `s_cmdq` instead of dispatching CTAP inline; `tud_umount_cb`
-(core 1) only raises `s_umount_flag` and core 0 does the channel/CTAP reset +
-queue flush. main.c `multicore_launch_core1(fido_usb_core1_task)` then runs the
-core-0 loop (`fido_card_tick()` + `sleep_ms(1)`). CMakeLists links `pico_multicore`.
-Build clean (no warnings), ctest 9/9. uf2 rebuilt:
-`example/fido2/pico-atecc608-fido2.uf2` md5 **`0238c052a3707bac982528858f9328a4`**
-(172544 B — the dual-core build).
-
-**Resume / next steps (PAUSED 2026-11-04 with fw 1.0.4 BUILT — C13
-failed, root-caused (GET_INFO 2.0-key numbering), map re-keyed to
-2.1+, ctest 9/9; order: user 8, agent 9, user 10, agent 11):**
-
-Steps 1–3 of the prior list are DONE (2026-11-03):
-1. **Keep-alive command byte — RESOLVED in favor of the spec (0x3B/0xBB),
-   which also matches Firefox.** CTAP 2.3 §11.2.9.1.7 (USB HID) defines
-   `CTAPHID_KEEPALIVE (0x3B)`, BCNT=1, DATA = a single status byte
-   (PROCESSING 0x01 / UP_NEEDED 0x02). The `0x82` we had been emitting is
-   the *Bluetooth LE* keep-alive from §11.4.4.3 — a different transport
-   (the C9 "spec says 0x82" premise was a misread of that BLE table).
-   Firefox's `consts.rs` (`CTAPHID_KEEPALIVE = TYPE_INIT | 0x3b` = 0xBB)
-   and its `device.rs` comment (citing this exact §11.2.9.1.7) confirm the
-   browser expects 0xBB. No spec-vs-Firefox conflict: the 2.3 spec and the
-   browser agree. (Not a U2F/FIDO2 mix-up — 0x3B is the spec's own
-   USB-HID value in 2.3.)
-2. **Fix implemented:** `fido2_ctaphid_keepalive()` now frames
-   `[CID 4B BE][0xBB][0x00 0x01][status][zeros]` (BCNT=1, status at p[7]);
-   `FIDO2_CMD_KEEPALIVE` 0x02→0x3B; fido_ctaphid.h doc re-cited to
-   §11.2.9.1.7; the two test_ctaphid.c keep-alive checks re-pinned to
-   BCNT=1 + status-at-p[7]. ctest 9/9.
-3. **uf2 rebuilt:** `example/fido2/pico-atecc608-fido2.uf2` md5
-   `dc6641399604554a929c09a61ca855d5`.
-
-Steps 4–6 of the prior list are DONE (2026-11-04):
- 4. **DONE (2026-11-04):** User reflashed `build/example/fido2/
-    pico-atecc608-fido2.uf2` (md5 `8923c842464ff69d82f2e652f98dd5a7`,
-    fw 1.0.3) via BOOTSEL (the RPI-**RP2350** drive — ground rule 10).
- 5. **DONE (2026-11-04):** `bench/fido_probe.py` FULL PASS on the
-    verified 1.0.3 firmware — fw=`01 00 03`, caps=**0x07**, 86-B
-    GET_INFO KAT (0x00 status + 85-B 2.0–2.2 map, 57+29 split). The
-    flash took; the round is live.
- 6. **DONE (2026-11-04):** `bench/fido_mc.py` E2E PASS on the verified
-    1.0.3 firmware — the exact 190-B Firefox C1 request, agent-sent
-    `up` at ~2 s (genkey/sign/cred_save OK, slot 3), 252-B response
-    over 5 packets with 5 keep-alives, full attestation validated
-    (packed, flags 0x41, AAGUID, 32-B credId, 75-B COSE_Key, 64-B
-    sig), `wipe` (store ends empty). Its first attempt exposed a
-    HOST-side trap, not a firmware bug: the reflash's bridge
-    re-enumeration had reset /dev/ttyUSB0 to 9600 + echo → `up` never
-    arrived → the device correctly ran the 30-s UP timeout (61
-    keep-alives, then 1-byte 0x2F USER_ACTION_TIMEOUT — reproduced and
-    decoded; recovery recipe now in ground rule 7).
-    NOTE: `fido2-cred`/`fido2-token` are NO LONGER usable for this —
-    libfido2 1.16 is a CTAP 2.3 client and will always fall back to U2F
-    on our 2.0–2.2 device (see the record above; "falling back to u2f"
-    in a FIDO_DEBUG trace is now EXPECTED, not a failure).
- 7. **DONE (2026-11-04) — C13 = Firefox round: FAILED.** Dialog opened,
-    user typed `up`, nothing happened. Decode of
-    /tmp/opencode/roundC13_firefox.usb (5139 B, 54 frames; FIDO key =
-    usbmon dev 7, CP210x UART = dev 5): INIT (fw 1.0.3 ✓, caps 0x07 ✓)
-    → GET_INFO (86-B, byte-identical KAT) → **U2F version check** (MSG
-    0x83, APDU `00 03 00 00`) → our `69 86` → **Firefox stopped; NO
-    makeCredential, no keep-alives**. The user's `up` (UART) arrived
-    t≈16.2–16.6 s, 2.4–2.9 s AFTER Firefox gave up; the Pico's console
-    was healthy and it did respond. The device behaved correctly on the
-    wire — the browser rejected our GET_INFO.
-
-**C13 root cause (2026-11-04, proven from Firefox's source):** the
-GET_INFO key NUMBERING. Firefox's `AuthenticatorInfo` deserializer
-(`dom/webauthn/authenticator/src/ctap2/commands/get_info.rs`, fetched
-2026-11-04 from mozilla-firefox/firefox main) parses the **CTAP 2.1+**
-table: 0x01 versions (array of text), 0x02 extensions, 0x03 aaguid
-(bytes(16)), 0x04 options, 0x05 maxMsgSize, 0x06 pinUvAuthProtocols,
-0x07 maxCredCountInList, 0x08 maxCredIdLength, 0x09 transports, 0x0A
-algorithms, …; unknown keys are warned + skipped (NOT fatal — so the
-0d firmwareVersion was never the poison). Our 1.0.2/1.0.3 map put the
-AAGUID bytes under 0x01 (the CTAP **2.0** spec table) → Firefox
-deserialized bytes(16) as `versions: Vec<text>` → type error → the whole
-GetInfo rejected → U2F fallback → version check → `69 86` → no
-makeCredential. The CTAP 2.0 spec's table was NEVER used by shipping
-hardware: the YubiKey test vector in Firefox's own suite (from
-python-fido2) and the CTAP 2.1/2.2/2.3 spec tables all use the 2.1+
-numbering. So C12b's real root cause was only the caps bits (0x0D); the
-"switch to 2.0–2.2 keys" was a harmful side change.
-
-**1.0.4 fix (2026-11-04, BUILT):** `handle_get_info` now emits the 2.1+
-map(8): 01 versions ["FIDO_2_0"], 03 aaguid, 04 options {rk,up},
-05 maxMsgSize 256, 07 maxCredCountInList 128, 08 maxCredIdLength 64,
-09 transports ["usb"], 0A algorithms [{alg:-7,type:"public-key"}];
-firmwareVersion dropped (a 2.1+ UINT key at 0x0E — the fw version stays
-in the INIT response, which is the flash fingerprint). GET_INFO = 81 B
-(0x00 status + 80-B map), 2 packets 57+24. fw bumped 1.0.3 → 1.0.4.
-KATs re-pinned: tests/test_ctap.c (field test + 81-B byte KAT
-`00 a8 01 81 68 … 0a 81 a2 … 6b 65 79`), bench/fido_probe.py (81-B KAT,
-57+24, NEW explicit fw 1.0.4 assert on INIT — the map no longer carries
-the fw), bench/fido_mc.py (81-B KAT, fw assert 1.0.4). ctest 9/9. uf2
-rebuilt: `example/fido2/pico-atecc608-fido2.uf2` md5
-`55d5b14f37686e21b3c3d57c7277e22d` (173056 B).
-
-**C14 round (2026-11-04, executed; capture
-/tmp/opencode/roundC14_firefox.usb, 8394 B, 84 frames, 10:34:29.7–10:34:39.0,
-dev 9, verbose dump /tmp/opencode/c14_verbose.txt):** enumeration at t0;
-INIT (fw 1.0.4 ✓, caps 0x07) → GET_INFO (81 B) → **makeCredential ARRIVED**
-(190 B, 4 OUT packets, 10:34:36.3) — the C13 fix works. 5 keep-alives
-(~500 ms) while the dialog waited; on `up` (3 DBG mc prints:
-genkey/sign/cred_save all OK) the full 252-B response went out in 5 IN
-packets (57+59+59+59+18, within 17 ms) — then NOTHING on the bus: the
-browser rejected the CONTENT. rpIdHash on the wire =
-SHA-256("xorengineering.com") ✓. C14 left one credential stored
-— wipe it before the C15 E2E.
-
-**C14 root cause (2026-11-04, proven from the wire + Firefox's source):**
-the COSE_Key `crv`. The response framing was EXONERATED first: Firefox's
-`MakeCredentialsResult` deserializer (`make_credentials.rs`, fetched
-2026-11-04) and its own test vector `MAKE_CREDENTIALS_SAMPLE_RESPONSE_CTAP2`
-parse exactly what we send — `map(3) {1: fmt, 2: bstr(authData),
-3: attStmt-map}` (the wire-only "attestationObject must be the single
-bstr(authData‖attStmt)" hypothesis was WRONG — that bstr shape is the
-browser's internal L3 representation, not the CTAP wire shape; the
-fetched `make_credentials.rs` imports
-`AttestationObject/AuthenticatorData/AttestedCredentialData/
-AttestationStatementFidoU2F`, confirming the standard path). The defect:
-`fido_cose_encode_es256` encoded crv as −1 (CBOR 0x20 — the x-coordinate's
-key byte, a copy-paste-class bug), with a comment asserting −1 was the
-registry value. The COSE registry (RFC 8152 §13.1 / RFC 9053) has
-P-256 = **1**; Firefox's `Curve` enum (`crypto/mod.rs`: `SECP256R1 = 1`,
-`try_from(_)` → `UnknownKeyType` for anything else) rejects it → the COSE
-key fails → the whole response is dropped. Wire bytes: `a4 01 02 03 20
-20 58 20 <x> 21 58 20 <y>` — must be `03 01`. The offline fido_mc.py
-verifier "passed" because it asserted the firmware's own (wrong) constant.
-**Lesson: byte-pinned KATs and verifiers derived from the firmware's own
-output cannot catch spec-conformance bugs — verifier logic must be
-spec-derived.** (The framing + COSE conclusions are now pinned in the
-**Settled decisions** register as SD-1 and SD-3 — ground rule 12.)
-
-**1.0.5 fix (2026-11-04, BUILT):** `fido_cose.c` emits crv 1 (one byte:
-`03 20` → `03 01`); `fido_cose.h` doc comment corrected. Response size
-UNCHANGED: 252 B, 5 packets 57+59+59+59+18, BCNT 0x00FC — only payload
-byte 104 flips (0x20 → 0x01). KATs re-pinned OFFLINE (python hashlib,
-independent of the C code; the old KAT was verified self-consistent
-first): tests/test_ctap.c s_mc_authdata[91] 0x20→0x01, s_mc_resp (byte
-104 + mock sig = SHA-256(authData‖cdh)‖itself recomputed — old
-`10789ce2…`, new `9c1ac1a1…`), bench/fido_mc.py crv assert 0x01, both
-bench scripts' fw assert → 1.0.5. ctest 9/9. uf2 rebuilt:
-`example/fido2/pico-atecc608-fido2.uf2` md5
-`a2589242f411e46596c6c06f54a63da9` (173056 B).
-
-**C16 prep (2026-11-04; C15 is CLOSED as a false alarm — the wire is
-sound).** The device is healthy on 1.0.5 and `bench/fido_mc.py` now does
-real ECDSA (raw-digest) verification. The open question is the BROWSER's
-actual verdict, so C16's job is to capture it. Two changes vs C15:
-
-1. **Capture Firefox's real CTAP-level error.** The DevTools console shows
-   nothing for WebAuthn (only the JS DOMException on the page). Launch
-   Firefox from a terminal with `RUST_LOG=authenticator=debug firefox`
-   (or `=trace`); authenticator-rs logs the full CTAP exchange and the
-   specific rejection. A RELEASE Firefox caps Rust logging at INFO, but the
-   WARN/ERROR lines that carry the cause are still printed (cf.
-   mozilla/authenticator-rs#346: a Pico Keys device failing with
-   "Error while parsing: trailing data at offset N"). Redirect stderr:
-   `RUST_LOG=authenticator=debug firefox 2> /tmp/opencode/c16_fx.log`.
-2. **Second harness: webauthn.io** (Duo Labs, py_webauthn-backed; rp.id
-   "webauthn.io"; strict server-side attestation verification). It is a
-   deliberate second opinion — if the device passes webauthn.io but not
-   xorengineering.com the delta is RP config; if it fails both, the wire is
-   the cause. Config for our device: attestation "none", user verification
-   "discouraged" (no UV), resident key as the site offers. webauthn.io
-   verifies the attestation server-side and reports the exact failure —
-   more diagnostic than fido2-demonstration's opaque page error.
-
-Round flow (user drives the browser, agent decodes):
-- User: `stty -F /dev/ttyUSB0 115200 cs8 -cstopb -parenb -echo -opost`
-  FIRST (ground rule 11).
-- User: launch Firefox with `RUST_LOG=authenticator=debug firefox 2>
-  /tmp/opencode/c16_fx.log`.
-- User: `sudo tcpdump -i usbmonN -w /tmp/opencode/roundC16_<harness>.usb`
-  (start before the dialog; `lsusb | grep 2e8a` gives the bus number N —
-  the key renumbers on every replug).
-- User: open the harness (webauthn.io first, then
-  xorengineering.com/fido2/), Register, type `up` on /dev/ttyUSB0 within
-  ~30 s, wait ~10 s, Ctrl-C. NO console logger during the round (one
-  reader per port, ground rule 7).
-- Agent: decode the usbmon (ground rule 9) AND read /tmp/opencode/c16_fx.log
-  for the authenticator-rs verdict. The wire is known-sound, so THIS ROUND
-  THE LOG IS THE PRIMARY EVIDENCE.
-
-**On a passing round (webauthn.io AND xorengineering.com):** remove the
-`DBG mc:`/`DBG-TMP` diagnostic prints + the temporary `diag` console
-command, then commit the code + PLAN.md separately (all changes since
-bench round 2 are uncommitted; HEAD `0dd7cc1`).
-
-**Agent decode (after the round): tshark is the ground-truth decoder**
-(`decode_ctaphid.py` is unreliable for this usbmon format).
-`tshark -r <file> -V` + python regex parsing for the timeline;
-`tshark -r <file> -Y frame.number==N -x` for full hex (the 64-B report is
-at offset 0x40; the `HID Data:` lines trim trailing zeros; this tshark
-build's `-e`/`-Y` USB field extraction is broken — use `-V`/`-x` only).
-Expected in C15: FIRST the INIT response version = 1.0.5 (the
-flash fingerprint) and caps = 0x07; then the makeCredential request,
-keep-alives `00 00 00 <ch> bb 00 01 02 00 …` (0xBB, BCNT=1, status at
-p[7]) every ~500 ms and the dialog STAYS, then on `up` the 252-B
-response (BCNT 0x00FC, 5 packets: 57+59+59+59+18) with continuation
-SEQ `00 01 02 03`, **all 5** packets read back-to-back (no
-fd close / -ENOENT before packet 5) — and the wire now shows the COSE
-key `a4 01 02 03 01 20 58 20 …` (crv 1). The C14 wire (roundC14) had the
-identical shape with crv `03 20` — the single-byte delta is the fix.
-
-**On a passing round:** remove the `DBG mc:`/`DBG-TMP` diagnostic prints,
-then commit the code + PLAN.md separately (all changes currently uncommitted).
-
-**fido2-demonstration local vs deployed (user question, ANSWERED):** the
-local uncommitted diff = port 8080→8888, origin→localhost:8888,
-attestation "none"→"direct", UV "preferred"→"required".
-`authenticatorRequireResidentKey` is **false in BOTH** (unchanged in the
-diff) — the rk:false seen in the captures is the SHARED config, not a
-local-only change, and it is NOT a problem (the device stores every
-credential resident regardless; rk only changes overwrite semantics). The
-deployed xorengineering.com config = the committed one (attestation
-"none", UV "preferred" — API-verified). **Caveat for LOCAL testing:** UV
-"required" makes the browser send uv:true → our device answers
-UNSUPPORTED_OPTION; keep local runs on "preferred".
-
-**Harness (2026-11-01):** fido2-demonstration runs at
-https://xorengineering.com/fido2/ (real cert, reverse-proxied at /fido2/).
-DEPLOYED config verified via the live register-begin API: rp.id
-"xorengineering.com", origin "https://xorengineering.com",
-userVerification "preferred", attestation "none", algs [−7,−257].
-
-**Bench round B (usbmon capture, decoded):** after a mid-capture
-renumeration at 16:53:40 — **confirmed by the user as a manual device
-reset, not a fault** — a fresh session (INIT + GET_INFO + 91-B
-makeCredential) was processed at 16:54:17, completed on the user's `up`
-at 16:54:21, and the full 247-B response (5 packets, status 0x00) went
-out on the wire. Chrome's dialog stayed hung because its 16:45 hidraw fd
-was DEAD after the reset (node recreated; the old fd is bound to the gone
-instance) — the response had no live reader. That is stale-client-session
-behavior, exactly what round C's A/B is built to confirm.
-
-## BENCH ROUND C — controlled browser A/B (C1 DONE: 0x2A → CTAP 2.2 extensions root cause, fixed. C1b DONE: device completes the registration, 247-B response out, Firefox rejects the RESPONSE — AT-bit flags investigation, **PAUSED 2026-11-01**; C1c pending after the flags fix)
-
-Goal: localize the hang to (a) Chrome profile/session state, (b) Chrome's
-CTAP2 stack in general, or (c) the firmware.
-
-**Invariants for every round (agent does 1–3, user does 4–7):**
-1. Agent: `wipe` the store via /dev/ttyUSB0 → "credential store wiped
-   (N record(s))" (fresh 4 slots, no cross-round state).
-2. Agent: `bench/fido_probe.py` → FULL PASS (device sane).
-3. Agent: start the /proc fd watcher (600 s → /tmp/opencode/
-   hidraw_fd_watch_roundC?.log) + 600-s console logger (→ /tmp/opencode/
-   console_roundC?.log; round B's 120 s expired 6 min BEFORE the `up`
-   and lost the device view — the logger must outlive the user round).
-   Agent stays OFF the key (no hidraw/ttyUSB0 writes after step 1).
-4. User: `sudo modprobe usbmon` (if not loaded), then `sudo tcpdump -i
-   usbmon5 -w /tmp/opencode/roundC?_NAME.usb`. (Optional: `sudo dmesg -w`
-   to a log — "USB disconnect" vs "reset … USB device" distinguishes a
-   physical unplug from a device-initiated reset if the key ever vanishes
-   mid-round again.)
-5. User: browser → https://xorengineering.com/fido2/ → Register.
-6. User: type `up` on the serial console when the dialog says
-   insert/touch — **within ~20 s** (device UP window is 30 s).
-7. User: wait ~10 s whatever the dialog does, Ctrl-C tcpdump.
-
-**C1 — Firefox (a different CTAP2 implementation), at the NEW origin
-https://xorengineering.com/fido2/ (real cert, fresh permission state):**
-- Success ⇒ firmware OK, problem is Chrome-specific → go to C2.
-- Immediate NotAllowedError again ⇒ browser permission state, not
-  device: check the site's WebAuthn permission (shield icon — Firefox
-  remembers a denial per origin) and about:config
-  `security.webauthn.enable`.
-- Hang ⇒ firmware suspect (e.g. multi-packet OUT reassembly of a real
-  ~200-B request, GET_INFO content) → diff this round's trace against the
-  round-B capture before C2.
-
-**C1 RESULT (2026-11-01):** none of the three branches — an immediate
-NotAllowedError that WAS the device: the 190-B makeCredential (4 OUT
-packets, reassembled clean) got an instant 0x2A PIN_AUTH_INVALID because
-Firefox 2026 sends the CTAP **2.2** `extensions` map in slot 0x06 (v2.2
-renumbered the table; pinUvAuthToken → 0x08). The pre-round "permission
-state" hypothesis is dead — the request reached the device and was
-rejected by our parser. Fix in fido_ctap.c case 6 (MAP in slot 6 is
-skipped; BYTES still PIN_AUTH_INVALID) + the exact request pinned as a
-host-test fixture. **C1b = reflash + re-run with the fixed uf2.**
-Evidence: /tmp/opencode/console_roundC1.log (the `DBG MSG (190 B)` line +
-the 0x2A answer), /tmp/opencode/hidraw_fd_watch_roundC1.log (only Firefox
-pid 102786 opened the key), /tmp/opencode/roundC1_firefox.usb.
-
-**C1b RESULT (2026-11-01, PAUSED after):** the extensions fix WORKED —
-full device-side success on the wire (190-B request reassembled, UP wait
-with keep-alives, `up`, 247-B response status 0x00 with correct
-rpIdHash/COSE/sig). Firefox still fails with the same NotAllowedError →
-the rejection moved from the REQUEST (C1) to the RESPONSE (C1b). Leading
-hypothesis: authData flags 0x01 lacks the AT bit; L3 (REC 2026-08-25)
-puts AT at 0x40 (the pre-round-2 0x41 was L3-correct), L2 at 0x04 —
-which one 2026 browsers expect is the open question. See Current state
-for the full trace decode, the evidence files, and the resume steps.
-Evidence: /tmp/opencode/roundC1b_firefox.usb (full trace incl. the
-device DBG via the UART channel), /tmp/opencode/hidraw_fd_watch_roundC1b.log
-(only Firefox pid 102786), /tmp/opencode/console_roundC1b.log (EMPTY —
-the user's serial terminal held /dev/ttyUSB0; usbmon's UART channel is
-the reliable device view in that case).
-
-**C2 — Chrome incognito (fresh session state):**
-- FIRST close every normal Chrome window that has localhost:8888 open
-  (kills any cached CTAP2 device session from the dead 16:45 handle).
-  Incognito window → accept the self-signed-cert warning → Register.
-- Success ⇒ normal-Chrome profile state was the culprit (stale CTAP2
-  session) → C3: full Chrome restart + normal window should now pass.
-- Hang ⇒ Chrome's CTAP2 stack in general mishandles this device → diff
-  C2's wire trace against C1's (request shape, packet counts, response
-  handling).
-
-**Decision matrix:**
-| C1 Firefox | C2 Chrome-incog | Conclusion                     |
-|------------|-----------------|--------------------------------|
-| pass       | pass            | stale Chrome profile state     |
-| pass       | hang            | Chrome CTAP2 stack quirk       |
-| hang       | pass            | re-check device (unlikely)     |
-| hang       | hang            | firmware — deep-dive the traces|
-
-**Per-round evidence:** the pcap (decode with **tshark** —
-`/usr/bin/tshark -r <file> -V`; on bus 5: **dev 7 = FIDO key** (tshark
-`5.7.1`), **dev 5 = CP210x UART** (`5.5.1`) — the numbers renumber after
-each replug; the 2026-11-03 pair is from the C8 decode), the console DBG
-(device view: did the browser's mc
-arrive complete? did the 252-B response go out?), the watcher log (only
-the browser should open the key), and the node server (credential stored
-with rpIdHash = SHA256("xorengineering.com") = 0879ff55…).
-
-**Real-request fingerprint (OBSERVED in C1, not just expected):**
-rpIdHash 0879ff556478909709cb3912e15ebfcc7392908283d9eef62f48b6316d2b9685
-(SHA256("xorengineering.com")), 32-byte user.id, user.name
-"nobody@mail.com", algs [−7,−257], **slot 6 = the CTAP 2.2 `extensions`
-map {"hmac-secret": false}**, options {rk:false} — 190 B = 4 OUT
-packets. 4-packet reassembly is now PROVEN (the `DBG MSG (190 B)` line).
-
 ## Bench environment (facts)
 
 - Host: Fedora 44, kernel 7.2, user `burnin`. Pico at USB port 5-1.4.1;
@@ -900,10 +295,14 @@ packets. 4-packet reassembly is now PROVEN (the `DBG MSG (190 B)` line).
   "xorengineering.com", uv "preferred" (deployed config, API-verified).
 - `bench/fido_probe.py` — must FULL PASS at the start of every round
   (INIT/PING/WINK/GET_INFO 81-B KAT; asserts fw 1.0.5).
-- `/tmp/opencode/fido_sigcheck2.py` — agent-only raw-CTAP2 sigcheck
-  harness (rp.id b".dummy", 91-B request, writes `up` to the same
-  console). It is the source of every ".dummy" session seen in traces —
-  NOT a third client. Agent stays off the key during user rounds.
+- **Bench-round discipline:** the agent wipes + probes before the round
+  and stays OFF the key during the user round (the only agent console
+  writes are the `up` at "go" and the post-round `wipe`); no console
+  logger while the user works (one reader per port, rule 7).
+- **fido2-cred / fido2-token (libfido2 1.16) are CTAP 2.3 clients:**
+  they parse only the 2.3 GET_INFO keys (no legacy fallback), so they
+  always classify our device U2F-only and fall back — EXPECTED, not a
+  firmware failure (C10 findings). Use `bench/fido_mc.py` for E2E.
 - **Device view of record: usbmon, not the tty logger.** The serial
   port has exactly one effective reader: when the user's own serial
   terminal holds /dev/ttyUSB0 (to type `up`), an agent-side logger gets
@@ -953,6 +352,23 @@ packets. 4-packet reassembly is now PROVEN (the `DBG MSG (190 B)` line).
   FIDO-registered — a real product must register one).
 - **TinyUSB:** pinned 0.21.0 via our own `lib/tinyusb` submodule +
   `PICO_TUSB_PATH` (never `<PICO_SDK_PATH>/lib/tinyusb`).
+- **INIT caps = 0x07** (WINK 0x01 | CBOR 0x02 | NMSG 0x04 — the 2.0–2.2
+  bit positions). 2.0–2.2 browsers classify by the 0x02 CBOR bit (caps
+  0x0D would read as U2F-only); libfido2 1.16 (a 2.3 client) reads CBOR
+  at 0x04 — our legacy NMSG bit satisfies it, so it at least attempts
+  GET_INFO.
+- **CTAP2 success responses = 1-byte status (0x00) + CBOR at resp+1**
+  (CTAP 2.3 §11.2.9.1.2; the clients' cbor_parse_reply requires the
+  leading status byte — the C10 "bare CBOR" experiment was reverted in
+  1.0.3). Error paths return the single status byte alone.
+- **Keep-alive = CTAPHID_KEEPALIVE 0x3B, BCNT=1, status at p[7]**
+  (CTAP 2.3 §11.2.9.1.7 — USB HID; the 0x82 value is the BLE
+  keep-alive, §11.4.4.3, a different transport). Firefox's exact-match
+  `From<u8>` expects 0xBB = TYPE_INIT | 0x3B.
+- **rpIdHash is computed, not taken:** the firmware computes
+  SHA-256(rp.id) from the rp.id string (fido_ctap.c; WebAuthn §6.1) and
+  ignores the request's rpIdHash field; the E2E asserts
+  SHA-256("xorengineering.com") in authData.
 
 ## History (one line per milestone; the full narrative is in the git log)
 
@@ -1028,111 +444,114 @@ packets. 4-packet reassembly is now PROVEN (the `DBG MSG (190 B)` line).
   `extensions` + COSE fixes. Re-pinned the KATs (authData 164 B, response
   248 B), ctest 9/9, rebuilt uf2 md5 `4b285d454175ac88cde67be74e1ddaeb`.
   Awaiting the C1c Firefox / C2 Chrome browser re-test.
- - **Bugs 1–5 + delivery stall root-caused** (2026-11-02): fixed the five
-   wire-confirmed bugs (continuation `0x00`, COSE crv −1, attStmt text keys,
-   keep-alive `0x21`/`0x3B`, multi-packet delivery). The delivery stall's
-   spin fix (no `sleep_ms`) proved insufficient in round C4 — the 16–20 ms
-   inter-packet gap was the `DBG-TMP` `printf` in `outq_drain()` blocking the
-   main loop (~17 ms/report at 115200), so the host's ~80 µs tight re-poll
-   read a zero-length report and Firefox stopped. Stripped the `DBG-TMP`
-   prints; `outq_drain()` now arms the next report in ~1–10 µs. ctest 9/9,
-   uf2 md5 `ca68092b535b38e10d19bafe0897f4fc`. Awaiting C5 Firefox / Chrome.
-  - **C6 flash fix + COSE_Key bug #6** (2026-11-02): the C6 `cred_save`
-    failure under dual-core was `flash_safe_execute` bailing because core 1
-    never called `flash_safe_execute_core_init()` (multicore lockout not
-    ready) → added that init at the top of `fido_usb_core1_task()`; confirmed
-    on the wire (genkey/sign/cred_save all OK, full response, status 0x00).
-    End-to-end verification of that response then exposed a **malformed
-    COSE_Key** (5-entry map, crv/x/y on the wrong labels + spurious alg) that
-    Chromium would reject; fixed to the canonical 4-entry EC2 map (75 B),
-    re-pinned the KATs offline (model byte-verified against the old KAT),
-    ctest 9/9, uf2 md5 `4293034a80e6861751892adb758e76d2`. Awaiting C7.
-  - **C7 controlled makeCredential PASS** (2026-11-02): after flashing the
-    COSE-fixed uf2, the controlled replay (probe FULL PASS + `mc_test.py`
-    re-sending the real C6 Firefox request + console watcher) completed
-    end-to-end: `genkey/sign/cred_save OK` (slot 6), a full 252-B response
-    (5 packets, status 0x00, no 0x7F), the COSE_Key decoding to the canonical
-    4-entry EC2 map `{1:2, 3:-1, -1:x, -2:y}` (75 B), and the attestation
-    ECDSA signature verifying offline (raw 64-B R||S over
-    SHA-256(authData || clientDataHash)). Awaiting the C7 Firefox browser round.
-   - **C7 Firefox round FAILED → root cause found + fixed** (2026-11-03):
-     the tshark decode of roundC7_firefox.usb showed the device healthy
-     end-to-end, but Firefox read only 3 of the 5 response packets (175 B
-     of 252) and closed its hidraw fd 82 µs after packet 3 (-ENOENT on the
-     4th read URB = host unlink, not a ZLP; timer ruled out). Root cause:
-     `resp_send()` forced `pkt[4] = 0x00` on every continuation (a C3-era
-     "fix" based on a misreading — CTAP 2.0 §8.1.5.4 / ITU-T X.1278 require
-     the SEQ to start at 0 and *increment* to 0x7f); packet 3 was the first
-     continuation with the wrong SEQ (0x00 for expected 0x01) and the host
-     aborted exactly there. The keep-alive was a second, independent spec
-     defect (wire `… bb 00 01 3b …`; spec: KEEPALIVE 0x02 with PROCESSING
-     0x01 / UP_NEEDED 0x02 — the earlier "0x21/0x3B" fix was itself a
-     misreading of §8.1.9.1.5, which is CTAPHID_CANCEL). Both fixed
-     (fido_ctaphid.c/.h; test_ctaphid.c re-pinned to the incrementing SEQ),
-     ctest 9/9, uf2 md5 `9146e094fb52e13e180ed54070cb8b7a`. Awaiting the
-     user reflash + C7 retry (roundC8).
-   - **C8 Firefox round FAILED (immediate, no UP prompt) → keep-alive
-     framing root cause found + fixed** (2026-11-03): the C7-retry
-     capture was healthy through makeCredential (190 B, 4 OUT pkts),
-     then exactly one keep-alive `00 00 00 03 82 00 01 02 …` and
-     silence — Firefox closed the device. The C7 CMD fix (0xBB→0x82)
-     made Firefox parse the keep-alive body for the first time: it
-     reads the byte after the command as the status → 0x00 = RFU,
-     because `fido2_ctaphid_keepalive()` framed it through
-     `resp_send()`'s 2-byte BCNT. Spec KEEPALIVE (CTAP 2.0 §8.3.4.3)
-     = CMD + a SINGLE status byte (PROCESSING 0x01 / UP_NEEDED 0x02;
-     0x00, 0x03–0xFF RFU), NO BCNT — C7's invalid 0xBB had made the
-     host ignore keep-alives entirely, hiding the framing defect.
-     Fixed: the keep-alive report is framed directly
-     `[CID 4B BE][0x82][status][zeros]` (status at p[5]); test_ctaphid.c
-     re-pinned; the header citation corrected to §8.3.4.3 (11.4.4.3 is
-     the 2.3 numbering). ctest 9/9, uf2 md5
-     `302c211baaed653f01c9d8b36ba1a962`. Awaiting reflash + C9.
-   - **C9 Firefox round FAILED (dialog appeared, vanished ~500 ms in) →
-     keep-alive root cause settled from Firefox's own source; PAUSED
-     before the fix** (2026-11-03): the C9 wire was device-clean through
-     two keep-alives (`… 82 02 00 00 …`, 484 ms apart), then Firefox
-     stopped polling 2.5 ms after keep-alive #2 with no CANCEL; the
-     user's late `up` still completed on the device and stored /f2_3
-     (response went to an unpolled endpoint). Decoding against Firefox's
-     vendored CTAP2 stack (mozilla-firefox/firefox,
-     dom/webauthn/authenticator/) proved TWO defects in our keep-alive:
-     (1) it IS a BCNT-framed message — the C8 "no BCNT" fix made Firefox
-     read BCNT = 0x0200 = 512, demand a continuation whose "SEQ" was the
-     next keep-alive's CMD byte (0x82) → "invalid sequence number"
-     abort; (2) this Firefox's CTAPHID_KEEPALIVE is **0xBB**
-     (consts.rs `0x80 | 0x3b`, exact `From<u8>` match), so the spec
-     0x82 reads as `Unknown(0x82)` → `UnexpectedCmd` — which also
-     re-explains C8's immediate abort (its `82 00 01 02` framing was
-     fine; only the command byte was wrong for this browser) and C7's
-     22-s tolerance (0xBB parsed as a keep-alive all along). Fix queued:
-     BCNT=1 framing + CMD 0xBB, pending the spec-vs-Firefox verification
-     (real 0x82 tokens presumably work in Firefox — unexplained by this
-     code reading) and a Chrome-compatibility decision.
+- **Bugs 1–5 + delivery stall root-caused** (2026-11-02): fixed the five
+  wire-confirmed bugs (continuation `0x00`, COSE crv −1, attStmt text keys,
+  keep-alive `0x21`/`0x3B`, multi-packet delivery). The delivery stall's
+  spin fix (no `sleep_ms`) proved insufficient in round C4 — the 16–20 ms
+  inter-packet gap was the `DBG-TMP` `printf` in `outq_drain()` blocking the
+  main loop (~17 ms/report at 115200), so the host's ~80 µs tight re-poll
+  read a zero-length report and Firefox stopped. Stripped the `DBG-TMP`
+  prints; `outq_drain()` now arms the next report in ~1–10 µs. ctest 9/9,
+  uf2 md5 `ca68092b535b38e10d19bafe0897f4fc`. Awaiting C5 Firefox / Chrome.
+- **C6 flash fix + COSE_Key bug #6** (2026-11-02): the C6 `cred_save`
+  failure under dual-core was `flash_safe_execute` bailing because core 1
+  never called `flash_safe_execute_core_init()` (multicore lockout not
+  ready) → added that init at the top of `fido_usb_core1_task()`; confirmed
+  on the wire (genkey/sign/cred_save all OK, full response, status 0x00).
+  End-to-end verification of that response then exposed a **malformed
+  COSE_Key** (5-entry map, crv/x/y on the wrong labels + spurious alg) that
+  Chromium would reject; fixed to the canonical 4-entry EC2 map (75 B),
+  re-pinned the KATs offline (model byte-verified against the old KAT),
+  ctest 9/9, uf2 md5 `4293034a80e6861751892adb758e76d2`. Awaiting C7.
+- **C7 controlled makeCredential PASS** (2026-11-02): after flashing the
+  COSE-fixed uf2, the controlled replay (probe FULL PASS + `mc_test.py`
+  re-sending the real C6 Firefox request + console watcher) completed
+  end-to-end: `genkey/sign/cred_save OK` (slot 6), a full 252-B response
+  (5 packets, status 0x00, no 0x7F), the COSE_Key decoding to the canonical
+  4-entry EC2 map `{1:2, 3:-1, -1:x, -2:y}` (75 B), and the attestation
+  ECDSA signature verifying offline (raw 64-B R||S over
+  SHA-256(authData || clientDataHash)). Awaiting the C7 Firefox browser round.
+- **C7 Firefox round FAILED → root cause found + fixed** (2026-11-03):
+  the tshark decode of roundC7_firefox.usb showed the device healthy
+  end-to-end, but Firefox read only 3 of the 5 response packets (175 B
+  of 252) and closed its hidraw fd 82 µs after packet 3 (-ENOENT on the
+  4th read URB = host unlink, not a ZLP; timer ruled out). Root cause:
+  `resp_send()` forced `pkt[4] = 0x00` on every continuation (a C3-era
+  "fix" based on a misreading — CTAP 2.0 §8.1.5.4 / ITU-T X.1278 require
+  the SEQ to start at 0 and *increment* to 0x7f); packet 3 was the first
+  continuation with the wrong SEQ (0x00 for expected 0x01) and the host
+  aborted exactly there. The keep-alive was a second, independent spec
+  defect (wire `… bb 00 01 3b …`; spec: KEEPALIVE 0x02 with PROCESSING
+  0x01 / UP_NEEDED 0x02 — the earlier "0x21/0x3B" fix was itself a
+  misreading of §8.1.9.1.5, which is CTAPHID_CANCEL). Both fixed
+  (fido_ctaphid.c/.h; test_ctaphid.c re-pinned to the incrementing SEQ),
+  ctest 9/9, uf2 md5 `9146e094fb52e13e180ed54070cb8b7a`. Awaiting the
+  user reflash + C7 retry (roundC8).
+- **C8 Firefox round FAILED (immediate, no UP prompt) → keep-alive
+  framing root cause found + fixed** (2026-11-03): the C7-retry
+  capture was healthy through makeCredential (190 B, 4 OUT pkts),
+  then exactly one keep-alive `00 00 00 03 82 00 01 02 …` and
+  silence — Firefox closed the device. The C7 CMD fix (0xBB→0x82)
+  made Firefox parse the keep-alive body for the first time: it
+  reads the byte after the command as the status → 0x00 = RFU,
+  because `fido2_ctaphid_keepalive()` framed it through
+  `resp_send()`'s 2-byte BCNT. Spec KEEPALIVE (CTAP 2.0 §8.3.4.3)
+  = CMD + a SINGLE status byte (PROCESSING 0x01 / UP_NEEDED 0x02;
+  0x00, 0x03–0xFF RFU), NO BCNT — C7's invalid 0xBB had made the
+  host ignore keep-alives entirely, hiding the framing defect.
+  Fixed: the keep-alive report is framed directly
+  `[CID 4B BE][0x82][status][zeros]` (status at p[5]); test_ctaphid.c
+  re-pinned; the header citation corrected to §8.3.4.3 (11.4.4.3 is
+  the 2.3 numbering). ctest 9/9, uf2 md5
+  `302c211baaed653f01c9d8b36ba1a962`. Awaiting reflash + C9.
+- **C9 Firefox round FAILED (dialog appeared, vanished ~500 ms in) →
+  keep-alive root cause settled from Firefox's own source; PAUSED
+  before the fix** (2026-11-03): the C9 wire was device-clean through
+  two keep-alives (`… 82 02 00 00 …`, 484 ms apart), then Firefox
+  stopped polling 2.5 ms after keep-alive #2 with no CANCEL; the
+  user's late `up` still completed on the device and stored /f2_3
+  (response went to an unpolled endpoint). Decoding against Firefox's
+  vendored CTAP2 stack (mozilla-firefox/firefox,
+  dom/webauthn/authenticator/) proved TWO defects in our keep-alive:
+  (1) it IS a BCNT-framed message — the C8 "no BCNT" fix made Firefox
+  read BCNT = 0x0200 = 512, demand a continuation whose "SEQ" was the
+  next keep-alive's CMD byte (0x82) → "invalid sequence number"
+  abort; (2) this Firefox's CTAPHID_KEEPALIVE is **0xBB**
+  (consts.rs `0x80 | 0x3b`, exact `From<u8>` match), so the spec
+  0x82 reads as `Unknown(0x82)` → `UnexpectedCmd` — which also
+  re-explains C8's immediate abort (its `82 00 01 02` framing was
+  fine; only the command byte was wrong for this browser) and C7's
+  22-s tolerance (0xBB parsed as a keep-alive all along). Fix queued:
+  BCNT=1 framing + CMD 0xBB, pending the spec-vs-Firefox verification
+  (real 0x82 tokens presumably work in Firefox — unexplained by this
+  code reading) and a Chrome-compatibility decision.
 
-    - **C10 CBOR fix + C11 round FAILED → stale-firmware proof, rk/PIN
-      hypothesis refuted, fingerprint added** (2026-11-03): C10 fixed the
-      CTAP2 success responses to be the bare CBOR (no leading 0x00 status
-      byte; GET_INFO 84 B, makeCredential 251 B; KATs re-pinned). The C11
-      Firefox round then failed with a NEW symptom (dialog stays open,
-      `up` inert, timeout) and was re-diagnosed as a resident-key/PIN
-      contradiction — which the capture decode REFUTED: no makeCredential
-      in the capture (probe only); GET_INFO byte-identical to the KAT with
-      keys verified CORRECT against the CTAP 2.3 table (2.3 renumbered
-      the GET_INFO keys — options=0x04, maxMsgSize=0x05, …,
-      remainingDiscoverableCredentials=0x14); and two wire artifacts the
-      current source cannot produce (a 1-byte CBOR 0x04 INVALID_SEQ
-      reply; a 7-B U2F reply vs the 2-B 69 86) → the device was NOT
-      running the flashed UF2 (the flash did not take). The "rk:true"
-      bytes are the 2.3 `options` map that a 2.0–2.2 Firefox cannot read;
-      Firefox's request carried rk:false; authData flags 0x41 has no RK
-      bit; no browser rule "resident keys require a PIN" was found. The
-      CTAP 2.3 CTAPHID command numbering (INIT 0x06, CBOR 0x10,
-      KEEPALIVE 0x3B, ERROR 0x3F, …) was verified against the spec of
-      record — the firmware already conforms. Fix: INIT-version
-      fingerprint 1.0.0 → 1.0.1 (FIDO2_FW_VERSION_BUILD), new uf2 md5
-      `caee4ddd3f6baf1f6912f0de4ee52ceb`, ctest 9/9. PIN implementation
-      DEFERRED (Phase 6 plan updated with the concrete design).
+- **C10 CBOR fix + C11 round FAILED → stale-firmware proof, rk/PIN
+  hypothesis refuted, fingerprint added** (2026-11-03): C10 fixed the
+  CTAP2 success responses to be the bare CBOR (no leading 0x00 status
+  byte; GET_INFO 84 B, makeCredential 251 B; KATs re-pinned — a
+  misdiagnosis, REVERTED in 1.0.3: the leading 0x00 status byte is
+  REQUIRED by the clients' cbor_parse_reply, see Design
+  decisions). The C11
+  Firefox round then failed with a NEW symptom (dialog stays open,
+  `up` inert, timeout) and was re-diagnosed as a resident-key/PIN
+  contradiction — which the capture decode REFUTED: no makeCredential
+  in the capture (probe only); GET_INFO byte-identical to the KAT with
+  keys verified CORRECT against the CTAP 2.3 table (2.3 renumbered
+  the GET_INFO keys — options=0x04, maxMsgSize=0x05, …,
+  remainingDiscoverableCredentials=0x14); and two wire artifacts the
+  current source cannot produce (a 1-byte CBOR 0x04 INVALID_SEQ
+  reply; a 7-B U2F reply vs the 2-B 69 86) → the device was NOT
+  running the flashed UF2 (the flash did not take). The "rk:true"
+  bytes are the 2.3 `options` map that a 2.0–2.2 Firefox cannot read;
+  Firefox's request carried rk:false; authData flags 0x41 has no RK
+  bit; no browser rule "resident keys require a PIN" was found. The
+  CTAP 2.3 CTAPHID command numbering (INIT 0x06, CBOR 0x10,
+  KEEPALIVE 0x3B, ERROR 0x3F, …) was verified against the spec of
+  record — the firmware already conforms. Fix: INIT-version
+  fingerprint 1.0.0 → 1.0.1 (FIDO2_FW_VERSION_BUILD), new uf2 md5
+  `caee4ddd3f6baf1f6912f0de4ee52ceb`, ctest 9/9. PIN implementation
+  DEFERRED (Phase 6 plan updated with the concrete design).
 - **C12 prep** (2026-11-03, uncommitted): user reflash verified on the
   wire (probe INIT fw=1.0.1); store wiped (0 records); probe FULL
   PASS. Console comms fixed: the Python/termios approach was broken —
@@ -1145,6 +564,17 @@ packets. 4-packet reassembly is now PROVEN (the `DBG MSG (190 B)` line).
   build chokes on dynamic regex interpolation, so it uses string
   comparison). C11 capture re-identified: the key was dev **19** there,
   not dev 4 (old notes conflated port path 5-1.4.1 with device number).
+- **C12b — caps 0x07 + GET_INFO re-key (fw 1.0.2, 2026-11-03):** the
+  C12b capture (fw 1.0.1) showed Firefox classifying the key U2F-only
+  and never sending makeCredential. Two encoding gates, each alone
+  fatal: INIT caps 0x0D (the 2.3 bit positions — 2.0–2.2 browsers
+  read CBOR at 0x02) and the GET_INFO 2.3 key numbering (a 2.0–2.2
+  client reads 0x09 as `algorithms` → gets `["usb"]` → "no usable
+  algorithms"). Fix: caps 0x07 (the 2.0–2.2 positions) + the GET_INFO
+  re-key — first (wrongly) to the 2.0 table, corrected to the 2.1+
+  numbering in 1.0.4 (C13). The "7-byte 0x83 reply" wire anomaly was
+  resolved as Firefox's own U2F version-check request (we answer 0x6986
+  — not a device bug).
 - **C13 prep round 2** (2026-11-04): 1.0.3 flash verified on the wire
   (probe FULL PASS: fw=1.0.3, caps 0x07, 86-B GET_INFO KAT); new ground
   rule 10 — the dev board is a Raspberry Pi Pico 2 (RP2350), NOT an
@@ -1176,75 +606,75 @@ packets. 4-packet reassembly is now PROVEN (the `DBG MSG (190 B)` line).
   (test_ctap.c, fido_probe.py + new explicit fw 1.0.4 INIT assert,
   fido_mc.py); ctest 9/9; uf2 md5 `55d5b14f37686e21b3c3d57c7277e22d`.
   Awaiting the user reflash + C14.
- - **C14 round FAILED + root cause + 1.0.5 fix** (2026-11-04): the
-   Firefox round on 1.0.4 proved the C13 fix (makeCredential arrived,
-   190 B/4 OUT; 5 keep-alives; on `up` the full 252-B response out in 5
-   IN packets) — then the browser rejected the CONTENT (silence after
-   packet 5; rpIdHash on the wire = SHA-256("xorengineering.com") ✓).
-   Root cause, proven from the wire + Firefox's source
-   (`make_credentials.rs` + `crypto/mod.rs`): the COSE_Key `crv` was
-   encoded as **−1** (CBOR 0x20) — the COSE registry (RFC 8152 §13.1)
-   has P-256 = **1**, and Firefox's `Curve::try_from(−1)` →
-   `UnknownKeyType` → the COSE key, hence the whole response, rejected.
-   The response FRAMING was exonerated in the same pass: Firefox's
-   `MakeCredentialsResult` deserializer + its own test vector parse
-   exactly our `map(3) {fmt, bstr(authData), attStmt-map}` (the
-   wire-only "bstr(authData‖attStmt)" hypothesis was disproven). Fix
-   1.0.5: crv 1 (one wire byte, `03 20` → `03 01`; size unchanged,
-   252 B); KATs re-pinned offline (old KAT verified self-consistent
-   first; mock sig recomputed), bench crv/fw asserts updated; ctest 9/9;
-   uf2 md5 `a2589242f411e46596c6c06f54a63da9`. New ground rule 11
-   (serial ALWAYS 115200, never 9600). Lesson: spec-conformance bugs
-   are invisible to verifiers derived from the firmware's own output —
-   verifier logic must be spec-derived. Also added ground rule 12
-   (record settled analyses) + the **Settled decisions** register
-   (SD-1 framing, SD-2 GET_INFO numbering, SD-3 COSE crv) so encoding
-   questions are answered once against the primary source and not
-   re-litigated. Awaiting the user reflash + C15.
-  - **C15 CLOSED as a FALSE ALARM** (2026-11-04): the "invalid signature"
-    was a bug in the OFF-CHIP verifier (`cryptography` `pk.verify`
-    SHA-256-hashes its data arg; the ATECC608 external-digest Sign signs
-    the 32-B MD buffer as-is) — a raw-digest P-256 ECDSA verifier proves
-    ALL chip signatures VALID (SD-4). `bench/fido_mc.py` now does real
-    raw-digest ECDSA (pure-Python, self-tested).
-  - **C16 root cause + 1.0.5 fix** (2026-11-04): the browser's
-    authenticator-rs `COSEKeyVisitor` expects the **5-entry** COSE key
-    `{1:kty, 3:alg, -1:crv, -2:x, -3:y}`; we emitted the RFC 9053
-    **4-entry** `{1:kty, 3:crv, -1:x, -2:y}` → Firefox read our −1 (x,
-    bytes) where it wants the curve i64 → `invalid type: byte array,
-    expected i64` (the C16 RUST_LOG). Fix: emit the 5-entry layout (77 B;
-    authData 164 B; response 254 B / BCNT 0x00FE). **Supersedes SD-3** →
-    recorded as **SD-5**. KATs re-pinned (test_ctap.c, fido_mc.py); ctest
-    9/9; uf2 md5 `24df233af54519a4043c2691381b74b7`.
-  - **C16 flash + wire verification + C17 browser round** (2026-11-04):
-    1.0.5 flashed (the Pico reboots the instant the uf2 write completes —
-    the BOOTSEL volume vanishing after `cp` IS the success signal; verify
-    via the INIT fw version, not a volume read-back). `fido_probe.py` FULL
-    PASS (fw 1.0.5); `fido_mc.py` E2E **PASS** (254-B response, 5-entry
-    COSE, packed signature VALID raw-digest). C17 (webauthn.io,
-    `RUST_LOG=authenticator=debug`): the C16 parse error is **GONE**; new
-    failure `CommandError: Unexpected code: UserActionTimeout` = CTAP2
-    0x0A = the 30-s UP window expired before `up` was delivered (a
-    round-**TIMING** issue, NOT firmware/COSE).
-   - **C18 webauthn.io PASS — first browser-side registration success**
-     (2026-11-05): the C17 `UserActionTimeout` was round timing, not
-     firmware — `up` sent ~2 s after the Register click (inside the 30-s
-     window) made webauthn.io report registration **success** on fw 1.0.5;
-     the fresh RUST_LOG is clean of both the C16 COSE parse error and
-     `UserActionTimeout`; no code change. Next: the xorengineering.com
-     second harness, then diagnostic removal + commit (Phase 4
-     getAssertion still pending — the page's "authentication test" button
-     will fail until then).
-   - **C19 xorengineering.com PASS + diagnostic cleanup** (2026-11-05):
-     the second harness (fido2-lib server verification) also reports
-     registration **success** (same fast-`up` pattern; clean log delta)
-     — register passes on both webauthn.io and
-     xorengineering.com/fido2/. Removed the temporary `diag` console
-     command + the `DBG mc:` prints (both browser rounds pass; C15 is
-     closed as a verifier false alarm — SD-4); rebuilt uf2 md5
-     `b837ed7f5f6754e67b05ac0aab6372b9` (172544 B, wire-identical 1.0.5);
-     ctest 9/9; code + PLAN.md committed separately. Next: Phase 4
-     (getAssertion + RESET).
+- **C14 round FAILED + root cause + 1.0.5 fix** (2026-11-04): the
+  Firefox round on 1.0.4 proved the C13 fix (makeCredential arrived,
+  190 B/4 OUT; 5 keep-alives; on `up` the full 252-B response out in 5
+  IN packets) — then the browser rejected the CONTENT (silence after
+  packet 5; rpIdHash on the wire = SHA-256("xorengineering.com") ✓).
+  Root cause, proven from the wire + Firefox's source
+  (`make_credentials.rs` + `crypto/mod.rs`): the COSE_Key `crv` was
+  encoded as **−1** (CBOR 0x20) — the COSE registry (RFC 8152 §13.1)
+  has P-256 = **1**, and Firefox's `Curve::try_from(−1)` →
+  `UnknownKeyType` → the COSE key, hence the whole response, rejected.
+  The response FRAMING was exonerated in the same pass: Firefox's
+  `MakeCredentialsResult` deserializer + its own test vector parse
+  exactly our `map(3) {fmt, bstr(authData), attStmt-map}` (the
+  wire-only "bstr(authData‖attStmt)" hypothesis was disproven). Fix
+  1.0.5: crv 1 (one wire byte, `03 20` → `03 01`; size unchanged,
+  252 B); KATs re-pinned offline (old KAT verified self-consistent
+  first; mock sig recomputed), bench crv/fw asserts updated; ctest 9/9;
+  uf2 md5 `a2589242f411e46596c6c06f54a63da9`. New ground rule 11
+  (serial ALWAYS 115200, never 9600). Lesson: spec-conformance bugs
+  are invisible to verifiers derived from the firmware's own output —
+  verifier logic must be spec-derived. Also added ground rule 12
+  (record settled analyses) + the **Settled decisions** register
+  (SD-1 framing, SD-2 GET_INFO numbering, SD-3 COSE crv) so encoding
+  questions are answered once against the primary source and not
+  re-litigated. Awaiting the user reflash + C15.
+- **C15 CLOSED as a FALSE ALARM** (2026-11-04): the "invalid signature"
+  was a bug in the OFF-CHIP verifier (`cryptography` `pk.verify`
+  SHA-256-hashes its data arg; the ATECC608 external-digest Sign signs
+  the 32-B MD buffer as-is) — a raw-digest P-256 ECDSA verifier proves
+  ALL chip signatures VALID (SD-4). `bench/fido_mc.py` now does real
+  raw-digest ECDSA (pure-Python, self-tested).
+- **C16 root cause + 1.0.5 fix** (2026-11-04): the browser's
+  authenticator-rs `COSEKeyVisitor` expects the **5-entry** COSE key
+  `{1:kty, 3:alg, -1:crv, -2:x, -3:y}`; we emitted the RFC 9053
+  **4-entry** `{1:kty, 3:crv, -1:x, -2:y}` → Firefox read our −1 (x,
+  bytes) where it wants the curve i64 → `invalid type: byte array,
+  expected i64` (the C16 RUST_LOG). Fix: emit the 5-entry layout (77 B;
+  authData 164 B; response 254 B / BCNT 0x00FE). **Supersedes SD-3** →
+  recorded as **SD-5**. KATs re-pinned (test_ctap.c, fido_mc.py); ctest
+  9/9; uf2 md5 `24df233af54519a4043c2691381b74b7`.
+- **C16 flash + wire verification + C17 browser round** (2026-11-04):
+  1.0.5 flashed (the Pico reboots the instant the uf2 write completes —
+  the BOOTSEL volume vanishing after `cp` IS the success signal; verify
+  via the INIT fw version, not a volume read-back). `fido_probe.py` FULL
+  PASS (fw 1.0.5); `fido_mc.py` E2E **PASS** (254-B response, 5-entry
+  COSE, packed signature VALID raw-digest). C17 (webauthn.io,
+  `RUST_LOG=authenticator=debug`): the C16 parse error is **GONE**; new
+  failure `CommandError: Unexpected code: UserActionTimeout` = CTAP2
+  0x0A = the 30-s UP window expired before `up` was delivered (a
+  round-**TIMING** issue, NOT firmware/COSE).
+- **C18 webauthn.io PASS — first browser-side registration success**
+  (2026-11-05): the C17 `UserActionTimeout` was round timing, not
+  firmware — `up` sent ~2 s after the Register click (inside the 30-s
+  window) made webauthn.io report registration **success** on fw 1.0.5;
+  the fresh RUST_LOG is clean of both the C16 COSE parse error and
+  `UserActionTimeout`; no code change. Next: the xorengineering.com
+  second harness, then diagnostic removal + commit (Phase 4
+  getAssertion still pending — the page's "authentication test" button
+  will fail until then).
+- **C19 xorengineering.com PASS + diagnostic cleanup** (2026-11-05):
+  the second harness (fido2-lib server verification) also reports
+  registration **success** (same fast-`up` pattern; clean log delta)
+  — register passes on both webauthn.io and
+  xorengineering.com/fido2/. Removed the temporary `diag` console
+  command + the `DBG mc:` prints (both browser rounds pass; C15 is
+  closed as a verifier false alarm — SD-4); rebuilt uf2 md5
+  `b837ed7f5f6754e67b05ac0aab6372b9` (172544 B, wire-identical 1.0.5);
+  ctest 9/9; code + PLAN.md committed separately. Next: Phase 4
+  (getAssertion + RESET).
 
 ## Goal
 
@@ -1406,17 +836,7 @@ Concrete design (the answer to "how do we implement a PIN?"):
 
 ## Open questions (resolve as we go)
 
-1. **PIN-less resident keys — RESOLVED (2026-11-03, C11 decode):** no
-   browser rule "resident keys require a PIN" was found (web search;
-   PIN-less YubiKey resident keys work in Firefox; the real CTAP rule
-   is the inverse — a device WITH a PIN set must require pinAuth, and
-   ours has none). Our `rk:true` advertisement sits under the CTAP 2.3
-   `options` key (0x04), which 2.0–2.2 browsers do not parse, so they
-   never even see it; their makeCredential requests carry rk:false and
-   our authData flags (0x41) have no RK bit. The demo exercises the
-   non-resident path (browser supplies the credentialID at login),
-   which our 4-slot store already serves. Phase 6 stays a stretch.
-2. **Counter 0 increment on the frozen chip:** expected to work by
+1. **Counter 0 increment on the frozen chip:** expected to work by
    design (COUNTER is the one config-zone field writable after the
    lock). Confirmed when we flip `FIDO2_COUNTER_CHIP` for the
    chip-counter verification; the littlefs default is unaffected either
