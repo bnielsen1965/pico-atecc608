@@ -6,16 +6,21 @@ that Phase 1 promises and the first CTAP2 command from Phase 2:
 
   1. CTAPHID INIT (broadcast) -> the exactly-17-byte response with the
      nonce echoed, an allocated CID (first one is 2), protocol 0x02 and
-     capabilities 0x0D (WINK|CBOR|NMSG).
+     capabilities 0x07 (WINK|CBOR|NMSG in the CTAP 2.0-2.2 bit
+     positions — where every shipping client looks for the CBOR bit).
   2. CTAPHID PING on the allocated channel -> the payload echoed back.
   3. CTAPHID WINK (sent 3x, 1 s apart) -> empty responses; the on-board
      LED flickers 600 ms after each, so watch the Pico during the run.
   4. CTAP2 GET_INFO over CTAPHID_CBOR (0x90): the request payload is a
      single command byte (0x04 — GET_INFO takes no parameters, CTAP
-     v2.1 §6.4/§8.1); the response is status(1) + CBOR map(63) = 64
-     payload bytes, spanning TWO CTAPHID packets (57 data bytes in the
-     first, 7 in a continuation), byte-for-byte the expected map
-     (versions, aaguid, options, transports, alg ES256, fw 1, 4 slots).
+     v2.1 §6.4/§8.1); the response is the 0x00 CTAP status byte
+     followed by the 80-byte CBOR map (81 payload bytes — CTAP 2.3 PS
+     §11.2.9.1.2: DATA = status, DATA+1 = CBOR), spanning TWO CTAPHID
+     packets (57 data bytes in the first, 24 in a continuation),
+     byte-for-byte the expected map with the CTAP 2.1+ key numbers
+     (versions, aaguid, options, maxMsgSize, maxCredCount/IdLen,
+     transports, alg ES256) — the table Firefox's AuthenticatorInfo
+     deserializer parses (the fw version is in the INIT response).
 
 No third-party dependencies (no pyusb/hidapi) — plain /dev/hidraw.
 Run as root, or add a udev rule granting your user access to 2e8a:000b.
@@ -133,7 +138,9 @@ def main():
         assert r[5:7] == (17).to_bytes(2, 'big'), 'INIT payload must be 17 bytes'
         assert r[7:15] == nonce, f'nonce mismatch: {r[7:15].hex()} != {nonce.hex()}'
         assert r[19] == 0x02, 'protocol must be 0x02'
-        assert r[23] == 0x0D, 'caps must be 0x0D (WINK|CBOR|NMSG)'
+        assert r[20:23] == bytes([1, 0, 5]), \
+            f'firmware must be 1.0.5, got {r[20]}.{r[21]}.{r[22]}'
+        assert r[23] == 0x07, 'caps must be 0x07 (WINK|CBOR|NMSG, 2.0-2.2 bits)'
         assert int.from_bytes(got_cid, 'big') >= 2, 'first allocated CID must be >= 2'
         print('      ok (nonce echoed, CID allocated, 17-byte shape)')
 
@@ -178,10 +185,11 @@ def main():
         # --- 4. GET_INFO (CTAP2 — the first real protocol command) --------
         # The CTAPHID_CBOR (0x90) payload IS the CTAP2 message: one
         # command byte (0x04 = GET_INFO; it takes no parameters, CTAP
-        # v2.1 §6.4/§8.1) — no extra header. The response is
-        # status(1)=0x00 + the 84-byte CBOR map = 85 payload bytes, which
-        # spans two CTAPHID packets: 57 data bytes in the first (CMD +
-        # BCNT header) and 28 in a continuation (CID + SEQ header, no BCNT).
+        # v2.1 §6.4/§8.1) — no extra header. The response is the 0x00
+        # CTAP status byte + the 80-byte CBOR map = 81 payload bytes
+        # (CTAP 2.3 PS §11.2.9.1.2), spanning two CTAPHID packets:
+        # 57 data bytes in the first (CMD + BCNT header) and 24 in a
+        # continuation (CID + SEQ header, no BCNT).
         pkt = got_cid + bytes([0x90]) + (1).to_bytes(2, 'big') \
             + b'\x04' + bytes(56)
         write_report(fd, pkt)
@@ -193,7 +201,7 @@ def main():
             'response must come back on the allocated CID'
         assert r1[4] == 0x90, f'expected CBOR response, cmd={r1[4]:#04x}'
         bcnt = int.from_bytes(r1[5:7], 'big')
-        assert bcnt == 85, f'GET_INFO payload must be 85 bytes, got {bcnt}'
+        assert bcnt == 81, f'GET_INFO payload must be 81 bytes, got {bcnt}'
         payload = bytearray(r1[7:64])        # first 57 payload bytes
         r2 = read_report(fd)
         if len(r2) != 64:
@@ -201,20 +209,25 @@ def main():
         assert r2[0:4] == got_cid, \
             'continuation must come back on the allocated CID'
         assert r2[4] == 0x00, f'continuation SEQ must be 0, got {r2[4]:#04x}'
-        payload += r2[5:33]                  # the remaining 28 payload bytes
+        payload += r2[5:29]                  # the remaining 24 payload bytes
+        # The 2.1+ key numbering (versions 0x01, aaguid 0x03, options
+        # 0x04, maxMsgSize 0x05, maxCredCountInList 0x07,
+        # maxCredIdLength 0x08, transports 0x09, algorithms 0x0A) —
+        # the table Firefox's AuthenticatorInfo deserializer parses.
         expected = bytes.fromhex(
-            '00aa0181684649444f5f325f30035065f5107f31a6478593016788e10ec776'
+            '00a80181684649444f5f325f30035065f5107f31a6478593016788e10ec776'
             '04a262726bf5627570f505190100071880081840098163757362'
-            '0a81a263616c672664747970656a7075626c69632d6b65790e011404')
-        assert len(payload) == 85
+            '0a81a263616c672664747970656a7075626c69632d6b6579')
+        assert len(payload) == 81
         if bytes(payload) != expected:
             print(f'      got      {bytes(payload).hex()}')
             print(f'      expected {expected.hex()}')
             sys.exit('GET_INFO: response does not match the expected map')
-        print(f'GET_INFO -> cid={r1[0:4].hex()} status=0x{r1[7]:02x} '
-              f'{bcnt} bytes over 2 packets (57+28)')
-        print('      ok (map matches the 85-byte KAT: versions, aaguid,')
-        print('           options, transports, ES256 {alg,type}, fw=1, 4 slots)')
+        print(f'GET_INFO -> cid={r1[0:4].hex()} {bcnt} bytes over '
+              f'2 packets (57+24)')
+        print('      ok (status 0x00 + map matches the 81-byte KAT:')
+        print('           versions, aaguid, options, maxMsgSize,')
+        print('           maxCredCount/IdLen, transports, ES256 {alg,type})')
 
         print('PASS — Phase 1 transport + Phase 2 GET_INFO verified')
         print('       (descriptor-level checks 1 and 2 were done separately:')

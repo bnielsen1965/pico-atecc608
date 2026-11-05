@@ -55,7 +55,6 @@ typedef struct {
     uint32_t     cid;
     uint8_t      cmd;   // wire header byte (0x80 | cmd)
     uint16_t     bcnt;  // total message length (BCNT)
-    uint8_t      seq;   // next continuation SEQ (starts at 0)
 } fido2_resp_t;
 
 static void resp_init(fido2_resp_t *r, fido2_sink_t sink, void *ctx,
@@ -66,7 +65,6 @@ static void resp_init(fido2_resp_t *r, fido2_sink_t sink, void *ctx,
     r->cid  = cid;
     r->cmd  = (uint8_t)(0x80u | cmd);
     r->bcnt = (uint16_t)bcnt;   // max message is 7609, fits
-    r->seq  = 0;
 }
 
 // Frame and send a response of `len` payload bytes (BCNT = len). A
@@ -84,6 +82,7 @@ static void resp_send(fido2_resp_t *r, const uint8_t *data, uint32_t len)
     }
 
     bool first = true;
+    uint8_t seq = 0;   // continuation sequence number (CTAP 2.0 §8.1.5.4)
     while (len > 0) {
         uint8_t pkt[FIDO2_REPORT_LEN];
         const uint32_t hdr  = first ? FIDO2_INIT_HDR_LEN : FIDO2_CONT_HDR_LEN;
@@ -96,7 +95,16 @@ static void resp_send(fido2_resp_t *r, const uint8_t *data, uint32_t len)
             pkt[4] = r->cmd;
             put16be(&pkt[5], r->bcnt);
         } else {
-            pkt[4] = r->seq++;
+            // CTAPHID continuation: byte 4 is the SEQ number — 0x00 for the
+            // first continuation, then incrementing by one per packet up to
+            // 0x7f (CTAP 2.0 §8.1.5.4 / ITU X.1278: "starting with sequence
+            // number 0, which then increments by one to a maximum of 127";
+            // bit 7 always clear). A conforming host verifies the sequence
+            // and aborts reassembly on a mismatch, so a constant 0x00 here
+            // truncated every multi-continuation response (the 254-B
+            // makeCredential died after its 2nd continuation).
+            pkt[4] = seq;
+            seq    = (uint8_t)((seq + 1u) & 0x7Fu);
         }
         memcpy(&pkt[hdr], data, n);
 
@@ -540,9 +548,23 @@ void fido2_ctaphid_keepalive(fido2_ctaphid_t *s, uint32_t now_ms,
     if (now_ms - s->last_keepalive < FIDO2_KEEPALIVE_PERIOD_MS) {
         return;   // throttle: at most one per period
     }
-    fido2_resp_t r;
-    resp_init(&r, sink, sink_ctx, s->tx_cid, FIDO2_CMD_KEEPALIVE, 1);
-    resp_send(&r, &status, 1);
+    // CTAPHID_KEEPALIVE (CTAP 2.3 §11.2.9.1.7, USB HID): a BCNT-framed
+    // message, BCNT = 1, DATA = a single status byte (PROCESSING 0x01 /
+    // UP_NEEDED 0x02). Wire shape on the channel:
+    //   [0xBB][CID 4B BE][0x00 0x01][status][0 ... 0]
+    // The 0x82 value some CTAP docs show is the *Bluetooth LE* keep-alive
+    // (§11.4.4.3), a different transport; the USB-HID byte is 0x3B (0xBB).
+    // We frame it directly (not via resp_send()) because a keep-alive is
+    // not a response to a command and must not touch the in-flight
+    // reassembly state.
+    uint8_t pkt[FIDO2_REPORT_LEN];
+    memset(pkt, 0, sizeof pkt);
+    put32be(pkt, s->tx_cid);
+    pkt[4] = (uint8_t)(0x80u | FIDO2_CMD_KEEPALIVE);   // 0xBB
+    pkt[5] = 0x00;                                     // BCNT hi
+    pkt[6] = 0x01;                                     // BCNT lo
+    pkt[7] = status;
+    sink(sink_ctx, pkt);
     s->last_keepalive = now_ms;
 }
 

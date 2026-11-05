@@ -13,10 +13,13 @@
 // The parameters are a CBOR map in the CTAP2 canonical form (CTAP v2.1
 // §8), or absent for commands that take no inputs. Neither the channel
 // nor the length appears in the message: the channel is the CTAPHID CID
-// and the length is the CTAPHID BCNT field. The response is a status
-// byte (0x00 on success, a CTAP2 error code otherwise) followed by the
-// CBOR payload on success — exactly the fido2_cbor_cb_t contract the
-// transport hands the handler (see fido_ctaphid.h).
+// and the length is the CTAPHID BCNT field. The response on success is
+// the CTAP status byte 0x00 (CTAP2_OK) followed by the CBOR payload
+// (CTAP 2.3 PS §11.2.9.1.2: DATA = status, DATA+1 = CBOR — the
+// libfido2 and browser stacks both require the 0x00 prefix); on failure
+// it is a single status byte (a CTAP2 error code, 0x01-0xff) — exactly
+// the fido2_cbor_cb_t contract the transport hands the handler (see
+// fido_ctaphid.h).
 //
 // Phase 2 implemented GET_INFO (0x04). Phase 3 adds MAKE_CREDENTIAL
 // (0x01), whose response is DEFERRED: a valid request is parsed
@@ -102,10 +105,6 @@ enum {
 // FIDO_CRED_MAX); also the GET_INFO
 // remainingDiscoverableCredentials value.
 #define FIDO_CTAP_MAX_CREDENTIALS   4
-// CTAP v2.1 §6.2: "Whenever releasing any code change to the
-// authenticator firmware, the authenticator MUST increase the
-// version." Start at 1.
-#define FIDO_CTAP_FW_VERSION        1
 
 // COSE algorithm identifier for ES256 (P-256, SHA-256) — the only
 // algorithm this device supports (the ATECC608 is ECC-only).
@@ -117,9 +116,9 @@ enum {
 // The credential ID length we mint (32 random bytes from the chip's
 // TRNG — browsers accept 32-64).
 #define FIDO_MC_CRED_ID_LEN         32
-// Largest MakeCredential response this firmware builds: status + map(3)
-// with a 64-byte credential ID and the 77-byte COSE key = 280 bytes
-// (the device mints 32-byte IDs, so real responses are 248).
+// Largest MakeCredential response this firmware builds: map(3)
+// with a 64-byte credential ID and the 77-byte COSE key = 286 bytes
+// (the device mints 32-byte IDs, so real responses are 254).
 #define FIDO_CTAP_MC_RESP_MAX       288
 
 // The key backend the CTAP layer signs with (Phase 3: the ATECC608 on
@@ -195,8 +194,10 @@ void fido_ctap_dispatch(void *ctx, const uint8_t *req, uint32_t req_len,
 bool fido_ctap_pending(const fido_ctap_ctx_t *ctx);
 
 // Drive a pending transaction from the main loop. Returns 1 and fills
-// resp/*resp_len (status byte first, as the transport expects) when the
-// transaction finished; 0 (with *resp_len == 0) while it still waits.
+// resp/*resp_len (the 0x00 status byte + CBOR payload on success, a
+// single status byte on error — as the transport expects) when the
+// transaction finished; 0
+// (with *resp_len == 0) while it still waits.
 // `cancelled` is the transport's fido2_ctaphid_cancelled() — a recorded
 // CTAPHID_CANCEL finishes the transaction with CTAP2 0x2D. A completed
 // transaction consumes the recorded user presence (when it used one).

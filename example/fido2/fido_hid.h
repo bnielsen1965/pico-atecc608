@@ -16,9 +16,19 @@
 
 // Initialize TinyUSB (device mode) and the CTAPHID state machine.
 // `enabled` gates the state machine: false = enumerate but answer
-// nothing (chip not provisioned; the app says why on UART0).
+// nothing (chip not provisioned; the app says why on UART0). Call on
+// core 0 BEFORE launching core 1 (fido_usb_core1_task): the report
+// queues the two cores share must be ready before the USB task spins.
 void fido_hid_init(bool enabled);
 
-// One main-loop iteration after tud_task(): CTAPHID timeout
-// housekeeping and the status LED.
-void fido_hid_tick(void);
+// Core 1 (the USB task): a tight spin of tud_task + IN-report release,
+// nothing else. Launch with multicore_launch_core1(). The next IN report
+// is armed the instant the host ACKs the previous one — the re-arm
+// latency that a single shared main loop could not beat (see fido_hid.c).
+void fido_usb_core1_task(void);
+
+// Core 0 (the card task), one call per main-loop iteration: the CTAP
+// dispatch, the ATECC608 key work, the CTAPHID timeouts, the console
+// and the status LED — the slow work that must stay off the USB
+// re-arm path.
+void fido_card_tick(void);

@@ -23,42 +23,63 @@ void fido_ctap_ctx_init(fido_ctap_ctx_t *ctx)
     memcpy(ctx->aaguid, s_aaguid, sizeof s_aaguid);
 }
 
-// GET_INFO (CTAP v2.0 §5.4 / v2.1 §6.2). The response map carries the
-// members a real client needs to treat this as a resident-capable
-// CTAP2.0 authenticator; keys are numeric and emitted in ascending
-// order (the CTAP2 canonical form requires sorted map keys). The
-// member set is the v2.1 key space (a superset of v2.0's — v2.0
-// clients MUST ignore keys they do not understand, CTAP v2.0 §6),
-// which is what modern clients (Chromium, libfido2) parse:
+// GET_INFO. The response map carries the members a real client needs
+// to treat this as a resident-capable CTAP2 authenticator; keys are
+// numeric and emitted in ascending order (the CTAP2 canonical form
+// requires sorted map keys).
 //
-//   1  versions        ["FIDO_2_0"]            (required)
-//   3  aaguid          <16 bytes>              (required)
-//   4  options         {"rk": true, "up": true}
-//   5  maxMsgSize      256
-//   7  maxCredentialCountInList  128
-//   8  maxCredentialIdLength     64
-//   9  transports      ["usb"]
-//   10 algorithms      [{"alg": -7, "type": "public-key"}]
-//   14 firmwareVersion 1
-//   20 remainingDiscoverableCredentials  4
+// KEY NUMBERING — the compatibility-critical detail (rounds C12/C13,
+// 2026-11-03/04): the CTAP 2.0 spec's table (aaguid 0x01, versions
+// 0x02, options 0x03, ...) was NEVER used by shipping hardware. CTAP
+// 2.1 renumbered the table (versions 0x01, extensions 0x02, aaguid
+// 0x03, options 0x04, maxMsgSize 0x05, pinUvAuthProtocols 0x06,
+// maxCredentialCountInList 0x07, maxCredentialIdLength 0x08,
+// transports 0x09, algorithms 0x0A); 2.2 and 2.3 kept it, and every
+// real device (the YubiKey vector in Firefox's own test suite) and
+// every shipping client parse THAT numbering. Verified 2026-11-04
+// against Firefox's AuthenticatorInfo deserializer (dom/webauthn/
+// authenticator/src/ctap2/commands/get_info.rs): 0x01 => versions
+// (array of text), 0x03 => aaguid (bytes(16)), ...; unknown keys are
+// warned and skipped. The 1.0.2-1.0.3 2.0-numbered map put the AAGUID
+// bytes under 0x01, which Firefox tried to parse as `versions` ->
+// type error -> the whole GetInfo rejected -> U2F fallback (version
+// check -> 69 86) -> no makeCredential — the C13 dialog timeout. We
+// therefore emit the 2.1+ keys. firmwareVersion is a 2.1+ UINT key
+// (0x0E), not an array, so it stays OUT of this map — the firmware
+// version is carried by the INIT response instead:
 //
-// No "clientPin"/"uv" option: this device has no PIN and no built-in
-// biometrics — user presence is the touch of the board (Phase 4
-// wires the button).
+//   1   versions        ["FIDO_2_0"]            (required)
+//   3   aaguid          <16 bytes>              (required)
+//   4   options         {"rk": true, "up": true}
+//   5   maxMsgSize      256
+//   7   maxCredentialCountInList  128
+//   8   maxCredentialIdLength     64
+//   9   transports      ["usb"]
+//   10  algorithms      [{"alg": -7, "type": "public-key"}]
+//
+// No "clientPin"/"uv" option and no pinUvAuthProtocols (key 6): this
+// device has no PIN and no built-in biometrics — user presence is the
+// touch of the board (Phase 4 wires the button).
 static void handle_get_info(const fido_ctap_ctx_t *ctx,
                             uint8_t *resp, uint32_t resp_max,
                             uint32_t *resp_len)
 {
     fido_cbor_enc_t e;
 
-    *resp_len = 1;
     if (resp_max < 2) {
         resp[0] = FIDO_CTAP2_ERR_OTHER;   // cannot fit even a stub
+        *resp_len = 1;
         return;
     }
 
+    // A CTAPHID_CBOR success response is [CTAP status code][CBOR data]
+    // (CTAP 2.3 PS §11.2.9.1.2: DATA = status, DATA+1 = n bytes of CBOR;
+    // 0x00 = CTAP2_OK). libfido2's cbor_parse_reply() and the browser
+    // stacks both require the 0x00 prefix — a bare CBOR map is read as
+    // an unknown error code (0xA9) and the device is rejected.
+    resp[0] = FIDO_CTAP2_OK;
     fido_cbor_enc_init(&e, resp + 1, resp_max - 1);
-    fido_cbor_enc_map(&e, 10);
+    fido_cbor_enc_map(&e, 8);
 
     fido_cbor_enc_uint(&e, 1);            // versions
     fido_cbor_enc_array(&e, 1);
@@ -90,31 +111,24 @@ static void handle_get_info(const fido_ctap_ctx_t *ctx,
     fido_cbor_enc_uint(&e, 10);           // algorithms
     fido_cbor_enc_array(&e, 1);
     // WebAuthn PublicKeyCredentialParameters objects, not bare
-    // integers — Chromium's GetInfo parser rejects a non-map entry
-    // (and falls back to U2F for the whole device). Map keys in
-    // canonical sorted order ("alg" < "type").
+    // integers — Firefox's (and Chromium's) GetInfo parser rejects a
+    // non-map entry. Map keys in canonical sorted order ("alg" < "type").
     fido_cbor_enc_map(&e, 2);
     fido_cbor_enc_text(&e, "alg");
     fido_cbor_enc_negint(&e, FIDO_CTAP_ALG_ES256);
     fido_cbor_enc_text(&e, "type");
     fido_cbor_enc_text(&e, "public-key");
 
-    fido_cbor_enc_uint(&e, 14);           // firmwareVersion
-    fido_cbor_enc_uint(&e, FIDO_CTAP_FW_VERSION);
-
-    fido_cbor_enc_uint(&e, 20);           // remainingDiscoverableCredentials
-    fido_cbor_enc_uint(&e, FIDO_CTAP_MAX_CREDENTIALS);
-
     if (e.overflow) {
-        // Cannot happen with the transport's 7609-byte response
-        // buffer (the map is 84 bytes); a hostile resp_max degrades
+        // Cannot happen with the transport's response buffer (the
+        // status byte + map is 81 bytes); a hostile resp_max degrades
         // to a status-only answer instead of a partial CBOR.
         resp[0] = FIDO_CTAP2_ERR_OTHER;
+        *resp_len = 1;
         return;
     }
 
-    resp[0]   = FIDO_CTAP2_OK;
-    *resp_len = 1u + e.len;
+    *resp_len = 1 + e.len;   // the 0x00 status byte + the CBOR map
 }
 
 // --- MAKE_CREDENTIAL (CTAP v2.0 §5.1 / v2.1 §6.1) ------------------------------
@@ -132,7 +146,13 @@ static void handle_get_info(const fido_ctap_ctx_t *ctx,
 //   4   pubKeyCredParams      array of map {"type": "public-key", "alg": int}
 //   5   excludeList           array of map {"id": bytes, ...}  (optional)
 //   6   pinUvAuthToken        bytes       present -> PIN_AUTH_INVALID
-//                                           (this device has no clientPin)
+//                                           (this device has no
+//                                           clientPin); a MAP here is
+//                                           the CTAP v2.2 `extensions`
+//                                           parameter (v2.2 renumbers
+//                                           the table: pinUvAuthToken
+//                                           moves to 0x08) — ignored,
+//                                           no extensions supported
 //   7   options               map text -> bool
 //   8   largeBlobKey          bytes       ignored (no "lbk" support)
 //   9   pinUvAuthProtocol     uint        ignored
@@ -155,27 +175,33 @@ static void handle_get_info(const fido_ctap_ctx_t *ctx,
 //
 //   1: "packed"        (string)
 //   2: authData        (bytestring)
-//   3: { 1: -7, 2: sig } (map — attStmt)
+//   3: { "alg": -7, "sig": sig } (map — attStmt, TEXT keys per L3)
 //
 // NOTE: the v2.0 spec's table has authData under 0x01 and fmt under
-// 0x02 (attStmt a bytestring), but current Chromium parses ONLY the
-// v2.1 shape unconditionally (device_response_converter.cc
-// ReadCTAPMakeCredentialResponse: 0x01 must be a string, 0x02 a
-// bytestring, 0x03 a map — a v2.0-layout answer fails is_string() and
-// the whole registration), and python-fido2's AttestationResponse uses
-// the v2.1 shape too. So the v2.1 layout is emitted even while
-// advertising versions=["FIDO_2_0"]. attStmt carries no x5c —
-// self-attestation (WebAuthn §8.2), which is what the
-// fido2-demonstration harness verifies (its fido2-lib "packed" handler
-// re-checks the signature with the attested key).
+// 0x02 (attStmt a bytestring), but current browsers parse ONLY the
+// v2.1 shape unconditionally. Verified 2026-11-04 against Firefox's
+// `MakeCredentialsResult` deserializer (make_credentials.rs: 0x01 must
+// be a string, 0x02 a bytestring = authData, 0x03 a map = attStmt) and
+// its own test vector MAKE_CREDENTIALS_SAMPLE_RESPONSE_CTAP2, which is
+// exactly this layout — round C14 proved the framing is NOT what
+// Firefox rejects (the C14 defect was the COSE_Key crv value, see
+// fido_cose.c). So the v2.1 layout is emitted even while advertising
+// versions=["FIDO_2_0"]. attStmt carries no x5c — self-attestation
+// (WebAuthn §8.2; Firefox's Packed statement takes x5c as
+// #[serde(default)]), which is what the fido2-demonstration harness
+// verifies (its fido2-lib "packed" handler re-checks the signature
+// with the attested key).
 //
-// authData (WebAuthn §6.1):
+// authData (WebAuthn L3 §6.5.1):
 //
 //   rpIdHash(32) | flags(1) | signCount(4, BE) |
 //   aaguid(16) | credIdLen(2, BE) | credId | COSE_Key
 //
 // flags = 0x41 (UP bit 0 | AT bit 6; no UV — this device cannot do
-// user verification). rpIdHash = SHA-256(rp.id). signCount = the
+// user verification). The AT bit marks the attested credential data
+// that always follows; L3 layout is UP=0x01 UV=0x04 BE=0x08 BS=0x10
+// AT=0x40 ED=0x80 (matching the FIDO-certified pico-fido2 reference).
+// rpIdHash = SHA-256(rp.id). signCount = the
 // ATECC608's counter 0, READ (Phase 4 increments it per signature).
 // The "packed" signature is over SHA-256(authData ‖ clientDataHash),
 // made by the freshly generated credential key.
@@ -447,11 +473,40 @@ static uint8_t parse_make_credential(fido_ctap_ctx_t *ctx,
             }
             break;
         }
-        case 6:
-            // pinUvAuthToken: this device advertises no clientPin, so a
-            // token cannot be verified (v2.0 §5.1 step 5: pinAuth
-            // present with an unsupported pinProtocol -> PIN_AUTH_INVALID).
-            return FIDO_CTAP2_ERR_PIN_AUTH_INVALID;
+        case 6: {   // pinUvAuthToken (v2.0/v2.1) / extensions (v2.2)
+            // The VALUE'S TYPE decides which parameter this is: in
+            // CTAP v2.0/v2.1, 0x06 is pinUvAuthToken (a byte string);
+            // in CTAP v2.2 the table is renumbered and 0x06 is
+            // `extensions` (a map of extension id -> input), which
+            // modern browsers send unconditionally (bench round C1:
+            // Firefox 2026 sent {"hmac-secret": false} to this FIDO_2_0
+            // device, and the blanket PIN_AUTH_INVALID failed the
+            // registration — Firefox surfaces any CTAP error there as
+            // NotAllowedError). A v2.0 authenticator ignores
+            // parameters it does not understand (v2.0 §8), so the map
+            // is skipped whole; a byte string is a real PIN token this
+            // device cannot verify (no clientPin).
+            if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL)) {
+                return FIDO_CTAP2_ERR_INVALID_CBOR;
+            }
+            if (FIDO_CBOR_BYTES == t) {
+                return FIDO_CTAP2_ERR_PIN_AUTH_INVALID;
+            }
+            if (FIDO_CBOR_MAP == t) {
+                // The v2.2 `extensions` parameter: no extension is
+                // supported on this device — ignore it. The header was
+                // consumed above, so skip its `u` key/value pairs.
+                for (uint64_t j = 0; j < u; j++) {
+                    if (!fido_cbor_dec_skip(&d) ||
+                        !fido_cbor_dec_skip(&d)) {
+                        return FIDO_CTAP2_ERR_INVALID_CBOR;
+                    }
+                }
+            } else {
+                return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
+            }
+            break;
+        }
         case 7: {   // options
             if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL) ||
                 FIDO_CBOR_MAP != t) {
@@ -628,8 +683,17 @@ static int mc_create(fido_ctap_ctx_t *ctx, uint8_t *resp, uint32_t resp_max,
         return 1;
     }
 
-    // authData = rpIdHash(32) | flags(1) | signCount(4, BE) |
-    //            aaguid(16) | credIdLen(2, BE) | credId | COSE_Key.
+    // authData (WebAuthn L3 §6.5.1) = rpIdHash(32) | flags(1) |
+    //   signCount(4, BE) | aaguid(16) | credIdLen(2, BE) | credId |
+    //   COSE_Key.
+    //
+    // flags = 0x41 = UP (bit 0) | AT (bit 6). The AT (attested-credential
+    // data) bit is REQUIRED whenever attested credential data follows the
+    // sign count — it always does here — and the L3 flag layout is
+    // UP=0x01 UV=0x04 BE=0x08 BS=0x10 AT=0x40 ED=0x80. A client that sees
+    // AT=0 with 126 trailing authData bytes rejects the whole response
+    // (NotAllowedError). This matches the FIDO-certified pico-fido2
+    // reference (FIDO2_AUT_FLAG_AT = 0x40) and the current W3C REC.
     uint8_t authdata[32 + 1 + 4 + 16 + 2 + FIDO_MC_CRED_ID_LEN +
                       FIDO_COSE_ES256_LEN];
     uint32_t n = 0;
@@ -644,7 +708,7 @@ static int mc_create(fido_ctap_ctx_t *ctx, uint8_t *resp, uint32_t resp_max,
     authdata[n++] = (uint8_t)ctr;
     memcpy(&authdata[n], ctx->aaguid, 16);
     n += 16;
-    authdata[n++] = 0;
+    authdata[n++] = 0;                        // credIdLen (2 octets, BE)
     authdata[n++] = FIDO_MC_CRED_ID_LEN;
     memcpy(&authdata[n], p->cred_id, FIDO_MC_CRED_ID_LEN);
     n += FIDO_MC_CRED_ID_LEN;
@@ -693,7 +757,10 @@ static int mc_create(fido_ctap_ctx_t *ctx, uint8_t *resp, uint32_t resp_max,
         return 1;
     }
 
-    // Response map (v2.1 layout — see the section note above).
+    // Response map (v2.1 layout — see the section note above). As with
+    // GET_INFO, the CTAPHID_CBOR success framing is [0x00 status][CBOR]
+    // (CTAP 2.3 PS §11.2.9.1.2).
+    resp[0] = FIDO_CTAP2_OK;
     fido_cbor_enc_t e;
     fido_cbor_enc_init(&e, resp + 1, resp_max - 1);
     fido_cbor_enc_map(&e, 3);
@@ -702,10 +769,13 @@ static int mc_create(fido_ctap_ctx_t *ctx, uint8_t *resp, uint32_t resp_max,
     fido_cbor_enc_uint(&e, 2);
     fido_cbor_enc_bytes(&e, authdata, n);
     fido_cbor_enc_uint(&e, 3);
+    // attStmt: WebAuthn L3 defines the "packed" attestation statement with
+    // TEXT member names "alg" and "sig" (not the integers 1/2). Browsers
+    // validate the statement against those names; integer keys are rejected.
     fido_cbor_enc_map(&e, 2);
-    fido_cbor_enc_uint(&e, 1);
+    fido_cbor_enc_text(&e, "alg");
     fido_cbor_enc_negint(&e, FIDO_CTAP_ALG_ES256);
-    fido_cbor_enc_uint(&e, 2);
+    fido_cbor_enc_text(&e, "sig");
     fido_cbor_enc_bytes(&e, sig, sizeof sig);
     if (e.overflow) {
         // Cannot happen with a resp_max of FIDO_CTAP_MC_RESP_MAX; a
@@ -717,8 +787,7 @@ static int mc_create(fido_ctap_ctx_t *ctx, uint8_t *resp, uint32_t resp_max,
     }
 
     ctx->pending_active = false;
-    resp[0]   = FIDO_CTAP2_OK;
-    *resp_len = 1u + e.len;
+    *resp_len = 1 + e.len;   // the 0x00 status byte + the CBOR map
     return 1;
 }
 

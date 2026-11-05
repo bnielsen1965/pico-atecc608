@@ -25,6 +25,7 @@ target_link_libraries(pico-atecc608-fido2
     tinyusb_device
     pico_unique_id   # 8-byte unique ID -> USB serial string
     pico-littlefs    # credential DB (/f2_<slot>), same volume as console/vault
+    pico_multicore   # core 1 runs the tight USB task (makeCredential delivery fix)
 )
 
 # Debug console on UART0 only — the USB interface is the HID key, so no

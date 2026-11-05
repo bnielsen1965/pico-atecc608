@@ -5,9 +5,9 @@
 // Covers: the message framing (an empty payload is
 // CTAP1_ERR_INVALID_LENGTH; stray parameter bytes must be one
 // well-formed CBOR item or the answer is CTAP2_ERR_INVALID_CBOR),
-// GET_INFO (the full response map decoded field by field with the codec
-// itself, plus a hand-computed 85-byte KAT; stray parameter maps are
-// ignored), MakeCredential (the full request parse and the CTAP2 error
+// GET_INFO (the full response — 0x00 status byte + map — decoded field
+// by field with the codec itself, plus a hand-computed 81-byte KAT;
+// stray parameter maps are ignored), MakeCredential (the full request parse and the CTAP2 error
 // table, the error-ordering rules, the deferred user-presence state
 // machine — cancel, timeout, a stale touch, the second-while-pending
 // guard, the umount abort — the excludeList hit, the rk overwrite, the
@@ -84,11 +84,12 @@ static void t_get_info_fields(void)
     const uint8_t   *data = NULL;
     uint32_t         dlen = 0;
 
+    // A CTAPHID_CBOR success response is [0x00 status][CBOR map]
+    // (CTAP 2.3 PS §11.2.9.1.2).
     CHECK(resp[0] == FIDO_CTAP2_OK);
-
-    fido_cbor_dec_init(&d, resp + 1, (uint32_t)(len - 1));
+    fido_cbor_dec_init(&d, resp + 1, (uint32_t)len - 1);
     CHECK(fido_cbor_dec_item(&d, &t, &u, NULL, NULL));
-    CHECK(t == FIDO_CBOR_MAP && u == 10);
+    CHECK(t == FIDO_CBOR_MAP && u == 8);
 
     // 1: versions ["FIDO_2_0"]
     CHECK(fido_cbor_dec_item(&d, &t, &u, NULL, NULL));
@@ -146,8 +147,8 @@ static void t_get_info_fields(void)
     CHECK(t == FIDO_CBOR_TEXT && dlen == 3 && 0 == memcmp(data, "usb", 3));
 
     // 10: algorithms [{"alg": -7, "type": "public-key"}] (COSE_ES256)
-    // — WebAuthn PublicKeyCredentialParameters objects (Chromium's
-    // GetInfo parser rejects a bare integer entry).
+    // — WebAuthn PublicKeyCredentialParameters objects (Firefox's and
+    // Chromium's GetInfo parsers reject a bare integer entry).
     CHECK(fido_cbor_dec_item(&d, &t, &u, NULL, NULL));
     CHECK(t == FIDO_CBOR_UINT && u == 10);
     CHECK(fido_cbor_dec_item(&d, &t, &u, NULL, NULL));
@@ -164,24 +165,16 @@ static void t_get_info_fields(void)
     CHECK(t == FIDO_CBOR_TEXT && dlen == 10
           && 0 == memcmp(data, "public-key", 10));
 
-    // 14: firmwareVersion 1
-    CHECK(fido_cbor_dec_item(&d, &t, &u, NULL, NULL));
-    CHECK(t == FIDO_CBOR_UINT && u == 14);
-    CHECK(fido_cbor_dec_item(&d, &t, &u, NULL, NULL));
-    CHECK(t == FIDO_CBOR_UINT && u == 1);
-
-    // 20: remainingDiscoverableCredentials 4
-    CHECK(fido_cbor_dec_item(&d, &t, &u, NULL, NULL));
-    CHECK(t == FIDO_CBOR_UINT && u == 20);
-    CHECK(fido_cbor_dec_item(&d, &t, &u, NULL, NULL));
-    CHECK(t == FIDO_CBOR_UINT && u == 4);
-
     // exactly consumed — no trailing bytes
     CHECK(d.p == d.end);
 }
 
 // The full response pinned byte for byte (hand-computed, cross-checked
-// against an independent CBOR walk). Status + 84 payload bytes.
+// against an independent CBOR walk). 81 payload bytes — the 0x00 CTAP
+// status byte (CTAP 2.3 PS §11.2.9.1.2) followed by the 80-byte CBOR
+// map with the CTAP 2.1+ GET_INFO key numbers (see handle_get_info for
+// the key-numbering rationale — this is the table Firefox's
+// AuthenticatorInfo deserializer and every shipping device parse).
 static void t_get_info_bytes(void)
 {
     uint8_t req[64];
@@ -190,13 +183,13 @@ static void t_get_info_bytes(void)
                             resp, sizeof resp);
 
     static const uint8_t expected[] = {
-        0x00,                         // status OK
-        0xAA,                         // map(10)
+        0x00,                         // CTAP status (success)
+        0xA8,                         // map(8)
         0x01,                         //   1: versions
             0x81, 0x68,
             0x46, 0x49, 0x44, 0x4F, 0x5F, 0x32, 0x5F, 0x30,   // "FIDO_2_0"
         0x03,                         //   3: aaguid
-            0x50,
+            0x50,                     //   bytes(16)
             0x65, 0xF5, 0x10, 0x7F, 0x31, 0xA6, 0x47, 0x85,
             0x93, 0x01, 0x67, 0x88, 0xE1, 0x0E, 0xC7, 0x76,
         0x04,                         //   4: options
@@ -220,10 +213,6 @@ static void t_get_info_bytes(void)
             0x6A,                     //   "public-key"
             0x70, 0x75, 0x62, 0x6C, 0x69, 0x63,
             0x2D, 0x6B, 0x65, 0x79,
-        0x0E,                         //   14: firmwareVersion
-            0x01,
-        0x14,                         //   20: remainingDiscoverableCredentials
-            0x04,
     };
 
     CHECK(len == sizeof expected);
@@ -248,14 +237,12 @@ static void t_get_info_with_params(void)
     uint32_t len = dispatch(req,
                             msg(req, FIDO_CTAP_INS_GET_INFO, empty_map, 1),
                             resp, sizeof resp);
-    CHECK(resp[0] == FIDO_CTAP2_OK);
     CHECK(len == rlen);
     CHECK(0 == memcmp(resp, refresp, len));
 
     len = dispatch(req,
                    msg(req, FIDO_CTAP_INS_GET_INFO, junk_map, 3),
                    resp, sizeof resp);
-    CHECK(resp[0] == FIDO_CTAP2_OK);
     CHECK(len == rlen);
     CHECK(0 == memcmp(resp, refresp, len));
 }
@@ -286,9 +273,10 @@ static void t_header(void)
     }
     {   // a bare command byte is well-formed
         uint8_t m[1] = { FIDO_CTAP_INS_GET_INFO };
-        uint8_t big[128];   // the response map needs 64 bytes
+        uint8_t big[128];   // the response needs 81 bytes (status + map)
         len = dispatch(m, sizeof m, big, sizeof big);
-        CHECK(big[0] == FIDO_CTAP2_OK && len > 1);
+        CHECK(big[0] == 0x00 && big[1] == 0xA8 && len > 1);
+        // 0x00 status + CBOR map(8)
     }
     {   // parameters must be ONE complete CBOR item: a valid map plus a
         // stray byte is not
@@ -629,10 +617,13 @@ static void seed_credential(fido_ctap_ctx_t *ctx, int idx,
 // The byte-pinned KATs — computed OFFLINE (Python hashlib) from the
 // fixtures above, independently of the C implementation:
 //   rpIdHash  = SHA-256("example.com")
-//   authData  = rpIdHash | 0x41 | 01 02 03 04 (counter) | aaguid |
-//               00 20 | credId (0xA5+i) | COSE_Key (77)
+//   authData  = rpIdHash | 0x41 (UP|AT) | 01 02 03 04 (counter) | aaguid
+//               | 00 20 (credIdLen, 2 B) | credId (0xA5+i) |
+//               COSE_Key (77, map(5): kty/alg/crv/x/y — CTAP2 layout)
 //   sig       = SHA-256(authData ‖ clientDataHash) ‖ itself
-//   response  = 0x00 | {1: "packed", 2: authData, 3: {1: -7, 2: sig}}
+//   response  = 0x00 | {1: "packed", 2: authData, 3: {"alg": -7, "sig": sig}}
+//               (the 0x00 CTAP status byte precedes the CBOR map,
+//               CTAP 2.3 PS §11.2.9.1.2)
 static const uint8_t s_mc_authdata[164] = {
     0xA3, 0x79, 0xA6, 0xF6, 0xEE, 0xAF, 0xB9, 0xA5, 0x5E, 0x37, 0x8C, 0x11,
     0x80, 0x34, 0xE2, 0x75, 0x1E, 0x68, 0x2F, 0xAB, 0x9F, 0x2D, 0x30, 0xAB,
@@ -650,8 +641,9 @@ static const uint8_t s_mc_authdata[164] = {
     0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F,
 };
 
-// The full 248-byte response (status + the v2.1 response map).
-static const uint8_t s_mc_resp[248] = {
+// The full 254-byte response: the 0x00 CTAP status byte followed by the
+// v2.1 response map (CTAP 2.3 PS §11.2.9.1.2).
+static const uint8_t s_mc_resp[254] = {
     0x00, 0xA3, 0x01, 0x66, 0x70, 0x61, 0x63, 0x6B, 0x65, 0x64, 0x02, 0x58,
     0xA4, 0xA3, 0x79, 0xA6, 0xF6, 0xEE, 0xAF, 0xB9, 0xA5, 0x5E, 0x37, 0x8C,
     0x11, 0x80, 0x34, 0xE2, 0x75, 0x1E, 0x68, 0x2F, 0xAB, 0x9F, 0x2D, 0x30,
@@ -666,13 +658,14 @@ static const uint8_t s_mc_resp[248] = {
     0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F, 0x22, 0x58,
     0x20, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A,
     0x2B, 0x2C, 0x2D, 0x2E, 0x2F, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36,
-    0x37, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x03, 0xA2, 0x01,
-    0x26, 0x02, 0x58, 0x40, 0x78, 0x82, 0xB2, 0xB7, 0x37, 0x22, 0x21, 0x14,
-    0x43, 0xA2, 0x0B, 0x9F, 0x91, 0x63, 0x4F, 0xA2, 0x7C, 0x93, 0x74, 0xE4,
-    0x55, 0xCD, 0x49, 0x83, 0x6D, 0xEE, 0xFE, 0xF9, 0x0A, 0x77, 0x71, 0xA3,
-    0x78, 0x82, 0xB2, 0xB7, 0x37, 0x22, 0x21, 0x14, 0x43, 0xA2, 0x0B, 0x9F,
-    0x91, 0x63, 0x4F, 0xA2, 0x7C, 0x93, 0x74, 0xE4, 0x55, 0xCD, 0x49, 0x83,
-    0x6D, 0xEE, 0xFE, 0xF9, 0x0A, 0x77, 0x71, 0xA3,
+    0x37, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x03, 0xA2, 0x63,
+    0x61, 0x6C, 0x67, 0x26, 0x63, 0x73, 0x69, 0x67, 0x58, 0x40, 0x78, 0x82,
+    0xB2, 0xB7, 0x37, 0x22, 0x21, 0x14, 0x43, 0xA2, 0x0B, 0x9F, 0x91, 0x63,
+    0x4F, 0xA2, 0x7C, 0x93, 0x74, 0xE4, 0x55, 0xCD, 0x49, 0x83, 0x6D, 0xEE,
+    0xFE, 0xF9, 0x0A, 0x77, 0x71, 0xA3, 0x78, 0x82, 0xB2, 0xB7, 0x37, 0x22,
+    0x21, 0x14, 0x43, 0xA2, 0x0B, 0x9F, 0x91, 0x63, 0x4F, 0xA2, 0x7C, 0x93,
+    0x74, 0xE4, 0x55, 0xCD, 0x49, 0x83, 0x6D, 0xEE, 0xFE, 0xF9, 0x0A, 0x77,
+    0x71, 0xA3,
 };
 
 // The COSE_Key encoding (77 bytes), pinned on its own.
@@ -686,7 +679,9 @@ static void t_mc_cose(void)
     uint8_t out[FIDO_COSE_ES256_LEN];
     CHECK(FIDO_COSE_ES256_LEN == fido_cose_encode_es256(pub, out,
                                                         sizeof out));
-    CHECK(0 == memcmp(out, &s_mc_authdata[164 - FIDO_COSE_ES256_LEN],
+    CHECK(0 == memcmp(out,
+                      &s_mc_authdata[sizeof s_mc_authdata -
+                                     FIDO_COSE_ES256_LEN],
                       FIDO_COSE_ES256_LEN));   // the same 77 bytes the
                                                 // KAT embeds in authData
     // A too-small buffer is refused outright, never truncated.
@@ -802,7 +797,7 @@ static void t_mc_error_order(void)
 }
 
 // The happy path, end to end: the deferred parse, the presence wait,
-// the completion — pinned against the offline-computed 248-byte
+// the completion — pinned against the offline-computed 254-byte
 // response — and the resulting store state.
 static void t_mc_happy(void)
 {
@@ -860,7 +855,7 @@ static void t_mc_happy(void)
 // sub-fields are optional on this device; a missing user.id is
 // synthesized as a 32-byte handle from the TRNG (the fake: 0xA5+i).
 // The user handle never appears in the response, so with the same
-// cdh/RP the 248-byte KAT is unchanged (s_mc_resp).
+// cdh/RP the 254-byte KAT is unchanged (s_mc_resp).
 static void t_mc_lenient_user(void)
 {
     fido_ctap_ctx_t ctx;
@@ -927,6 +922,108 @@ static void t_mc_lenient_user(void)
     }
 }
 
+// Bench round C1: the EXACT makeCredential Firefox 2026 sent (the
+// console DBG MSG capture; 190 bytes — the first real browser request,
+// reassembled from four CTAPHID packets). It uses the renumbered CTAP
+// v2.2 parameter table: key 6 is the `extensions` map
+// ({"hmac-secret": false}), NOT the v2.0 pinUvAuthToken byte string —
+// the pre-fix code answered PIN_AUTH_INVALID (0x2A) to it, which
+// Firefox surfaces to the page as NotAllowedError. Expected: the
+// extensions map is ignored, the request defers for UP, and the
+// completed response carries rpIdHash = SHA-256("xorengineering.com")
+// with the request's user entity stored.
+static const uint8_t s_firefox_c1_req[190] = {
+    0x01, 0xA6, 0x01, 0x58, 0x20, 0xE0, 0xF0, 0xEA, 0xCD, 0xD7, 0xDF, 0xC5,
+    0x90, 0xE6, 0x14, 0x23, 0xFB, 0x72, 0x2A, 0x1C, 0x49, 0x38, 0xD6, 0xBB,
+    0xF9, 0xCB, 0x16, 0x7C, 0xC8, 0x23, 0x0A, 0xEF, 0x9D, 0xB7, 0x1B, 0xE3,
+    0x86, 0x02, 0xA1, 0x62, 0x69, 0x64, 0x72, 0x78, 0x6F, 0x72, 0x65, 0x6E,
+    0x67, 0x69, 0x6E, 0x65, 0x65, 0x72, 0x69, 0x6E, 0x67, 0x2E, 0x63, 0x6F,
+    0x6D, 0x03, 0xA2, 0x62, 0x69, 0x64, 0x58, 0x20, 0xBF, 0x0B, 0xF5, 0x59,
+    0x87, 0x47, 0x1F, 0x8E, 0xD5, 0x49, 0x0B, 0x1D, 0x74, 0x4C, 0xA5, 0x71,
+    0x1B, 0x60, 0x3B, 0x4F, 0x9E, 0x79, 0xAF, 0x61, 0x76, 0xC5, 0x0D, 0x9C,
+    0x41, 0x86, 0xC5, 0xA2, 0x64, 0x6E, 0x61, 0x6D, 0x65, 0x6F, 0x6E, 0x6F,
+    0x62, 0x6F, 0x64, 0x79, 0x40, 0x6D, 0x61, 0x69, 0x6C, 0x2E, 0x63, 0x6F,
+    0x6D, 0x04, 0x82, 0xA2, 0x63, 0x61, 0x6C, 0x67, 0x26, 0x64, 0x74, 0x79,
+    0x70, 0x65, 0x6A, 0x70, 0x75, 0x62, 0x6C, 0x69, 0x63, 0x2D, 0x6B, 0x65,
+    0x79, 0xA2, 0x63, 0x61, 0x6C, 0x67, 0x39, 0x01, 0x00, 0x64, 0x74, 0x79,
+    0x70, 0x65, 0x6A, 0x70, 0x75, 0x62, 0x6C, 0x69, 0x63, 0x2D, 0x6B, 0x65,
+    0x79, 0x06, 0xA1, 0x6B, 0x68, 0x6D, 0x61, 0x63, 0x2D, 0x73, 0x65, 0x63,
+    0x72, 0x65, 0x74, 0xF4, 0x07, 0xA1, 0x62, 0x72, 0x6B, 0xF4,
+};
+
+static void t_mc_firefox_c1(void)
+{
+    fido_ctap_ctx_t ctx;
+    mc_install(&ctx);
+    mc_reset();
+    uint8_t resp[FIDO_CTAP_MC_RESP_MAX];
+    uint32_t tlen = 0;
+
+    // The pre-fix behavior was an immediate 0x2A (resp_len 1, no
+    // pending transaction).
+    CHECK(0 == mc_dispatch(&ctx, s_firefox_c1_req,
+                           sizeof s_firefox_c1_req, resp, sizeof resp));
+    CHECK(fido_ctap_pending(&ctx));
+
+    ctx.user_present = true;
+    CHECK(1 == fido_ctap_tick(&ctx, false, resp, sizeof resp, &tlen));
+    CHECK(resp[0] == 0x00 && resp[1] == 0xA3 && tlen == sizeof s_mc_resp);
+
+    // authData begins at resp+13 (00 | A3 | 01 "packed" | 02 58 A2 |
+    // rpIdHash...): rpIdHash = SHA-256("xorengineering.com") — the
+    // first 16 bytes pinned offline (Python hashlib), the rest
+    // re-derived with the same SHA-256 the firmware uses.
+    static const uint8_t xor_rph[16] = {
+        0x08, 0x79, 0xFF, 0x55, 0x64, 0x78, 0x90, 0x97,
+        0x09, 0xCB, 0x39, 0x12, 0xE1, 0x5E, 0xBF, 0xCC,
+    };
+    uint8_t rph[32];
+    fido_sha256((const uint8_t *)"xorengineering.com", 18, rph);
+    CHECK(0 == memcmp(resp + 13, xor_rph, 16));
+    CHECK(0 == memcmp(resp + 13, rph, 32));
+
+    // The stored record kept the request's user entity (user.id at
+    // request offset 68).
+    CHECK(ctx.creds.present[0]);
+    const fido_cred_record_t *r = &ctx.creds.rec[0];
+    CHECK(r->user_handle_len == 32);
+    CHECK(0 == memcmp(r->user_handle, &s_firefox_c1_req[68], 32));
+    CHECK(r->name_len == 15
+          && 0 == memcmp(r->name, "nobody@mail.com", 15));
+    CHECK(r->display_name_len == 0);
+}
+
+// The v2.2 `extensions` slot with NESTED content: the whole subtree
+// must be skipped cleanly (a request with nothing else in it then
+// fails MISSING_PARAMETER — never INVALID_CBOR), and a byte string in
+// the slot is still the v2.0 pinUvAuthToken (PIN_AUTH_INVALID, pinned
+// by the error table's "pinUvAuthToken" case).
+static void t_mc_extensions_nested(void)
+{
+    fido_ctap_ctx_t ctx;
+    mc_install(&ctx);
+    mc_reset();
+    uint8_t req[128];
+    uint8_t resp[8];
+
+    uint8_t params[96];
+    fido_cbor_enc_t e;
+    fido_cbor_enc_init(&e, params, sizeof params);
+    fido_cbor_enc_map(&e, 1);
+    fido_cbor_enc_uint(&e, 6);
+    fido_cbor_enc_map(&e, 1);
+    fido_cbor_enc_text(&e, "hmac-secret");
+    fido_cbor_enc_map(&e, 1);          // nested one level deeper
+    fido_cbor_enc_text(&e, "key");
+    fido_cbor_enc_bytes(&e, s_cdh, 32);
+    CHECK(!e.overflow);
+    const uint32_t n = msg(req, FIDO_CTAP_INS_MAKE_CREDENTIAL,
+                           params, (uint16_t)e.len);
+    const uint32_t len = mc_dispatch(&ctx, req, n, resp, sizeof resp);
+    CHECK(resp[0] == FIDO_CTAP2_ERR_MISSING_PARAMETER && len == 1);
+    CHECK(!fido_ctap_pending(&ctx));
+}
+
 // The rk option: a (rp, user) credential is overwritten IN PLACE — the
 // same slot, the same store footprint, a fresh credential ID.
 static void t_mc_rk_overwrite(void)
@@ -949,7 +1046,7 @@ static void t_mc_rk_overwrite(void)
     ctx.user_present = true;
     uint32_t tlen = 0;
     CHECK(1 == fido_ctap_tick(&ctx, false, resp, sizeof resp, &tlen));
-    CHECK(resp[0] == FIDO_CTAP2_OK && tlen == sizeof s_mc_resp);
+    CHECK(resp[0] == 0x00 && resp[1] == 0xA3 && tlen == sizeof s_mc_resp);
 
     // Overwritten in place: one record, still slot 3, a new credential
     // ID, and the rest of the store untouched.
@@ -1001,7 +1098,7 @@ static void t_mc_excluded(void)
     CHECK(0 == mc_dispatch(&ctx, req, n, resp, sizeof resp));
     ctx.user_present = true;
     CHECK(1 == fido_ctap_tick(&ctx, false, resp, sizeof resp, &tlen));
-    CHECK(resp[0] == FIDO_CTAP2_OK);
+    CHECK(resp[0] == 0x00);
     CHECK(ctx.creds.present[1]);      // the new credential, index 1
 }
 
@@ -1142,7 +1239,7 @@ static void t_mc_no_clock(void)
     CHECK(0 == fido_ctap_tick(&ctx, false, resp, sizeof resp, &tlen));
     ctx.user_present = true;
     CHECK(1 == fido_ctap_tick(&ctx, false, resp, sizeof resp, &tlen));
-    CHECK(resp[0] == FIDO_CTAP2_OK);
+    CHECK(resp[0] == 0x00);
 }
 
 // A recorded CTAPHID_CANCEL finishes the transaction with
@@ -1187,7 +1284,7 @@ static void t_mc_stale_up(void)
     ctx.user_present = true;      // stale
     CHECK(0 == mc_dispatch(&ctx, req, n, resp, sizeof resp));
     CHECK(1 == fido_ctap_tick(&ctx, false, resp, sizeof resp, &tlen));
-    CHECK(resp[0] == FIDO_CTAP2_OK && tlen == sizeof s_mc_resp);
+    CHECK(resp[0] == 0x00 && resp[1] == 0xA3 && tlen == sizeof s_mc_resp);
     CHECK(!ctx.user_present);
 }
 
@@ -1287,6 +1384,8 @@ int main(void)
     t_mc_error_order();
     t_mc_happy();
     t_mc_lenient_user();
+    t_mc_firefox_c1();
+    t_mc_extensions_nested();
     t_mc_rk_overwrite();
     t_mc_excluded();
     t_mc_store_full();

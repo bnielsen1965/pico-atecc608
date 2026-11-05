@@ -55,6 +55,14 @@ enum {
     FIDO2_CMD_WINK         = 0x08,
     FIDO2_CMD_CBOR         = 0x10,
     FIDO2_CMD_CANCEL       = 0x11,
+    // CTAPHID_KEEPALIVE (device -> host only), value 0x3B per CTAP 2.3
+    // §11.2.9.1.7 (USB HID) — the wire byte is 0x80|0x3B = 0xBB. (The 0x82
+    // in CTAP 2.3 §11.4.4.3 is the *Bluetooth LE* keep-alive, a different
+    // transport; 0x02/0x82 was the CTAP 2.0–2.2 HID value, superseded.)
+    // The message is BCNT-framed: BCNT=1 with a single status byte
+    // (PROCESSING 0x01 / UP_NEEDED 0x02). fido2_ctaphid_keepalive() frames
+    // it directly (not via resp_send()) because it is not a response to a
+    // command and must not disturb the in-flight reassembly.
     FIDO2_CMD_KEEPALIVE    = 0x3B,
     FIDO2_CMD_ERROR        = 0x3F,
 };
@@ -88,24 +96,54 @@ enum {
     FIDO2_SW_COMMAND_NOT_ALLOWED = 0x6986,
 };
 
-// INIT capability flags (CTAP v2.0 8.1.9.1.3).
+// INIT capability flags, emitted in the CTAP 2.0-2.2 bit positions:
+// WINK 0x01, CBOR 0x02, NMSG 0x04.
+//
+// CTAP 2.3 renumbers these bits (WINK 0x01, CBOR 0x04, NMSG 0x08 —
+// spec of record §11.2.9.1.3), which is where the old 0x0D value came
+// from. Every shipping client — Firefox, Chrome, libfido2 1.16 (which
+// printed "nocbor" for our 0x0D) — still parses the 2.0-2.2 positions,
+// where 0x0D reads as WINK|NMSG with CBOR CLEAR: the device was
+// classified U2F-only and never received a makeCredential (rounds
+// C11/C12, 2026-11-03). Emit 0x07 (WINK|CBOR|NMSG), the value real
+// CTAP2 keys such as YubiKey advertise. A future 2.3 client reading
+// 0x07 sees WINK|CBOR (2.3 positions) without NMSG and may probe
+// CTAPHID_MSG; we answer 0x6986 and it falls back to CTAP2 — harmless.
 enum {
     FIDO2_CAP_WINK = 0x01,
-    FIDO2_CAP_CBOR = 0x04,
-    FIDO2_CAP_NMSG = 0x08,  // set = CTAPHID_MSG is NOT implemented
+    FIDO2_CAP_CBOR = 0x02,
+    FIDO2_CAP_NMSG = 0x04,  // set = CTAPHID_MSG is NOT implemented
 };
 // CTAP2-only authenticator (no CTAP1/U2F): advertise NMSG so conformant
-// clients never send CTAPHID_MSG. (YubiKey advertises the same 0x0D;
-// Nitrokey's 0x05 is for its dual CTAP2+U2F firmware.)
+// clients never send CTAPHID_MSG.
 #define FIDO2_CAPABILITIES (FIDO2_CAP_WINK | FIDO2_CAP_CBOR | FIDO2_CAP_NMSG)
 
 // Protocol version reported by INIT: CTAPHID protocol 2. The device
-// version is vendor-defined (spec 8.1.9.1.3); report 1.0.0.
+// version is vendor-defined (spec 8.1.9.1.3); report 1.0.2.
+//
+// The build number doubles as the on-wire FINGERPRINT of what is
+// actually flashed: read the 3-byte version out of any usbmon INIT
+// response to verify a flash before benching. History:
+//   1.0.0  pre-C11 build (the C11 capture proved the flashed UF2 was
+//          stale — a 1.0.0 INIT with behaviors no current source
+//          produces)
+//   1.0.1  C10 CBOR status-byte fix (bare CBOR responses)
+//   1.0.2  2.0-2.2 wire encoding: INIT caps 0x07 (CBOR bit where
+//          shipping clients look) + GET_INFO with the 2.0-2.2 key
+//          numbers (rounds C11/C12: Firefox classified the 2.3-encoded
+//          device as U2F-only and never sent makeCredential)
+//   1.0.3  GET_INFO re-keyed to the CTAP 2.1+ table (Firefox's
+//          AuthenticatorInfo deserializer; round C13)
+//   1.0.4  = 1.0.3 on the wire (the C13 fix); C14 found the makeCredential
+//          response rejected by Firefox
+//   1.0.5  COSE_Key crv fixed: P-256 is crv 1 (RFC 8152 13.1), not -1
+//          (0x20). Firefox's Curve::try_from(-1) = UnknownKeyType, so the
+//          whole makeCredential response was rejected (round C14)
 enum {
     FIDO2_PROTO_VERSION    = 2,
     FIDO2_FW_VERSION_MAJOR = 1,
     FIDO2_FW_VERSION_MINOR = 0,
-    FIDO2_FW_VERSION_BUILD = 0,
+    FIDO2_FW_VERSION_BUILD = 5,
 };
 
 // Timing, in ms. A busy (in-flight) message is aborted with
@@ -117,7 +155,11 @@ enum {
 #define FIDO2_BUSY_TIMEOUT_MS      750
 #define FIDO2_KEEPALIVE_PERIOD_MS  500
 
-// Keep-alive status byte (CTAP v2.0 8.1.9.1.5).
+// Keep-alive status byte (CTAP 2.3 §11.2.9.1.7): the USB-HID KEEPALIVE
+// (0xBB on the wire) is BCNT=1 and carries a single status byte drawn from
+// this small enum — NOT a CTAP2 error code. PROCESSING (0x01) while the
+// command is running; UP_NEEDED (0x02) while waiting for the test of user
+// presence.
 enum {
     FIDO2_KEEPALIVE_PROCESSING = 0x01,
     FIDO2_KEEPALIVE_UP_NEEDED  = 0x02,
@@ -133,9 +175,11 @@ enum {
 typedef void (*fido2_sink_t)(void *ctx, const uint8_t report[FIDO2_REPORT_LEN]);
 
 // CTAP2 dispatch hook: process one complete CTAPHID_CBOR message. Fill
-// resp with the full response — status byte first, then payload (just
-// the status byte on error) — and set *resp_len (<= resp_max). The
-// transport frames and sends it verbatim. A handler may instead DEFER
+// resp with the full response — the CBOR payload directly on success
+// (a CTAP2 success response IS the CBOR structure, no status byte,
+// CTAP v2.1 §8.2), or a single status byte (a CTAP2 error code) on
+// failure — and set *resp_len (<= resp_max). The transport frames and
+// sends it verbatim. A handler may instead DEFER
 // the response: return with *resp_len == 0 (the CTAP layer's
 // MakeCredential does this while it waits for user presence) and finish
 // later with fido2_ctaphid_complete(). While the callback runs — and,
@@ -231,10 +275,11 @@ void fido2_ctaphid_keepalive(fido2_ctaphid_t *s, uint32_t now_ms,
 // CTAP2_ERR_KEEPALIVE_CANCEL (0x2D).
 bool fido2_ctaphid_cancelled(const fido2_ctaphid_t *s);
 
-// Complete a deferred transaction: frame and send resp (status byte
-// first) as the CBOR response on the transaction's channel and release
-// the channel (a new message may start again). No-op when no deferred
-// transaction is active; resp_len is clamped to FIDO2_MAX_MSG.
+// Complete a deferred transaction: frame and send resp (the CBOR payload
+// on success, a single status byte on error) as the CBOR response on the
+// transaction's channel and release the channel (a new message may start
+// again). No-op when no deferred transaction is active; resp_len is
+// clamped to FIDO2_MAX_MSG.
 void fido2_ctaphid_complete(fido2_ctaphid_t *s, const uint8_t *resp,
                             uint32_t resp_len,
                             fido2_sink_t sink, void *sink_ctx);

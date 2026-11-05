@@ -26,6 +26,7 @@
 
 #include "pico/stdlib.h"
 #include "pico/time.h"
+#include "pico/multicore.h"
 
 #include "tusb.h"
 
@@ -107,13 +108,21 @@ int main(void)
 
     fido_hid_init(provisioned);
 
-    // TinyUSB's documented bare-metal pattern: single-threaded polling.
-    // All TinyUSB and CTAPHID callbacks run in this loop's context (no
-    // IRQ background task, no mutexes); the 1 ms cadence is well under
-    // the 500 ms keep-alive / 750 ms busy-timeout granularity.
+    // Dual-core split (the makeCredential delivery fix — see fido_hid.c):
+    // core 1 runs the USB task in a tight spin (tud_task + IN-report
+    // release) so the next report is armed the instant the host ACKs the
+    // previous one; core 0 (this loop) carries the slow CTAP / ATECC608 /
+    // console work at a 1 ms cadence. The two cores exchange 64-byte
+    // reports through the lock-free queues set up in fido_hid_init, so
+    // init must complete (and it does) before core 1 is launched.
+    multicore_launch_core1(fido_usb_core1_task);
+
+    // Core 0 (the card task): 1 ms cadence, well under the 500 ms
+    // keep-alive / 750 ms busy-timeout granularity. The USB re-arm is on
+    // core 1, so this loop can sleep freely — there is no report to
+    // arm between host ACKs from here.
     while (1) {
-        tud_task();
-        fido_hid_tick();
+        fido_card_tick();
         sleep_ms(1);
     }
 }

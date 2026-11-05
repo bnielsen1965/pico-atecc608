@@ -31,6 +31,7 @@
 
 #include "pico/stdio.h"
 #include "pico/unique_id.h"
+#include "pico/flash.h"
 
 #include "tusb.h"
 
@@ -133,11 +134,20 @@ static char s_serial[17];
 static fido2_ctaphid_t  s_ctaphid;
 // The CTAP2 dispatch context (fido_ctap.h) — Phase 2 is read-only
 // identity data (AAGUID + capabilities); later phases extend it.
+//
+// Dual-core ownership (see the report-queue section below): s_ctaphid
+// and s_ctap_ctx are touched ONLY by core 0 (the card task). The USB
+// task on core 1 exchanges 64-byte reports with core 0 through the
+// lock-free s_outq / s_cmdq queues and never dereferences this state.
 static fido_ctap_ctx_t  s_ctap_ctx;
 static bool             s_enabled;
+// USB unmount, raised by the (core 1) tud_umount_cb and consumed by the
+// (core 0) card tick: the channel/CTAP reset touches core-0-only state,
+// so core 1 only sets the flag and core 0 does the work.
+static volatile bool    s_umount_flag;
 
-// WINK is non-blocking: the callback only marks the window; fido_hid_tick
-// drives the LED (tud_task must not be delayed by a blink delay).
+// WINK is non-blocking: the callback only marks the window; fido_card_tick
+// (core 0) drives the LED (tud_task must not be delayed by a blink delay).
 static uint32_t s_wink_until_ms;
 
 static void led_wink_cb(void *ctx)
@@ -146,62 +156,108 @@ static void led_wink_cb(void *ctx)
     s_wink_until_ms = osal_time_millis() + 600;
 }
 
-// --- deferred IN reports --------------------------------------------------------
-// TinyUSB allows ONE IN transfer in flight per endpoint: a
-// tud_hid_report() while the previous report still awaits the host's ACK
-// fails. The state machine emits a multi-packet response (GET_INFO's
-// 64-byte payload = 2 CTAPHID packets) with back-to-back sink calls from
-// the OUT handler, where only the just-armed first transfer is visible
-// — bench-verified 2026-10-30: the continuation was silently dropped and
-// the host's reassembly timed out. The sink therefore enqueues;
-// fido_hid_tick() (which runs after tud_task() has seen the host's ACK)
-// releases one report per ready endpoint. The queue spans the FULL
+// --- dual-core report queues (the makeCredential delivery fix) -------------------
+//
+// A multi-packet response (makeCredential = 5 CTAPHID packets) must be
+// drained back-to-back: the host tight re-polls the IN endpoint ~10-90 us
+// after each packet, and if the next report is not armed by then it reads
+// a zero-length report, which Firefox treats as end-of-message, stranding
+// the rest of the response (bench rounds C2-C5). The re-arm must therefore
+// land the instant the host ACKs the previous packet.
+//
+// On one core the re-arm ran in the main loop, which also carried the slow
+// CTAP/ATECC608 work (I2C, ms-scale) and the console — too slow to beat the
+// host's re-poll (and a blocking printf made it ~17 ms per packet, the C4
+// stall). The fix: run the USB task on the SECOND core in a tight spin
+// (tud_task + outq_drain and nothing else), so the next report is armed in
+// us. The slow work (CTAP dispatch, ATECC608 I2C, console, LED) stays on
+// core 0 at a 1 ms cadence. No RTOS: the two cores exchange 64-byte
+// reports through two lock-free single-producer/single-consumer ring
+// buffers —
+//
+//   s_outq: core 0 (report_sink) -> core 1 (outq_drain)   [responses]
+//   s_cmdq: core 1 (set_report)  -> core 0 (card tick)    [commands]
+//
+// Each queue has exactly one producer core and one consumer core, so a
+// head/tail pair with acquire/release atomics is race-free (the Cortex-M33
+// atomic builtins emit the needed barriers). The queues span the FULL
 // 7609-byte message maximum (57 + 128*59 -> 129 packets), so no
-// well-formed response can overflow; a drop would only follow a host
-// stalled for >129 ACK intervals, which the spec's message timeouts
-// already treat as a dead transaction.
-#define FIDO2_OUT_QUEUE_MAX 129
-static uint8_t  s_outq[FIDO2_OUT_QUEUE_MAX][FIDO2_REPORT_LEN];
-static uint16_t s_outq_head;   // next slot to write
-static uint16_t s_outq_tail;   // next slot to read
-static uint16_t s_outq_count;
+// well-formed message can overflow; a drop would only follow a stall the
+// spec's message timeouts already treat as a dead transaction.
+#define FIDO2_REPORT_SLOTS 129
 
-static void outq_push(const uint8_t report[FIDO2_REPORT_LEN])
+typedef struct {
+    uint8_t         buf[FIDO2_REPORT_SLOTS][FIDO2_REPORT_LEN];
+    volatile uint32_t head;   // next slot to write (owner: producer)
+    volatile uint32_t tail;   // next slot to read  (owner: consumer)
+} fido_report_q_t;
+
+static fido_report_q_t s_outq;   // core 0 -> core 1 (responses)
+static fido_report_q_t s_cmdq;   // core 1 -> core 0 (commands)
+
+static bool report_q_push(fido_report_q_t *q,
+                          const uint8_t report[FIDO2_REPORT_LEN])
 {
-    if (s_outq_count < FIDO2_OUT_QUEUE_MAX) {
-        memcpy(&s_outq[s_outq_head], report, FIDO2_REPORT_LEN);
-        s_outq_head = (uint16_t)((s_outq_head + 1u) % FIDO2_OUT_QUEUE_MAX);
-        s_outq_count++;
+    const uint32_t head = q->head;
+    const uint32_t next = (head + 1u) % FIDO2_REPORT_SLOTS;
+    if (next == __atomic_load_n(&q->tail, __ATOMIC_ACQUIRE)) {
+        return false;   // full: drop — see above
     }
-    // else: dropped — see above.
+    memcpy(q->buf[head], report, FIDO2_REPORT_LEN);
+    __atomic_store_n(&q->head, next, __ATOMIC_RELEASE);
+    return true;
 }
 
-static void outq_flush(void)
+static bool report_q_pop(fido_report_q_t *q,
+                         uint8_t report[FIDO2_REPORT_LEN])
 {
-    s_outq_head = 0;
-    s_outq_tail = 0;
-    s_outq_count = 0;
+    const uint32_t tail = q->tail;
+    const uint32_t head = __atomic_load_n(&q->head, __ATOMIC_ACQUIRE);
+    if (tail == head) {
+        return false;   // empty
+    }
+    memcpy(report, q->buf[tail], FIDO2_REPORT_LEN);
+    __atomic_store_n(&q->tail, (tail + 1u) % FIDO2_REPORT_SLOTS,
+                     __ATOMIC_RELEASE);
+    return true;
 }
 
+// Reset a queue to empty. Call only when both cores are quiescent for
+// that queue (USB unmount: no reports in flight); the release stores make
+// the zeroed head/tail visible to the other core's next push/pop.
+static void report_q_flush(fido_report_q_t *q)
+{
+    __atomic_store_n(&q->head, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&q->tail, 0u, __ATOMIC_RELEASE);
+}
+
+// Release one queued report to the IN endpoint. Runs on core 1 (the USB
+// task), in the spin after tud_task() has seen the host's ACK. TinyUSB
+// allows ONE IN transfer in flight per endpoint — tud_hid_report() fails
+// while the previous report still awaits the host's ACK — so at most one
+// is armed per call; the tight spin retries on the next iteration.
+//
+// NOTE: no per-report UART trace here — a blocking printf delays the arm
+// of the NEXT report by the transmit time (~17 ms at 115200 for a 64-byte
+// hex dump), which is exactly the stall this design fixes. The usbmon
+// capture is the wire trace of record.
 static void outq_drain(void)
 {
-    while (0 != s_outq_count && tud_hid_ready()) {
-        if (!tud_hid_report(0, s_outq[s_outq_tail], FIDO2_REPORT_LEN)) {
-            break;   // cannot happen (ready checked); retry next tick
-        }
-        s_outq_tail = (uint16_t)((s_outq_tail + 1u) % FIDO2_OUT_QUEUE_MAX);
-        s_outq_count--;
+    uint8_t report[FIDO2_REPORT_LEN];
+    if (!tud_hid_ready() || !report_q_pop(&s_outq, report)) {
+        return;
     }
+    (void)tud_hid_report(0, report, FIDO2_REPORT_LEN);
 }
 
-// The state machine's report sink: enqueue one 64-byte IN report for
-// fido_hid_tick() to release (a direct send here would race the
-// endpoint — a dropped continuation is unrecoverable, the host never
-// re-requests it).
+// The state machine's report sink: enqueue one 64-byte IN report for the
+// USB task (core 1) to release. Runs on core 0. A direct send here would
+// race the endpoint — a dropped continuation is unrecoverable, the host
+// never re-requests it.
 static void report_sink(void *ctx, const uint8_t report[FIDO2_REPORT_LEN])
 {
     (void)ctx;
-    outq_push(report);
+    (void)report_q_push(&s_outq, report);
 }
 
 // --- status LED ------------------------------------------------------------------
@@ -256,8 +312,22 @@ static void console_line_done(void)
         if (0 == strcmp(s_console_line, "up")) {
             s_ctap_ctx.user_present = true;
             printf("fido2: user presence ('up')\n");
+        } else if (0 == strcmp(s_console_line, "wipe")) {
+            // Admin reset of the credential DB (store + littlefs). The
+            // bench key has no physical reset for it, and the four slots
+            // fill after a handful of registrations (the device then
+            // answers KEY_STORE_FULL 0x28 to every makeCredential).
+            int n = 0;
+            for (int i = 0; i < FIDO_CRED_MAX; i++) {
+                if (s_ctap_ctx.creds.present[i] &&
+                    0 == fido_cred_store_erase(&s_ctap_ctx.creds, i)) {
+                    n++;
+                }
+            }
+            printf("fido2: credential store wiped (%d record(s))\n", n);
         } else {
-            printf("fido2: unknown console command '%s' — try 'up'\n",
+            printf("fido2: unknown console command '%s' — try 'up' "
+                   "or 'wipe'\n",
                    s_console_line);
         }
     }
@@ -438,8 +508,9 @@ uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id,
 }
 
 // OUT report (interrupt OUT data; SET_REPORT control arrives here too).
-// For this no-report-ID device every conformant host delivers exactly the
-// 64 raw report bytes (see the file header); anything else is dropped.
+// Runs on core 1 (the USB task, via tud_task). For this no-report-ID
+// device every conformant host delivers exactly the 64 raw report bytes
+// (see the file header); anything else is dropped.
 void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
                            hid_report_type_t report_type,
                            uint8_t const *buffer, uint16_t bufsize)
@@ -455,8 +526,12 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
     if (FIDO2_REPORT_LEN != bufsize) {
         return;
     }
-    fido2_ctaphid_input(&s_ctaphid, osal_time_millis(), buffer,
-                        report_sink, NULL);
+    // The report is only ENQUEUED here: the CTAP dispatch it can trigger
+    // does ATECC608 I2C (ms-scale), and running that on core 1 would delay
+    // the IN re-arm (the delivery stall). Core 0 drains s_cmdq and feeds
+    // fido2_ctaphid_input at its 1 ms cadence; the queue's FIFO order
+    // preserves the transport's in-flight state.
+    (void)report_q_push(&s_cmdq, buffer);
 }
 
 // Bus-level mount/unmount (this TinyUSB fork has no per-class
@@ -470,21 +545,20 @@ void tud_mount_cb(void)
 void tud_umount_cb(void)
 {
     printf("fido2: USB unmounted\n");
-    // The host's channels die with the connection; start fresh (CID
-    // allocation restarts at 2). Safe: all TinyUSB callbacks run in the
-    // main-loop (tud_task) context in this app. reset, NOT init: the
+    // Runs on core 1. The host's channels die with the connection; start
+    // fresh (CID allocation restarts at 2). The reset touches core-0-only
+    // state (s_ctaphid, s_ctap_ctx), so core 1 only raises the flag and
+    // the card tick (core 0) does the work: reset, NOT init, because the
     // handlers registered in fido_hid_init must survive a re-plug — with
     // init, a re-plugged key would answer CTAP but WINK would never reach
-    // the LED and CBOR would silently take the no-handler path.
-    fido2_ctaphid_reset(&s_ctaphid);
-    // A deferred (user-presence-waiting) MakeCredential can no longer be
-    // completed — the host's channel is gone; drop it without a response
-    // so a re-plug starts clean. (The stored credentials and the chip's
-    // keys are untouched — nothing was minted yet; the key pair is only
-    // generated AFTER the touch.)
-    fido_ctap_abort(&s_ctap_ctx);
-    // Any queued reports reference this connection's CIDs — dead now.
-    outq_flush();
+    // the LED and CBOR would silently take the no-handler path. A
+    // deferred (user-presence-waiting) MakeCredential can no longer be
+    // completed — the host's channel is gone; abort it without a response
+    // so a re-plug starts clean (the stored credentials and the chip's
+    // keys are untouched — the key pair is only generated AFTER the
+    // touch). Queued reports reference this connection's CIDs — dead
+    // now; both queues are flushed by the card tick.
+    s_umount_flag = true;
 }
 
 // --- public API ------------------------------------------------------------------------
@@ -522,7 +596,8 @@ void fido_hid_init(bool enabled)
         }
     }
     fido2_ctaphid_init(&s_ctaphid);
-    outq_flush();
+    report_q_flush(&s_outq);
+    report_q_flush(&s_cmdq);
     // The real CTAP2 dispatch (Phase 3: GET_INFO + MakeCredential —
     // the latter defers its response until user presence; unimplemented
     // command codes answer CTAP1_ERR_INVALID_COMMAND per the spec's MUST).
@@ -534,15 +609,66 @@ void fido_hid_init(bool enabled)
     tusb_init();
 }
 
-void fido_hid_tick(void)
+// --- the two cores ---------------------------------------------------------------------
+//
+// Core 1 (the USB task): a tight spin of tud_task + outq_drain and
+// nothing else. tud_task delivers the host's ACKs (freeing the IN
+// endpoint) and enqueues incoming OUT reports into s_cmdq; outq_drain
+// arms the next queued IN report the instant the endpoint is ready.
+// No CTAP work, no I2C, no printf — the re-arm lands in microseconds,
+// which is what the host's tight re-poll requires (the makeCredential
+// delivery fix; see the report-queue section).
+void fido_usb_core1_task(void)
+{
+    // Register this (core 1) core as the flash-write "victim". The
+    // littlefs cred_store write runs on core 0 via flash_safe_execute,
+    // which locks this core out into a RAM-resident safe state for the
+    // XIP-cache-disabled window (no code may execute from flash then).
+    // Without this init multicore_lockout_ready() is false on core 0 and
+    // every flash write bails with PICO_ERROR_NOT_PERMITTED — the C6
+    // makeCredential 0x7f root cause (genkey/sign were fine; only the
+    // flash write failed). The intercore FIFOs are free for this: our
+    // s_outq/s_cmdq queues live in shared RAM, not the FIFOs.
+    flash_safe_execute_core_init();
+    for (;;) {
+        tud_task();
+        outq_drain();
+    }
+}
+
+// Core 0 (the card task), one call per main-loop iteration: the slow
+// work that must NOT run on the USB re-arm path.
+void fido_card_tick(void)
 {
     const uint32_t now_ms = osal_time_millis();
+    // A USB unmount raised by the (core 1) tud_umount_cb: reset the
+    // channels and the CTAP context (core-0-only state) and flush both
+    // queues (their reports reference this connection's dead CIDs).
+    if (s_umount_flag) {
+        s_umount_flag = false;
+        fido2_ctaphid_reset(&s_ctaphid);
+        fido_ctap_abort(&s_ctap_ctx);
+        report_q_flush(&s_outq);
+        report_q_flush(&s_cmdq);
+    }
     // The console works in both states: when the chip is not
     // provisioned the device answers no CTAP, but the command still
     // gets its confirmation print.
     console_tick();
+    // Incoming CTAPHID reports, drained in FIFO order from the (core 1)
+    // USB task. Always drained (even unprovisioned) so the queue cannot
+    // back up; when the chip is not provisioned the reports are dropped
+    // — the device answers no CTAP.
+    {
+        uint8_t cmd[FIDO2_REPORT_LEN];
+        while (report_q_pop(&s_cmdq, cmd)) {
+            if (s_enabled) {
+                fido2_ctaphid_input(&s_ctaphid, now_ms, cmd,
+                                    report_sink, NULL);
+            }
+        }
+    }
     if (s_enabled) {
-        outq_drain();
         // A deferred (user-presence-waiting) MakeCredential: keep the
         // client alive (UP_NEEDED keep-alives, throttled) and drive the
         // state machine; the moment it finishes, complete the response

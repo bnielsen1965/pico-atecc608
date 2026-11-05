@@ -161,7 +161,6 @@ static void feed(uint32_t now, const uint8_t *pkt)
 static uint32_t rep_cid(const uint8_t *p) { return get32be(&p[0]); }
 static uint8_t  rep_cmd(const uint8_t *p) { return (uint8_t)(p[4] & 0x7Fu); }
 static uint16_t rep_bcnt(const uint8_t *p) { return get16be(&p[5]); }
-static uint8_t  rep_seq(const uint8_t *p) { return p[4]; }
 
 // The INIT response's allocated CID (payload byte 8, packet offset 15).
 static uint32_t init_resp_cid(const uint8_t *p) { return get32be(&p[15]); }
@@ -238,7 +237,6 @@ static int verify_ping_resp(int off, uint32_t cid,
                             const uint8_t *data, uint32_t len)
 {
     uint32_t got = 0;
-    uint32_t seq = 0;   // continuation SEQ is 0-based
     int idx = off;
 
     if (idx >= s_nreports) {
@@ -256,15 +254,21 @@ static int verify_ping_resp(int off, uint32_t cid,
     got += n;
     idx++;
 
+    uint32_t seq = 0;   // continuation sequence number
     while (got < len) {
         if (idx >= s_nreports) {
             return -1;
         }
         p = s_reports[idx];
-        // A continuation carries SEQ (not CMD) in byte 4; require the
-        // non-init flag clear and the expected SEQ.
-        if (rep_cid(p) != cid || (p[4] & 0x80u) ||
-            rep_seq(p) != (uint8_t)seq) {
+        // A continuation carries its SEQ number in byte 4: 0x00 for the
+        // first continuation, then incrementing by one per packet (CTAP
+        // 2.0 §8.1.5.4 / ITU X.1278: "starting with sequence number 0,
+        // which then increments by one to a maximum of 127"; bit 7 always
+        // clear).
+        // A conforming host verifies the sequence and aborts reassembly on
+        // a mismatch, so a constant 0x00 truncates multi-continuation
+        // responses.
+        if (rep_cid(p) != cid || p[4] != (uint8_t)seq) {
             return -1;
         }
         n = (len - got < FIDO2_CONT_DATA_LEN) ? len - got : FIDO2_CONT_DATA_LEN;
@@ -304,7 +308,7 @@ static void t_init_broadcast(void)
     CHECK(p[21] == FIDO2_FW_VERSION_MINOR);
     CHECK(p[22] == FIDO2_FW_VERSION_BUILD);
     CHECK(p[23] == FIDO2_CAPABILITIES);
-    CHECK(p[23] == 0x0D);                  // WINK|CBOR|NMSG (CTAP2-only)
+    CHECK(p[23] == 0x07);                  // WINK|CBOR|NMSG, 2.0-2.2 bits
     CHECK(p[24] == 0 && p[25] == 0);       // zero-padded to 64
 
     // A second allocation hands out the next CID.
@@ -805,6 +809,8 @@ static void t_keepalive(void)
         const uint8_t *p = s_reports[i];
         CHECK(rep_cid(p) == cid);
         CHECK(rep_cmd(p) == FIDO2_CMD_KEEPALIVE);
+        // Spec shape (CTAP 2.3 §11.2.9.1.7): 0xBB | BCNT=1 | status byte
+        // at p[7].
         CHECK(rep_bcnt(p) == 1);
         CHECK(p[7] == FIDO2_KEEPALIVE_PROCESSING);
     }
@@ -891,6 +897,8 @@ static void t_deferred(void)
         const uint8_t *p = s_reports[i];
         CHECK(rep_cid(p) == cid);
         CHECK(rep_cmd(p) == FIDO2_CMD_KEEPALIVE);
+        // Spec shape (CTAP 2.3 §11.2.9.1.7): 0xBB | BCNT=1 | status byte
+        // at p[7].
         CHECK(rep_bcnt(p) == 1);
         CHECK(p[7] == FIDO2_KEEPALIVE_UP_NEEDED);
     }
