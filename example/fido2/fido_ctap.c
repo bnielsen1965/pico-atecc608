@@ -227,11 +227,13 @@ typedef struct {
     uint8_t n_excl;
 } mc_parse_t;
 
-static void mc_begin(fido_ctap_ctx_t *ctx, const fido_mc_pending_t *p)
+// Open a deferred (UP-waiting) transaction of kind `op`. The caller
+// commits the operation's payload (ctx->mc / ctx->ga) first.
+static void begin_pending(fido_ctap_ctx_t *ctx, fido_ctap_op_t op)
 {
-    ctx->pending        = *p;
-    ctx->pending_active = true;
-    ctx->pending.deadline_ms =
+    ctx->pending_op          = op;
+    ctx->pending_active      = true;
+    ctx->pending_deadline_ms =
         ctx->keys.clock ?
         ctx->keys.clock(ctx->keys.dev) + FIDO_CTAP_UP_TIMEOUT_MS :
         0;   // no clock hook: the wait never times out
@@ -611,7 +613,8 @@ static uint8_t parse_make_credential(fido_ctap_ctx_t *ctx,
         }
     }
     if (m.p.excluded) {
-        mc_begin(ctx, &m.p);
+        ctx->mc = m.p;
+        begin_pending(ctx, FIDO_CTAP_OP_MAKING_CREDENTIAL);
         return 0;
     }
 
@@ -643,8 +646,399 @@ static uint8_t parse_make_credential(fido_ctap_ctx_t *ctx,
         }
     }
 
-    mc_begin(ctx, &m.p);
+    ctx->mc = m.p;
+    begin_pending(ctx, FIDO_CTAP_OP_MAKING_CREDENTIAL);
     return 0;
+}
+
+// --- GET_ASSERTION (CTAP v2.0 §5.2 / v2.3 §6.2) ------------------------------
+//
+// Request (the table is STABLE across CTAP 2.0 -> 2.3 — unlike
+// makeCredential it was never renumbered; verified against the 2.0 PS
+// §5.2, the 2.3 spec of record §6.2, Chrome's
+// ctap_get_assertion_request.cc and Firefox's GetAssertion::serialize —
+// SD-6):
+//
+//   1   rpId              text          required
+//   2   clientDataHash    bytes(32)     required
+//   3   allowList         array of map {"id": bytes, "type": text}
+//                           (OMITTED when empty — the RP's residents are
+//                           enumerated instead)
+//   4   extensions        map           ignored (none supported)
+//   5   options           map text -> bool
+//   6   pinUvAuthParam    bytes         present -> MISSING_PARAMETER
+//                           (no pinUvAuthProtocol) or
+//                           CTAP1_ERR_INVALID_PARAMETER (an unsupported
+//                           protocol — none is supported)
+//   7   pinUvAuthProtocol uint          (see 6)
+//   8, 9 (2.1+ extras)    ...           ignored
+//
+// The allowList descriptors use TEXT keys ("id"/"type") — the CTAP 2.0
+// PS's own EXAMPLE 5 and Firefox's PublicKeyCredentialDescriptor
+// serializer (SD-6).
+//
+// Options (spec order, 2.3 §6.2.2 step 4): "uv": true ->
+// UNSUPPORTED_OPTION (no built-in UV; this device advertises FIDO_2_0,
+// and 0x2B is what its clients expect for that case); "rk" present ->
+// UNSUPPORTED_OPTION (2.3 step 4.4 — it is not a getAssertion option);
+// "up": false -> preflight (served synchronously, the flags' UP bit
+// clear); unknown options ignored.
+//
+// Locate (step 7, BEFORE the UP wait): allowList -> the matching (rp,
+// credId) records; no allowList -> every record of the RP (all of ours
+// are discoverable). No match -> NO_CREDENTIALS. Serve order: most
+// recent first = reverse slot order (a documented approximation — the
+// record carries no creation timestamp).
+//
+// Response (stable 2.0 -> 2.3; SD-6 — INTEGER top-level keys, TEXT keys
+// in the nested credential and user maps):
+//
+//   1: credential { "id": bytes, "type": "public-key" }
+//   2: authData
+//   3: signature
+//   4: user { "id": bytes }   (no name/displayName — user-identifying
+//                              data is never returned without UV, 2.3
+//                              step 12.3)
+//   5: numberOfCredentials    (first getAssertion of a resident
+//                              enumeration only; deleted when the
+//                              allowList is present, 2.3 step 11)
+//
+// authData (W3C §6.5.1 — byte-identical layout to makeCredential's,
+// verified against both browsers' attested-credential-data parsers):
+//
+//   rpIdHash(32) | flags(1) | signCount(4 BE) | aaguid(16) |
+//   credIdLen(2 BE) | credId | COSE_Key
+//
+// flags = 0x41 (UP|AT) after a presence wait, 0x40 (AT only) for a
+// preflight. The sign counter is INCREMENTED BEFORE the authData is
+// built (a failed increment is an error, never a stale-counter
+// assertion — the first assertion after a registration must read
+// strictly higher than the registration's counter). The signature is
+// the credential key's ECDSA over SHA-256(authData ‖ clientDataHash).
+
+// allowList entries beyond this cap are skipped (a 256-byte request
+// holds a handful at most; a skipped entry degrades to NO_CREDENTIALS
+// at worst — the same convention as makeCredential's excludeList cap).
+#define FIDO_GA_ALLOW_MAX   32
+
+typedef struct {
+    bool     has_rp_id;
+    bool     has_cdh;
+    uint8_t  rp_id[255];
+    uint16_t rp_id_len;
+    uint8_t  cdh[32];
+    bool     has_allow;
+    const uint8_t *allow[FIDO_GA_ALLOW_MAX];
+    uint16_t allow_len[FIDO_GA_ALLOW_MAX];
+    uint8_t  n_allow;
+    bool     has_pin;        // key 6 present
+    bool     has_pin_proto;  // key 7 present
+    bool     uv_requested;   // an "uv": true option (spec step 4.1)
+    bool     rk_seen;        // an "rk" option (spec step 4.4)
+    uint8_t  opt_err;        // the options error (0 = none)
+    bool     up;             // false only for an explicit "up": false
+} ga_parse_t;
+
+// The full parse: 0 when the request is valid (*out filled), else the
+// CTAP2 error code.
+static uint8_t ga_parse(const uint8_t *params, uint32_t params_len,
+                        ga_parse_t *out)
+{
+    memset(out, 0, sizeof *out);
+    out->up = true;
+
+    fido_cbor_dec_t d;
+    fido_cbor_type_t t;
+    uint64_t u;
+    const uint8_t *data = NULL;
+    uint32_t dlen = 0;
+
+    fido_cbor_dec_init(&d, params, params_len);
+    if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL) ||
+        FIDO_CBOR_MAP != t) {
+        return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
+    }
+
+    const uint64_t n_top = u;
+    for (uint64_t i = 0; i < n_top; i++) {
+        if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL) ||
+            FIDO_CBOR_UINT != t) {
+            return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
+        }
+        switch (u) {
+        case 1: {   // rpId (text)
+            if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen) ||
+                FIDO_CBOR_TEXT != t) {
+                return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
+            }
+            if (0 == dlen || dlen > sizeof out->rp_id) {
+                return FIDO_CTAP2_ERR_LIMIT_EXCEEDED;
+            }
+            memcpy(out->rp_id, data, dlen);
+            out->rp_id_len = (uint16_t)dlen;
+            out->has_rp_id = true;
+            break;
+        }
+        case 2: {   // clientDataHash (bytes(32))
+            if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen) ||
+                FIDO_CBOR_BYTES != t) {
+                return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
+            }
+            if (32 != dlen) {
+                return FIDO_CTAP2_ERR_LIMIT_EXCEEDED;
+            }
+            memcpy(out->cdh, data, 32);
+            out->has_cdh = true;
+            break;
+        }
+        case 3: {   // allowList (array of descriptor maps)
+            if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL) ||
+                FIDO_CBOR_ARRAY != t) {
+                return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
+            }
+            out->has_allow = true;
+            const uint64_t n_allow = u;
+            for (uint64_t j = 0; j < n_allow; j++) {
+                if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL) ||
+                    FIDO_CBOR_MAP != t) {
+                    return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
+                }
+                const uint64_t n_ad = u;
+                for (uint64_t k = 0; k < n_ad; k++) {
+                    // The descriptor's keys are TEXT ("id", "type").
+                    if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen) ||
+                        FIDO_CBOR_TEXT != t) {
+                        return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
+                    }
+                    if (2 == dlen && 0 == memcmp(data, "id", 2)) {
+                        if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen) ||
+                            FIDO_CBOR_BYTES != t) {
+                            return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
+                        }
+                        if (0 == dlen ||
+                            dlen > FIDO_CRED_CRED_ID_MAX) {
+                            return FIDO_CTAP2_ERR_LIMIT_EXCEEDED;
+                        }
+                        if (out->n_allow < FIDO_GA_ALLOW_MAX) {
+                            out->allow[out->n_allow] = data;
+                            out->allow_len[out->n_allow] = (uint16_t)dlen;
+                            out->n_allow++;
+                        }
+                        // beyond the cap: the entry is skipped
+                    } else {
+                        // "type" or unknown: the value is ignored.
+                        if (!fido_cbor_dec_skip(&d)) {
+                            return FIDO_CTAP2_ERR_INVALID_CBOR;
+                        }
+                    }
+                }
+            }
+            break;
+        }
+        case 4:   // extensions — none supported; the value is ignored
+            // (2.3: an authenticator MUST ignore extensions it does
+            // not understand).
+            if (!fido_cbor_dec_skip(&d)) {
+                return FIDO_CTAP2_ERR_INVALID_CBOR;
+            }
+            break;
+        case 5: {   // options (map text -> bool)
+            if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL) ||
+                FIDO_CBOR_MAP != t) {
+                return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
+            }
+            const uint64_t n_opt = u;
+            for (uint64_t j = 0; j < n_opt; j++) {
+                if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen) ||
+                    FIDO_CBOR_TEXT != t) {
+                    return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
+                }
+                bool v = false;
+                if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL) ||
+                    FIDO_CBOR_BOOL != t) {
+                    return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
+                }
+                v = (0 != u);
+                if (2 == dlen && 0 == memcmp(data, "uv", 2)) {
+                    if (v) {
+                        out->uv_requested = true;
+                    }
+                } else if (2 == dlen && 0 == memcmp(data, "rk", 2)) {
+                    // 2.3 step 4.4: rk is not a getAssertion option.
+                    out->rk_seen = true;
+                } else if (2 == dlen && 0 == memcmp(data, "up", 2)) {
+                    out->up = v;
+                }
+                // Unknown option: ignored (treated as absent).
+            }
+            break;
+        }
+        case 6: {   // pinUvAuthParam (bytes)
+            if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen) ||
+                FIDO_CBOR_BYTES != t) {
+                return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
+            }
+            (void)dlen;
+            out->has_pin = true;
+            break;
+        }
+        case 7:   // pinUvAuthProtocol (uint) — meaningful only with key
+            // 6 (checked after the map, in spec order).
+            if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL) ||
+                FIDO_CBOR_UINT != t) {
+                return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
+            }
+            out->has_pin_proto = true;
+            break;
+        default:   // 8, 9 (2.1+ extras) and anything else: unknown,
+            // ignored (CTAP v2.0 §8).
+            if (!fido_cbor_dec_skip(&d)) {
+                return FIDO_CTAP2_ERR_INVALID_CBOR;
+            }
+            break;
+        }
+    }
+    if (d.p != d.end) {
+        return FIDO_CTAP2_ERR_INVALID_CBOR;   // trailing bytes
+    }
+
+    // The required parameters.
+    if (!out->has_rp_id || !out->has_cdh) {
+        return FIDO_CTAP2_ERR_MISSING_PARAMETER;
+    }
+
+    // pinUvAuthParam without clientPin (2.3 §6.2.2 step 2 — step 1 does
+    // not apply, the device supports neither pinUvAuthToken nor
+    // clientPin): a missing protocol is MISSING_PARAMETER, a
+    // present-but-unsupported protocol CTAP1_ERR_INVALID_PARAMETER.
+    if (out->has_pin) {
+        return out->has_pin_proto ? FIDO_CTAP2_ERR_INVALID_PARAMETER
+                                  : FIDO_CTAP2_ERR_MISSING_PARAMETER;
+    }
+
+    // The options, resolved in spec order (2.3 step 4): uv first, then
+    // rk — the first error in THAT order wins, regardless of the
+    // options' positions in the map. Both are UNSUPPORTED_OPTION 0x2B
+    // (not 2.3's INVALID_OPTION 0x2C): this device advertises FIDO_2_0,
+    // and 0x2B is the code its clients expect for "no UV available".
+    if (out->uv_requested || out->rk_seen) {
+        out->opt_err = FIDO_CTAP2_ERR_UNSUPPORTED_OPTION;
+    }
+    return 0;
+}
+
+// Arm the get_next_assertion enumeration state from the located match
+// list (the 30-s timer starts now). The state is armed only when a
+// "next" exists.
+static void ga_enum_begin(fido_ctap_ctx_t *ctx, const fido_ga_pending_t *ga,
+                          bool up)
+{
+    fido_ga_enum_t *en = &ctx->ga_enum;
+    // The state is ALWAYS filled — the first assertion is served from
+    // it even when no get_next_assertion follows (count == 1, or an
+    // allowList match). Only the "there is a next" flag is gated on
+    // count.
+    memcpy(en->rp_id_hash, ga->rp_id_hash, 32);
+    memcpy(en->client_data_hash, ga->client_data_hash, 32);
+    en->up        = up;
+    en->count     = ga->count;
+    memcpy(en->order, ga->order, sizeof en->order);
+    en->next_idx  = 1;
+    en->deadline_ms =
+        ctx->keys.clock ?
+        ctx->keys.clock(ctx->keys.dev) + FIDO_CTAP_GA_ENUM_TIMEOUT_MS :
+        0;   // no clock hook: no timer
+    en->active = (ga->count > 1);   // a get_next_assertion may follow
+}
+
+// Build and sign one assertion for the store record at `idx` under the
+// enumeration `en`, and emit the response map into resp. Returns 1
+// (resp/*resp_len filled; a backend failure fills the status byte).
+static int ga_assert(fido_ctap_ctx_t *ctx, const fido_ga_enum_t *en, int idx,
+                     bool include_no, uint8_t *resp, uint32_t resp_max,
+                     uint32_t *resp_len)
+{
+    const fido_cred_record_t *rec = &ctx->creds.rec[idx];
+
+    // The sign counter: INCREMENTED BEFORE the authData is built — the
+    // first assertion after a registration must read strictly higher
+    // than the registration's counter; a failed increment is an error,
+    // never a stale-counter assertion.
+    uint32_t ctr = 0;
+    if (NULL == ctx->keys.counter_inc ||
+        0 != ctx->keys.counter_inc(ctx->keys.dev, &ctr)) {
+        resp[0]   = FIDO_CTAP2_ERR_OTHER;
+        *resp_len = 1;
+        return 1;
+    }
+
+    // authData (WebAuthn L3 §6.3.3, step 10: the assertion's
+    // authenticatorData EXCLUDES the attested credential data — no AT
+    // bit, no AAGUID/credId/COSE; the credential travels in the
+    // response's "credential" member instead).
+    // rpIdHash(32) | flags(1) | signCount(4 BE).
+    uint8_t authdata[32 + 1 + 4];
+    uint32_t n = 0;
+    memcpy(&authdata[n], en->rp_id_hash, 32);
+    n += 32;
+    authdata[n++] = (uint8_t)(en->up ? 0x01 : 0x00);   // UP only
+    authdata[n++] = (uint8_t)(ctr >> 24);
+    authdata[n++] = (uint8_t)(ctr >> 16);
+    authdata[n++] = (uint8_t)(ctr >> 8);
+    authdata[n++] = (uint8_t)ctr;
+
+    // The assertion signature: the credential key over
+    // SHA-256(authData ‖ clientDataHash) (WebAuthn L3 §6.1).
+    uint8_t digest[FIDO_SHA256_DIGEST_LEN];
+    fido_sha256_ctx_t sh;
+    fido_sha256_init(&sh);
+    fido_sha256_update(&sh, authdata, n);
+    fido_sha256_update(&sh, en->client_data_hash, 32);
+    fido_sha256_final(&sh, digest);
+
+    uint8_t sig[64];
+    if (NULL == ctx->keys.sign ||
+        0 != ctx->keys.sign(ctx->keys.dev, rec->slot, digest, sig)) {
+        resp[0]   = FIDO_CTAP2_ERR_OTHER;
+        *resp_len = 1;
+        return 1;
+    }
+
+    // Response (SD-6): INTEGER top-level keys; TEXT keys in the nested
+    // credential and user maps. numberOfCredentials is present on the
+    // first response of a resident enumeration only — deleted for an
+    // allowList assertion and for every get_next_assertion.
+    resp[0] = FIDO_CTAP2_OK;
+    fido_cbor_enc_t e;
+    fido_cbor_enc_init(&e, resp + 1, resp_max - 1);
+    fido_cbor_enc_map(&e, include_no ? 5 : 4);
+    fido_cbor_enc_uint(&e, 1);
+    fido_cbor_enc_map(&e, 2);
+    fido_cbor_enc_text(&e, "id");
+    fido_cbor_enc_bytes(&e, rec->cred_id, rec->cred_id_len);
+    fido_cbor_enc_text(&e, "type");
+    fido_cbor_enc_text(&e, "public-key");
+    fido_cbor_enc_uint(&e, 2);
+    fido_cbor_enc_bytes(&e, authdata, n);
+    fido_cbor_enc_uint(&e, 3);
+    fido_cbor_enc_bytes(&e, sig, sizeof sig);
+    fido_cbor_enc_uint(&e, 4);
+    fido_cbor_enc_map(&e, 1);
+    fido_cbor_enc_text(&e, "id");
+    fido_cbor_enc_bytes(&e, rec->user_handle, rec->user_handle_len);
+    if (include_no) {
+        fido_cbor_enc_uint(&e, 5);
+        fido_cbor_enc_uint(&e, en->count);
+    }
+    if (e.overflow) {
+        // Cannot happen with a resp_max of FIDO_CTAP_GA_RESP_MAX; a
+        // hostile caller with a tiny buffer gets a status-only answer.
+        resp[0]   = FIDO_CTAP2_ERR_OTHER;
+        *resp_len = 1;
+        return 1;
+    }
+    *resp_len = 1 + e.len;   // the 0x00 status byte + the CBOR map
+    return 1;
 }
 
 // The user-presence-satisfied path: slot allocation, key generation,
@@ -653,7 +1047,7 @@ static uint8_t parse_make_credential(fido_ctap_ctx_t *ctx,
 static int mc_create(fido_ctap_ctx_t *ctx, uint8_t *resp, uint32_t resp_max,
                      uint32_t *resp_len)
 {
-    const fido_mc_pending_t *p = &ctx->pending;
+    const fido_mc_pending_t *p = &ctx->mc;
 
     // Slot allocation: an rk request reuses the (rp, user) credential's
     // slot (v2.0 §5.1 step 7: overwrite in place); otherwise the first
@@ -799,6 +1193,11 @@ bool fido_ctap_pending(const fido_ctap_ctx_t *ctx)
 void fido_ctap_abort(fido_ctap_ctx_t *ctx)
 {
     ctx->pending_active = false;
+    ctx->pending_op = FIDO_CTAP_OP_NONE;
+    // The enumeration state belongs to this connection's browser: a
+    // stale 30-s window must not answer a fresh connection's
+    // get_next_assertion.
+    ctx->ga_enum.active = false;
 }
 
 int fido_ctap_tick(fido_ctap_ctx_t *ctx, bool cancelled,
@@ -819,9 +1218,11 @@ int fido_ctap_tick(fido_ctap_ctx_t *ctx, bool cancelled,
         return 1;
     }
 
-    const fido_mc_pending_t *p = &ctx->pending;
-    if (0 != p->deadline_ms &&
-        mc_timed_out(ctx->keys.clock(ctx->keys.dev), p->deadline_ms)) {
+    // The deadline is non-zero only when a clock hook was installed at
+    // begin_pending (the hooks are fixed for the context's lifetime).
+    if (0 != ctx->pending_deadline_ms &&
+        mc_timed_out(ctx->keys.clock(ctx->keys.dev),
+                     ctx->pending_deadline_ms)) {
         // User-presence wait expired (CTAP v2.1 §8.2
         // USER_ACTION_TIMEOUT; the spec requires >= 10 s).
         ctx->pending_active = false;
@@ -836,16 +1237,59 @@ int fido_ctap_tick(fido_ctap_ctx_t *ctx, bool cancelled,
     }
     ctx->user_present = false;   // consume the touch
 
-    if (p->excluded) {
-        // excludeList hit: the presence wait happened (v2.0 §5.1 step
-        // 1), now the exclusion error.
+    switch (ctx->pending_op) {
+    case FIDO_CTAP_OP_MAKING_CREDENTIAL:
+        if (ctx->mc.excluded) {
+            // excludeList hit: the presence wait happened (v2.0 §5.1
+            // step 1), now the exclusion error.
+            ctx->pending_active = false;
+            resp[0]   = FIDO_CTAP2_ERR_CREDENTIAL_EXCLUDED;
+            *resp_len = 1;
+            return 1;
+        }
+        return mc_create(ctx, resp, resp_max, resp_len);
+    case FIDO_CTAP_OP_GETTING_ASSERTION: {
+        // The presence wait is over: arm the enumeration state (the
+        // 30-s window for get_next_assertion) and serve the first
+        // located credential.
         ctx->pending_active = false;
-        resp[0]   = FIDO_CTAP2_ERR_CREDENTIAL_EXCLUDED;
+        const fido_ga_pending_t *ga = &ctx->ga;
+        ga_enum_begin(ctx, ga, true);
+        return ga_assert(ctx, &ctx->ga_enum, ga->order[0], !ga->allow,
+                         resp, resp_max, resp_len);
+    }
+    case FIDO_CTAP_OP_RESETTING: {
+        // Wipe the credential DB (persisted first, per record) and —
+        // in the littlefs-counter build — zero the counter (the chip's
+        // monotonic counter never resets; its hook is NULL there). The
+        // on-chip key pairs remain; the next makeCredential rebinds the
+        // slots (GenKey regenerates them).
+        ctx->pending_active = false;
+        ctx->ga_enum.active = false;
+        int err = 0;
+        for (int i = 0; i < FIDO_CRED_MAX && 0 == err; i++) {
+            if (ctx->creds.present[i]) {
+                err = fido_cred_store_erase(&ctx->creds, i);
+            }
+        }
+        if (0 == err && NULL != ctx->keys.counter_zero) {
+            err = ctx->keys.counter_zero(ctx->keys.dev);
+        }
+        if (0 != err) {
+            resp[0] = FIDO_CTAP2_ERR_OTHER;   // a failed reset is not a success
+        } else {
+            resp[0] = FIDO_CTAP2_OK;          // bare status byte, no CBOR
+        }
         *resp_len = 1;
         return 1;
     }
-
-    return mc_create(ctx, resp, resp_max, resp_len);
+    default:
+        // Corrupted state: abort with an error.
+        ctx->pending_active = false;
+        resp[0]   = FIDO_CTAP2_ERR_OTHER;
+        *resp_len = 1;
+        return 1;
+    }
 }
 
 void fido_ctap_dispatch(void *vctx, const uint8_t *req, uint32_t req_len,
@@ -910,11 +1354,156 @@ void fido_ctap_dispatch(void *vctx, const uint8_t *req, uint32_t req_len,
         *resp_len = 0;
         return;
     }
+    case FIDO_CTAP_INS_GET_ASSERTION: {
+        if (ctx->pending_active) {
+            // The transport serializes channels (a deferred transaction
+            // keeps its channel busy), so this is defensive only.
+            resp[0] = FIDO_CTAP2_ERR_OPERATION_PENDING;
+            return;
+        }
+        if (req_len < 2) {
+            // No parameters at all: rpId and clientDataHash are missing.
+            resp[0] = FIDO_CTAP2_ERR_MISSING_PARAMETER;
+            return;
+        }
+        ga_parse_t m;
+        const uint8_t err = ga_parse(req + 1, req_len - 1, &m);
+        if (0 != err) {
+            resp[0] = err;
+            return;
+        }
+        if (0 != m.opt_err) {
+            resp[0] = m.opt_err;
+            return;
+        }
+
+        // rpId -> its hash (WebAuthn: SHA-256 of the rpId string).
+        uint8_t rp_id_hash[32];
+        fido_sha256(m.rp_id, m.rp_id_len, rp_id_hash);
+
+        // Locate (2.3 step 7 — BEFORE the UP wait): the allowList's
+        // matches, or — when absent — every record of the RP (all of
+        // ours are discoverable). Serve order: reverse slot order (the
+        // most-recent-first proxy).
+        fido_ga_pending_t *ga = &ctx->ga;
+        memset(ga, 0, sizeof *ga);
+        memcpy(ga->rp_id_hash, rp_id_hash, 32);
+        memcpy(ga->client_data_hash, m.cdh, 32);
+        ga->allow = (m.has_allow && 0 < m.n_allow);
+        if (ga->allow) {
+            uint8_t found = 0;
+            for (uint8_t j = 0; j < m.n_allow; j++) {
+                const int idx =
+                    fido_cred_store_find_by_cred_id(&ctx->creds, rp_id_hash,
+                                                    m.allow[j],
+                                                    m.allow_len[j]);
+                if (idx >= 0) {
+                    found |= (uint8_t)(1u << idx);
+                }
+            }
+            for (int i = FIDO_CRED_MAX - 1; 0 <= i; i--) {
+                if (found & (uint8_t)(1u << i)) {
+                    ga->order[ga->count++] = (uint8_t)i;
+                }
+            }
+        } else {
+            for (int i = FIDO_CRED_MAX - 1; 0 <= i; i--) {
+                if (ctx->creds.present[i] &&
+                    0 == memcmp(ctx->creds.rec[i].rp_id_hash, rp_id_hash,
+                                32)) {
+                    ga->order[ga->count++] = (uint8_t)i;
+                }
+            }
+        }
+        if (0 == ga->count) {
+            resp[0] = FIDO_CTAP2_ERR_NO_CREDENTIALS;
+            return;
+        }
+
+        // "up": false (preflight, 2.3 step 12.2): a synchronous full
+        // assertion, the flags' UP bit clear.
+        if (!m.up) {
+            ga_enum_begin(ctx, ga, false);
+            ga_assert(ctx, &ctx->ga_enum, ga->order[0], !ga->allow,
+                      resp, resp_max, resp_len);
+            return;
+        }
+
+        // Deferred: the first assertion follows fido_ctap_tick() after
+        // the user-presence wait.
+        begin_pending(ctx, FIDO_CTAP_OP_GETTING_ASSERTION);
+        *resp_len = 0;
+        return;
+    }
+    case FIDO_CTAP_INS_RESET: {
+        // No parameters (2.3 §6.6).
+        if (ctx->pending_active) {
+            resp[0] = FIDO_CTAP2_ERR_OPERATION_PENDING;
+            return;
+        }
+        if (req_len > 1) {
+            fido_cbor_dec_t d;
+            fido_cbor_dec_init(&d, req + 1, req_len - 1);
+            if (!fido_cbor_dec_skip(&d) || d.p != d.end) {
+                resp[0] = FIDO_CTAP2_ERR_INVALID_CBOR;
+                return;
+            }
+        }
+        // Displayless authenticator: the request must have arrived
+        // within 10 s of power-on (2.3 §6.6). The clock is
+        // uptime-based, so the window is clock() <= 10 s; without a
+        // clock hook it cannot be measured and is not enforced.
+        if (NULL != ctx->keys.clock &&
+            ctx->keys.clock(ctx->keys.dev) > FIDO_CTAP_RESET_WINDOW_MS) {
+            resp[0] = FIDO_CTAP2_ERR_NOT_ALLOWED;
+            return;
+        }
+        // User presence is required (deferred; the 30-s timeout is
+        // USER_ACTION_TIMEOUT, the tick's business).
+        begin_pending(ctx, FIDO_CTAP_OP_RESETTING);
+        *resp_len = 0;
+        return;
+    }
+    case FIDO_CTAP_INS_GET_NEXT_ASSERTION: {
+        // No parameters (2.3 §6.3: "It takes no arguments").
+        if (ctx->pending_active) {
+            resp[0] = FIDO_CTAP2_ERR_OPERATION_PENDING;
+            return;
+        }
+        if (req_len > 1) {
+            fido_cbor_dec_t d;
+            fido_cbor_dec_init(&d, req + 1, req_len - 1);
+            if (!fido_cbor_dec_skip(&d) || d.p != d.end) {
+                resp[0] = FIDO_CTAP2_ERR_INVALID_CBOR;
+                return;
+            }
+        }
+        // Spec order (§6.3 steps 1-3): no remembered state, then
+        // exhausted, then the 30-s timer (expired -> discard the state).
+        fido_ga_enum_t *en = &ctx->ga_enum;
+        if (!en->active || en->next_idx >= en->count) {
+            resp[0] = FIDO_CTAP2_ERR_NOT_ALLOWED;
+            return;
+        }
+        if (0 != en->deadline_ms &&
+            mc_timed_out(ctx->keys.clock(ctx->keys.dev), en->deadline_ms)) {
+            en->active = false;
+            resp[0] = FIDO_CTAP2_ERR_NOT_ALLOWED;
+            return;
+        }
+        const int idx = en->order[en->next_idx];
+        en->next_idx++;
+        en->deadline_ms = ctx->keys.clock ?
+            ctx->keys.clock(ctx->keys.dev) + FIDO_CTAP_GA_ENUM_TIMEOUT_MS :
+            0;   // the timer restarts with every get_next_assertion
+        ga_assert(ctx, en, idx, false, resp, resp_max, resp_len);
+        return;
+    }
     default:
         // CTAP v2.1 §8.1: "If an authenticator receives a command code
         // it does not implement, it MUST return
-        // CTAP1_ERR_INVALID_COMMAND." (Unimplemented: GET_ASSERTION,
-        // RESET — later phases.)
+        // CTAP1_ERR_INVALID_COMMAND." (Unimplemented: CLIENT_PIN — the
+        // device advertises no PIN support — and the vendor range.)
         resp[0] = FIDO_CTAP2_ERR_INVALID_COMMAND;
         return;
     }

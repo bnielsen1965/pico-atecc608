@@ -13,14 +13,17 @@
 // enumerates over USB but answers nothing, slow-blinks the LED (GP25),
 // and says so on UART0. It never provisions.
 //
-// Phase 3 implements the CTAPHID transport (INIT channel
+// Phases 3-4 implement the CTAPHID transport (INIT channel
 // allocation/sync, PING echo, WINK (LED), CANCEL, the CTAP2 error
 // table, the keep-alive plumbing) plus the CTAP2 message layer:
-// GET_INFO (versions/aaguid/options/maxMsgSize/...) and MAKE_CREDENTIAL
+// GET_INFO (versions/aaguid/options/maxMsgSize/...), MAKE_CREDENTIAL
 // (deferred until user presence; on-chip keygen, packed self-attestation,
-// credential DB on littlefs) over a minimal CBOR codec; every other
-// command code answers CTAP1_ERR_INVALID_COMMAND until its phase lands
-// (GET_ASSERTION / RESET in Phases 4-5).
+// credential DB on littlefs), GET_ASSERTION + GET_NEXT_ASSERTION
+// (resident enumeration, on-chip GetPubKey for the assertion COSE_Key,
+// sync counter incremented before the authData is built) and RESET
+// (store wipe + counter zero, 10-s power-on window) — over a minimal
+// CBOR codec. CLIENT_PIN answers CTAP1_ERR_INVALID_COMMAND (no PIN
+// support is advertised).
 
 #include <stdio.h>
 
@@ -85,9 +88,10 @@ int main(void)
     stdio_init_all();
 
     printf("pico-atecc608-fido2: ATECC608 FIDO2 authenticator "
-           "(Phase 3: CTAPHID + CTAP2 GET_INFO + MakeCredential)\n");
+           "(Phase 4: CTAPHID + CTAP2 GET_INFO + MakeCredential + "
+           "GetAssertion + Reset)\n");
     printf("UART0 console: type 'up' to record a key touch (user "
-           "presence) while a registration waits\n");
+           "presence) while a registration or login waits\n");
 
     atecc608_status_t st = atecc608_init(&s_cfg);
     if (ATECC608_OK != st) {

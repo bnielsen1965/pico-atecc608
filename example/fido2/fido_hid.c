@@ -313,16 +313,23 @@ static void console_line_done(void)
             s_ctap_ctx.user_present = true;
             printf("fido2: user presence ('up')\n");
         } else if (0 == strcmp(s_console_line, "wipe")) {
-            // Admin reset of the credential DB (store + littlefs). The
-            // bench key has no physical reset for it, and the four slots
-            // fill after a handful of registrations (the device then
-            // answers KEY_STORE_FULL 0x28 to every makeCredential).
+            // Admin reset of the credential DB (store + littlefs) and
+            // the sync counter — the console twin of CTAP RESET. The
+            // bench key has no physical reset for it, and the four
+            // slots fill after a handful of registrations (the device
+            // then answers KEY_STORE_FULL 0x28 to every makeCredential).
             int n = 0;
             for (int i = 0; i < FIDO_CRED_MAX; i++) {
                 if (s_ctap_ctx.creds.present[i] &&
                     0 == fido_cred_store_erase(&s_ctap_ctx.creds, i)) {
                     n++;
                 }
+            }
+            // Zero the sync counter (the littlefs backend; the chip's
+            // monotonic counter is never reset — its hook is NULL).
+            if (NULL != s_ctap_ctx.keys.counter_zero &&
+                0 != s_ctap_ctx.keys.counter_zero(s_ctap_ctx.keys.dev)) {
+                printf("fido2: counter zero FAILED\n");
             }
             printf("fido2: credential store wiped (%d record(s))\n", n);
         } else {
@@ -360,6 +367,16 @@ static int be_genkey(void *dev, uint8_t slot, uint8_t pub[64])
     return (ATECC608_OK == atecc608_genkey(slot, pub)) ? 0 : -1;
 }
 
+static int be_get_pubkey(void *dev, uint8_t slot, uint8_t pub[64])
+{
+    (void)dev;
+    // Read-only recompute from the on-chip private key (ATECC608
+    // GetPubKey — not confirm-gated, works with the data zone locked).
+    // The credential record carries no key material; this is where the
+    // assertion authData's COSE_Key comes from.
+    return (ATECC608_OK == atecc608_get_pubkey(slot, pub)) ? 0 : -1;
+}
+
 static int be_sign(void *dev, uint8_t slot, const uint8_t digest[32],
                    uint8_t sig[64])
 {
@@ -367,19 +384,91 @@ static int be_sign(void *dev, uint8_t slot, const uint8_t digest[32],
     return (ATECC608_OK == atecc608_sign(slot, digest, sig)) ? 0 : -1;
 }
 
+// The CTAP sync counter — two backends (FIDO2_COUNTER_CHIP selects the
+// chip's):
+//
+//   littlefs (default): /f2_cnt, 4 bytes big-endian. Survives reflashes
+//   (littlefs @ 0x80000) and IS resettable — RESET and the console
+//   'wipe' zero it. A missing or corrupt file reads as 0. Writes go
+//   through pico_lfs_write_file -> flash_safe_execute (core-0 stable
+//   point; the card tick is the only caller).
+//
+//   chip (FIDO2_COUNTER_CHIP): ATECC608 Counter 0, hardware-monotonic,
+//   NEVER resettable (counter_zero is NULL; RESET/wipe leave it alone).
+#ifdef FIDO2_COUNTER_CHIP
+
 static uint32_t be_counter(void *dev)
 {
     (void)dev;
     uint32_t v = 0;
-    // Counter 0 = the "FIDO2 signature count" (docs/BRINGUP.md). Phase 3
-    // READS it (the authData signCount); Phase 4 increments it per
-    // signature. A read failure degrades to 0 — the counter is
-    // advisory, not security-critical.
+    // A read failure degrades to 0 — the counter is advisory, not
+    // security-critical.
     if (ATECC608_OK != atecc608_counter_read(0, &v)) {
         v = 0;
     }
     return v;
 }
+
+// The confirm gate for the non-interactive increment: user presence is
+// already in evidence (the transaction waited for it) and the increment
+// IS the requested operation.
+static bool be_confirm(const char *prompt, void *ctx)
+{
+    (void)prompt;
+    (void)ctx;
+    return true;
+}
+
+static int be_counter_inc(void *dev, uint32_t *new_value)
+{
+    (void)dev;
+    return (ATECC608_OK == atecc608_counter_increment(0, new_value,
+                                                      be_confirm, NULL)) ?
+           0 : -1;
+}
+
+#else   // the littlefs counter (default)
+
+#define FIDO2_CNT_PATH  "/f2_cnt"
+
+static uint32_t cnt_read(void)
+{
+    uint8_t b[4];
+    if (4 != pico_lfs_read_file(FIDO2_CNT_PATH, b, sizeof b)) {
+        return 0;   // missing or corrupt file = 0
+    }
+    return ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16) |
+           ((uint32_t)b[2] << 8) | (uint32_t)b[3];
+}
+
+static int cnt_write(uint32_t v)
+{
+    const uint8_t b[4] = { (uint8_t)(v >> 24), (uint8_t)(v >> 16),
+                           (uint8_t)(v >> 8), (uint8_t)v };
+    return pico_lfs_write_file(FIDO2_CNT_PATH, b, sizeof b);
+}
+
+static uint32_t be_counter(void *dev)
+{
+    (void)dev;
+    return cnt_read();
+}
+
+static int be_counter_inc(void *dev, uint32_t *new_value)
+{
+    (void)dev;
+    const uint32_t v = cnt_read() + 1u;   // wraps at 2^32 (WebAuthn counter)
+    *new_value = v;
+    return cnt_write(v);
+}
+
+static int be_counter_zero(void *dev)
+{
+    (void)dev;
+    return cnt_write(0);
+}
+
+#endif   // FIDO2_COUNTER_CHIP
 
 static int be_rand(void *dev, uint8_t *buf, uint32_t len)
 {
@@ -571,11 +660,18 @@ void fido_hid_init(bool enabled)
     fido_ctap_ctx_init(&s_ctap_ctx);
     // The key backend: the ATECC608 (see the section above).
     s_ctap_ctx.keys = (fido_ctap_key_ops_t) {
-        .genkey  = be_genkey,
-        .sign    = be_sign,
-        .counter = be_counter,
-        .rand    = be_rand,
-        .clock   = be_clock,
+        .genkey       = be_genkey,
+        .get_pubkey   = be_get_pubkey,
+        .sign         = be_sign,
+        .counter      = be_counter,
+        .counter_inc  = be_counter_inc,
+#ifdef FIDO2_COUNTER_CHIP
+        .counter_zero = NULL,   // the chip's counter is never reset
+#else
+        .counter_zero = be_counter_zero,
+#endif
+        .rand         = be_rand,
+        .clock        = be_clock,
     };
     // The credential DB on littlefs, one file per record.
     s_ctap_ctx.creds.save  = cred_save;
@@ -669,15 +765,18 @@ void fido_card_tick(void)
         }
     }
     if (s_enabled) {
-        // A deferred (user-presence-waiting) MakeCredential: keep the
-        // client alive (UP_NEEDED keep-alives, throttled) and drive the
-        // state machine; the moment it finishes, complete the response
-        // over the transport (which releases the channel).
+        // A deferred (user-presence-waiting) transaction (MakeCredential,
+        // getAssertion, RESET): keep the client alive (UP_NEEDED
+        // keep-alives, throttled) and drive the state machine; the moment
+        // it finishes, complete the response over the transport (which
+        // releases the channel).
         if (fido_ctap_pending(&s_ctap_ctx)) {
             fido2_ctaphid_keepalive(&s_ctaphid, now_ms,
                                     FIDO2_KEEPALIVE_UP_NEEDED,
                                     report_sink, NULL);
-            uint8_t resp[FIDO_CTAP_MC_RESP_MAX];
+            // GA-sized: the getAssertion response is the largest one a
+            // deferred transaction can produce (419 B worst case).
+            uint8_t resp[FIDO_CTAP_GA_RESP_MAX];
             uint32_t rlen = 0;
             if (1 == fido_ctap_tick(&s_ctap_ctx,
                                     fido2_ctaphid_cancelled(&s_ctaphid),

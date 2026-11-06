@@ -12,7 +12,7 @@ the two numberings; round C13 root cause, see PLAN.md). So this script
 speaks the same protocol directly over /dev/hidraw and drives user
 presence through the UART console, exactly like a browser round:
 
-  1. CTAPHID INIT (broadcast) -> CID; expect fw 1.0.5, caps 0x07.
+  1. CTAPHID INIT (broadcast) -> CID; expect fw 1.0.7, caps 0x07.
   2. CTAP2 GET_INFO -> the 81-byte response (0x00 status + 80-byte
      CBOR map, CTAP 2.1+ key numbers), 2 packets (57+24).
   3. CTAP2 makeCredential with the EXACT 190-byte request Firefox sent
@@ -32,13 +32,19 @@ presence through the UART console, exactly like a browser round:
      store.
 
 No third-party dependencies — plain /dev/hidraw + /dev/ttyUSB0.
-Console protocol (ground rule 7): plain byte I/O, CR line endings, no
-termios. This script is the ONLY console reader while it runs.
+Console protocol (ground rules 7 + 11): plain byte I/O, CR line
+endings, no termios rewrites — the port state is enforced with the
+rule-11 stty recipe (ALWAYS 115200 8N1, no echo) before every open,
+because the CP210x bridge re-enumerates after unplugs/reflashes and
+comes back at the kernel default (9600 + cooked + echo), where the
+exchange is dead in both directions. This script is the ONLY console
+reader while it runs.
 """
 import hashlib
 import os
 import secrets
 import select
+import subprocess
 import sys
 import time
 
@@ -157,8 +163,26 @@ GETINFO_KAT = bytes.fromhex(
 RP_ID_HASH = hashlib.sha256(b'xorengineering.com').digest()
 
 
+def _console_ready():
+    """Enforce ground rule 11 on the console port: ALWAYS 115200 8N1,
+    no echo, no output post-processing — the exact stty recipe from
+    the rule. The CP210x bridge re-enumerates on every reflash/replug
+    (and hub power events) and comes back at the kernel default
+    (9600 + cooked + local ECHO); at 9600 the exchange is dead in both
+    directions, and a live-ECHO port makes it worse (the device chews
+    its own console output forever). Never assume the port's current
+    speed; never toggle DTR/RTS (a CP210x DTR de-assert can
+    re-initialize the chip's line config).
+    """
+    subprocess.run(
+        ['stty', '-F', CONSOLE, '115200', 'cs8', '-cstopb', '-parenb',
+         '-echo', '-opost'],
+        check=True, capture_output=True)
+
+
 def console_cmd(cmd, timeout=4.0):
     """Send one console command and return the device's reply text."""
+    _console_ready()  # ground rule 11: always 115200 8N1 no-echo
     with open(CONSOLE, 'r+b', 0) as c:
         c.write(cmd.encode() + b'\r')
         c.flush()
@@ -233,8 +257,8 @@ def main():
         cid = r[15:19]
         print(f'INIT  -> cid={cid.hex()} fw={r[20]}.{r[21]}.{r[22]} '
               f'caps={r[23]:#04x}')
-        assert r[20:23] == bytes([1, 0, 5]), \
-            f'firmware must be 1.0.5, got {r[20]}.{r[21]}.{r[22]}'
+        assert r[20:23] == bytes([1, 0, 7]), \
+            f'firmware must be 1.0.7, got {r[20]}.{r[21]}.{r[22]}'
         assert r[23] == 0x07, f'caps must be 0x07, got {r[23]:#04x}'
 
         # --- 2. GET_INFO -------------------------------------------------

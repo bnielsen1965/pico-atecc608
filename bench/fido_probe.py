@@ -138,8 +138,8 @@ def main():
         assert r[5:7] == (17).to_bytes(2, 'big'), 'INIT payload must be 17 bytes'
         assert r[7:15] == nonce, f'nonce mismatch: {r[7:15].hex()} != {nonce.hex()}'
         assert r[19] == 0x02, 'protocol must be 0x02'
-        assert r[20:23] == bytes([1, 0, 5]), \
-            f'firmware must be 1.0.5, got {r[20]}.{r[21]}.{r[22]}'
+        assert r[20:23] == bytes([1, 0, 7]), \
+            f'firmware must be 1.0.7, got {r[20]}.{r[21]}.{r[22]}'
         assert r[23] == 0x07, 'caps must be 0x07 (WINK|CBOR|NMSG, 2.0-2.2 bits)'
         assert int.from_bytes(got_cid, 'big') >= 2, 'first allocated CID must be >= 2'
         print('      ok (nonce echoed, CID allocated, 17-byte shape)')

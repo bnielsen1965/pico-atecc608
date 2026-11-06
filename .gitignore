@@ -1,5 +1,8 @@
 build/
 
+# firmware build artifact (never committed; flash via BOOTSEL)
+*.uf2
+
 # compiled bench tool (rebuild per bench/README.md)
 bench/fido_desc_probe
 

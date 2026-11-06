@@ -102,12 +102,24 @@ decisions register, and the git log.)
     drive is `RPI-RP2350`. Never import RP2040-era assumptions (drive
     name, core architecture, clocks, flash geometry) into this work.
 11. **The serial console port is ALWAYS 115200 baud — never 9600.**
-     The CP210x bridge re-enumerates on every reflash/reset and can come
-     back at 9600; a dead/silent console at 9600 is the symptom (see the
-     C13-prep round-2 record: `up` never arrived because the port had
-     reset to 9600+echo). Before any console work after a reflash,
-     apply: `stty -F /dev/ttyUSB0 115200 cs8 -cstopb -parenb -echo
-     -opost`.
+     The CP210x bridge re-enumerates on every reflash/replug (and hub
+     power events) and comes back at the kernel default (9600 + cooked
+     + local ECHO); a dead/silent console is the symptom (the C13-prep
+     round-2 and the 2026-11-06 C20-prep records: `up` never arrived
+     because the port had reset to 9600+echo). Apply the recovery
+     BEFORE ANY console work — not only after a reflash, but before
+     EVERY open, including programmatic access from the bench scripts:
+     `stty -F /dev/ttyUSB0 115200 cs8 -cstopb -parenb -echo -opost`.
+     Never open the port assuming its current speed. Never toggle
+     DTR/RTS as a "diagnostic" (a CP210x DTR de-assert can
+     re-initialize the chip's line config; it is not a fix and can be
+     the thing that breaks a working port). A silent console is a
+     PORT-STATE bug, not a device bug — run rule 7's
+     `stty -a -F /dev/ttyUSB0 | head -1` diagnostic FIRST and recover
+     with the stty recipe; do not start diagnosing the wiring, the
+     bridge, or the firmware. `bench/fido_mc.py console_cmd` (the
+     single console choke point for all bench scripts) enforces the
+     recipe on every call.
 12. **Settled analyses get recorded — do not re-litigate.** When a
      detailed analysis (spec of record + our code + the browser/client
      source) settles a question about how the code should be written,
@@ -129,13 +141,14 @@ decisions register, and the git log.)
     version (the probe) + post-reboot HID enumeration (`lsusb` / `findmnt
     -t vfat`), never a volume read-back.
 
-## Current state (2026-11-05) — **BROWSER REGISTRATION PASSES ON BOTH HARNESS: C18 (webauthn.io) and C19 (xorengineering.com/fido2/) on fw 1.0.5.** The C17 `UserActionTimeout` was round timing, not firmware (the fix: `up` within ~2 s of the Register click). The temporary diagnostic scaffolding (the `diag` console command + the `DBG mc:` prints) is removed and rebuilt (uf2 md5 `b837ed7f5f6754e67b05ac0aab6372b9`, ctest 9/9; the wire is unchanged — still fw 1.0.5). The register half of the demo is DONE. **NEXT: Phase 4 — getAssertion + RESET (login).** PAUSED here.
+## Current state (2026-11-06) — **Phase 4 CODE DONE + KAT-GREEN + OFFLINE BENCH PASSING: GET_ASSERTION + GET_NEXT_ASSERTION + RESET (the login half) implemented; ctest 9/9 (test_ctap 625 checks incl. byte-pinned offline KATs re-pinned for the 37-byte assertion authData).** Wire format settled as **SD-6** (stable 2.0 GA request table; INTEGER top-level response keys 1–5 with TEXT-keyed inner maps; options `uv`/`rk` → 0x2B; `"up": false` synchronous preflight; descending-slot serve order). Counter split into a littlefs backend (`/f2_cnt`, default; RESET zeroes it) and the chip Counter 0 behind `FIDO2_COUNTER_CHIP` (never reset). Browser REGISTRATION stands on the C18 (webauthn.io) / C19 (xorengineering.com/fido2/) wire. fw **1.0.7** built + flashed + probe FULL PASS (2026-11-06). **SD-7 device fix landed:** the assertion `authData` is now 37 bytes (rpIdHash | UP-only flags | signCount) with NO attested credential data (WebAuthn L3 §6.3.3 step 10) — the old 164-byte AT=1 layout was a device bug that broke fido2-lib's assertion audit. Both fido2-lib harness bugs (DER-only ECDSA verify; TEXT-key attestationObject parse) remain patched in the harness; the device's CTAP 2.3 PS integer keys 1/2/3 and raw R||S signatures are spec-correct. **Offline E2E bench PASSES** (`bench/fido_demo_lib.py` + `fido2lib-verify.mjs`): ATTESTATION OK counter 0 + ASSERTION OK counter 1, GA response 203 B, authData 37 B flags 0x01, sig raw-verified against the registration key. Ground rule 11 enforcement in `console_cmd`. **Browser LOGIN round (C20) PASSES** on the local fido2-demonstration (https://localhost:8888, rpId `localhost`): register → login (counter 0→1) → replug + login (counter →2) → reflash survival + login (counter →3) — strictly increasing counter, credential + counter survive replug AND a full firmware reflash (littlefs `/f2_*` intact). **NEXT: post-round cleanup (wipe + probe gate + `users.json` reset) → phase commit (Phase 4 files + bench scripts incl. `bench/fido_demo_lib.py`; the UF2 is never committed) → Phase 5 (hardening + docs).**
 
 - **How we got here (the C13–C17 arc — settled):** C13 re-keyed GET_INFO to the CTAP 2.1+ numbering (fw 1.0.4); C14 fixed the COSE `crv` to 1; C16 fixed the COSE layout to the 5-entry CTAP2-wire form (fw 1.0.5 — **SD-5**); the wire was then verified by probe + `fido_mc.py` E2E (real raw-digest ECDSA check). C17, the first browser round after the C16 fix, failed only on **round timing** — `UserActionTimeout`: the 30-s UP window expired before `up` arrived. No further firmware/COSE bug has been found since. Full narrative: the History section.
 - **C18 (webauthn.io) + C19 (xorengineering.com/fido2/): registration SUCCESS on both harnesses** (2026-11-05, fw 1.0.5). The C17 fix was pure protocol: `up` within ~2 s of the Register click (inside the 30-s window). RUST_LOG clean on both (zero `byte array, expected i64`, zero `UserActionTimeout`). Caveat: the webauthn.io page then offers an “authentication test” — getAssertion is Phase 4 (unimplemented; a clean 1-byte `INVALID_COMMAND` today), so do not click it until then.
-**NEXT (register passes on both harness — Phase 4 = login):**
-1. **Phase 4 — getAssertion + RESET** per the Phase 4 section: lookup by (rpIdHash, credId) or resident enumeration for an empty allowList; authData = rpIdHash ‖ flags(UP|CRED_ID) ‖ counter ‖ credIdLen(**1** B — getAssertion, unlike makeCredential’s 2) ‖ credId; counter increment BEFORE building authData; chip-signs SHA-256(rpIdHash ‖ clientDataHash); RESET wipes the littlefs DB. Bench: the webauthn.io page offers its **authentication test right after a register** — the natural first Phase 4 E2E (same fast-`up` pattern), then the xorengineering.com login, replug + reflash survival, strictly increasing counter.
-2. After Phase 4: Phase 5 (hardening + docs). Commit per phase; keep this file’s Current state current.
+**NEXT (Phase 4 code done — remaining: build + bench):**
+1. **Run the offline bench:** `python3 bench/fido_demo_lib.py` (wipe → INIT 1.0.6 gate → MC deferred-UP → GA deferred-UP → case JSON → fido2-lib attestationResult + assertionResult). Expect ATTESTATION OK (counter 0) + ASSERTION OK (counter 1) + VERDICT.
+2. **Browser round (C20)** on https://localhost:8888 (fido2-demonstration), bench-round discipline (agent wipes + probes before, stays off the key during the user round, no console logger, `up` within ~2 s of the click): Register (Allow → touch the Pico) → Login with the same username → replug + Login again → reflash survival (user BOOTSEL + UF2 copy) + one more Login; counter strictly increasing; littlefs `/f2_*` survive the reflash.
+3. Round passes → wipe + `bench/fido_probe.py` gate → **phase commit** (Phase 4 files + bench scripts incl. `bench/fido_demo_lib.py`; the UF2 is never committed); then Phase 5 (hardening + docs). Keep this file's Current state current.
 - **Chip identity:** ATECC608C (part 0x60, rev 0x05). **Console routing:** FIDO2 printf → UART0/CP210x (/dev/ttyUSB0), NOT USB HID. **YubiKey 5** (user-provided) is available as a comparison capture if a real 5-entry COSE key from a shipping token is wanted (its own webauthn.io/fido2-demonstration failures are separate, higher-level — NotAllowedError/NotAllowed, not COSE).
 
 ## Settled decisions (do not re-litigate — check here BEFORE re-deriving)
@@ -279,6 +292,94 @@ new primary-source evidence.
   structurally-valid COSE key, check the ENTRY COUNT / LABELS against the
   client's actual visitor, not just the RFC.
 
+### SD-6 — getAssertion wire format: the REQUEST table is the stable CTAP 2.0 one (keys 1–7); the response top level is INTEGER keys 1–5 with TEXT-keyed inner maps; options `uv`/`rk` → 0x2B; `"up": false` is a synchronous preflight (Phase 4, 2026-11-05)
+- **Question:** what does the browser SEND in a getAssertion request
+  (key numbers/types), and what does it DESERIALIZE from our response —
+  including the key form of the nested maps?
+- **Settled:**
+  - **Request table is STABLE from CTAP 2.0 through 2.3** (NOT the 2.1+
+    renumbering): 1=rpId TEXT, 2=clientDataHash BYTES(32),
+    3=allowList ARRAY of TEXT-keyed maps `{"id": BYTES, "type":
+    "public-key"}` (omitted when empty → resident enumeration),
+    4=extensions (skipped), 5=options TEXT-keyed map,
+    6=pinUvAuthParam BYTES, 7=pinUvAuthProtocol. Firefox may also send
+    optional 2.1+ keys 8 (enterpriseAttestation) / 9
+    (attestationFormatsPreference) — unknown top-level keys are skipped.
+  - **Response:** top-level INTEGER keys 1=credential, 2=authData,
+    3=signature, 4=user, 5=numberOfCredentials (only in the FIRST
+    response of a multi-credential enumeration). The nested maps use
+    **TEXT keys**: credential = exactly `{"id": bstr, "type":
+    "public-key"}` (no other fields — Firefox's deserializer rejects
+    unknown fields); user = exactly `{"id": bstr}` (name/displayName are
+    never returned without UV — 2.3 step 12.3).
+  - **Options** (2.3 §6.2.2 step 4, checked in the order uv → rk → up,
+    BEFORE locate/NO_CREDENTIALS and the UP wait): `"uv": true` →
+    UNSUPPORTED_OPTION 0x2B (the device advertises FIDO_2_0; the 2.0
+    client is the only uv-without-PIN sender, and 2.3's INVALID_OPTION
+    0x2C is not a 2.0 code); `rk` present (any value) → 0x2B (2.3 step
+    4.4); unknown options ignored; `"up": false` → a **full signed
+    assertion served synchronously in dispatch** (flags AT-only 0x40,
+    counter still incremented, enumeration state still armed).
+  - **pinUvAuthParam** (clientPin is not advertised → dead path for real
+    clients; pinned by KAT only): key 6 BYTES present + 7 absent →
+    MISSING_PARAMETER 0x14; 6 + 7 present (no protocol supported) →
+    CTAP1_ERR_INVALID_PARAMETER 0x02; key 6 as a MAP →
+    CBOR_UNEXPECTED_TYPE 0x11; key 7 without 6 → ignored.
+  - **Serve order** (no allowList, count > 1): descending slot
+    (6,5,4,3) — a documented approximation of "most recent first"
+    (the record carries no timestamp). First response carries
+    numberOfCredentials (even when = 1); an allowList match →
+    4-entry response, no enumeration state.
+- **Primary-source evidence:**
+  - **CTAP 2.3 spec of record** — §6.2 getAssertion (:1573–2062),
+    §6.3 get_next_assertion (:2212), §6.6 RESET (:4317).
+  - **CTAP 2.0 PS** — §5.2 request table; EXAMPLE 5 (:1918–1992):
+    credential map `{"id","type"}` + user entity TEXT keys
+    "id"/"icon"/"name"/"displayName".
+  - **Firefox** — `fx_get_assertion.rs` :509–520 (the serializer sends
+    keys 1–7 in the 2.0 order); `fx_server.rs` :75–82 (the
+    serde-derived `PublicKeyCredentialUserEntity`: `id` required,
+    `name`/`displayName` optional) and :202–217 (allowList entries).
+- **Lesson:** the 2.1+ renumbering does NOT apply to getAssertion —
+  only to GET_INFO (SD-2) and makeCredential framing (SD-1).
+  Per-command numbering must be verified per command; never generalize
+  one command's table to another.
+
+### SD-7 — the getAssertion / get_next_assertion `authData` EXCLUDES the attested credential data: 37 bytes, flags = UP only (Phase 4, 2026-11-06)
+- **Question:** what exactly goes in the assertion's `authData` — the
+  same 164-byte makeCredential layout (rpIdHash | flags | counter |
+  AAGUID | credIdLen | credId | COSE_Key, AT=1), or something smaller?
+- **Settled:** the assertion `authData` is **exactly 37 bytes**:
+  `rpIdHash(32) | flags(1) | signCount(4 BE)`, and the flags carry
+  **UP only** (`0x01` on the deferred path, `0x00` on the `"up": false`
+  preflight). There is **NO AT bit, NO AAGUID, NO credIdLen/credId, NO
+  COSE_Key**. The credential itself travels in the response's
+  `credential` member (SD-6), not in the authData. `ga_assert()` builds
+  the 37-byte buffer, signs `SHA-256(authData … clientDataHash)` with
+  the credential key (raw 64-byte R•S), and never calls `get_pubkey`.
+  GNA shares `ga_assert`, so one fix covers both. The GA response
+  shrinks 330 → **203 bytes** (4 IN packets).
+- **Primary-source evidence:**
+  - **WebAuthn L3** (W3C REC 2026-08-25) §6.3.3 `authenticatorGetAssertion`
+    step 10: "Let authenticatorData be the byte array specified in § 6.1
+    Authenticator Data … **excluding attestedCredentialData**." (CTAP 2.3
+    PS delegates the GA authData structure to [WebAuthn].)
+  - **Firefox** — `dom/webauthn/authenticator/src/ctap2/attestation.rs`
+    `Serialize for AuthenticatorData` :257–379 forwards the device's
+    authData to the page **verbatim**, including the attested credential
+    data when present — so a 164-byte AT=1 authData would reach the page
+    and fail the same audit that rejected it offline.
+  - **fido2-lib 3.5.6** — its own assertion fixture is 37 B flags 0x05
+    (UP|UV); `validateAudit` requires every parsed authnrData key to be
+    journaled, so an un-validated `aaguid` (from AT=1 input) fails the
+    assertion audit. The ecosystem norm is 37 bytes.
+- **Lesson:** the makeCredential and getAssertion authData layouts are
+  DIFFERENT. The AT bit and the attested credential data belong to
+  registration only. Do not reuse the MC authData builder for the
+  assertion. (The old 164-byte AT=1 assertion was a DEVICE BUG — it broke
+  fido2-lib's assertion audit and would have failed the browser login the
+  same way.)
+
 ## Bench environment (facts)
 
 - Host: Fedora 44, kernel 7.2, user `burnin`. Pico at USB port 5-1.4.1;
@@ -294,7 +395,7 @@ new primary-source evidence.
   repo copy still points at localhost:8888 and is stale). rp.id
   "xorengineering.com", uv "preferred" (deployed config, API-verified).
 - `bench/fido_probe.py` — must FULL PASS at the start of every round
-  (INIT/PING/WINK/GET_INFO 81-B KAT; asserts fw 1.0.5).
+  (INIT/PING/WINK/GET_INFO 81-B KAT; asserts fw 1.0.7).
 - **Bench-round discipline:** the agent wipes + probes before the round
   and stays OFF the key during the user round (the only agent console
   writes are the `up` at "go" and the post-round `wipe`); no console
@@ -675,6 +776,80 @@ new primary-source evidence.
   `b837ed7f5f6754e67b05ac0aab6372b9` (172544 B, wire-identical 1.0.5);
   ctest 9/9; code + PLAN.md committed separately. Next: Phase 4
   (getAssertion + RESET).
+- **C20-prep: fw 1.0.6 + offline fido2-lib bench + console 115200 fix**
+  (2026-11-06): Phase 4 code complete (GA + GNA + RESET; ctest 9/9,
+  test_ctap 632/632 incl. 16 new GA/RESET KATs); fw 1.0.6 built (uf2
+  md5 `2a8b584d98c6c204de63f7a46d6db53c`), flashed, probe FULL PASS.
+  The local fido2-demonstration round (fido2-lib 3.5.6 on Node 24)
+  failed server-side although the device's crypto is spec-correct —
+  the root cause is TWO fido2-lib harness bugs, both fixed in the
+  harness, the device unchanged: (1) `verifySignature` unconditionally
+  `derToRaw()`'d the signature before `subtle.verify` — Node >= 24
+  webcrypto wants raw R||S (RFC 8152 §3.4), which is what this device
+  (and every real authenticator) sends; the patch converts only
+  well-formed DER and passes raw through. (2) attestationObject
+  parsing required TEXT top-level keys `fmt`/`authData`/`attStmt`,
+  while real CTAP2 authenticators emit INTEGER keys 1/2/3 (CTAP 2.3 PS
+  makeCredential table: fmt 0x01, authData 0x02, attStmt 0x03);
+  fido2-lib's own fixtures are fabricated TEXT-key objects. The patch
+  normalizes CTAP2 1/2/3 (and W3C 0/1/2) to TEXT names after
+  `cborX.decode`. Patch file `patches/fido2-lib-3.5.6-raw-ecdsa.patch`
+  (fido2-demonstration checkout) now covers 3 files / 6 hunks,
+  round-trip-verified against pristine 3.5.6. Offline E2E bench
+  `bench/fido_demo_lib.py` + `fido2lib-verify.mjs` replicates the demo
+  round without a browser (wipe → INIT gate → MC deferred-UP → GA
+  deferred-UP → case JSON → fido2-lib attestationResult +
+  assertionResult). **Console incident:** after the overnight unplug
+  the CP210x re-enumerated and /dev/ttyUSB0 came back at 9600+echo
+  (ground rule 11); `console_cmd` (and the ad-hoc tests) opened the
+  port WITHOUT the stty recipe, so every `up`/`wipe` was lost — and
+  the agent chased phantoms (DTR toggling, wiring suspicion) instead
+  of checking rule 11. The user verified the console was healthy all
+  along via `screen` (garbage line `ZZ` → "unknown console command").
+  Fix: `console_cmd` now enforces the rule-11 stty recipe on EVERY
+  open (the single console choke point for all bench scripts); rule
+  11 strengthened (apply before any open, not just after a reflash;
+  never toggle DTR/RTS; a silent console is a port-STATE bug —
+  `stty -a` first, never hardware diagnostics).
+
+ - **C20-prep 2: SD-7 device fix (37-byte assertion authData) + offline
+   bench PASS** (2026-11-06): the offline bench's ASSERTION half failed
+   fido2-lib's audit ("aaguid was not validated") even after the two
+   harness patches — root cause was a DEVICE bug, not the harness: the
+   assertion `authData` carried the attested credential data (164 bytes,
+   AT=1: AAGUID + credId + COSE_Key). WebAuthn L3 §6.3.3 step 10
+   EXCLUDES attestedCredentialData from the getAssertion
+   authenticatorData, so the assertion authData must be 37 bytes
+   (rpIdHash | flags | signCount) with UP-only flags. Fixed `ga_assert()`
+   (drop `get_pubkey` + the AAGUID/credId/COSE emission; flags = UP only);
+   GNA shares the path. Settled as **SD-7**. fw **1.0.7** (uf2 md5
+   `2b0ca8b73ac7fae0f25c5269a397a874`) built + flashed + probe FULL PASS.
+   GA KATs re-pinned offline (37-B authData; responses 330→203 B;
+   `fake_sign` = digest•digest); test_ctap 625 checks, ctest 9/9.
+   Bench `fido_ga.py` split `parse_authdata` into `parse_att_authdata`
+   (164-B, MC) + `parse_assert_authdata` (37-B, GA, asserts no AT bit);
+   `fido_demo_lib.py` + `fido_mc.py` + `fido_probe.py` re-pinned to 1.0.7.
+   **Offline bench now PASSES end to end:** ATTESTATION OK counter 0 +
+   ASSERTION OK counter 1, GA response 203 B, authData 37 B flags 0x01,
+   sig raw-verified against the registration key. Next: the browser
+   LOGIN round (C20).
+
+ - **C20: browser LOGIN round PASSES** (2026-11-06): on the local
+   fido2-demonstration (https://localhost:8888, rpId `localhost`,
+   fido2-lib 3.5.6 on Node 24, both harness patches applied):
+   **register** (counter 0) → **login** (counter →1) → **replug +
+   login** (counter →2, resident credential survives a USB replug)
+   → **reflash survival + login** (counter →3, credential + counter
+   survive a full firmware reflash — littlefs `/f2_*` intact). The
+   counter is strictly increasing across all three assertions; the
+   server log shows "Registration successful." + "Authentication
+   successful." for each. This is the first full browser round (register
+   + login + persistence) to pass end to end. (Harness note: the demo's
+   `index.js` validates `prevCounter` but does not write the new counter
+   back to `users.json`, so the stored counter stays 0 — a harness
+   limitation, not a device issue; the DEVICE counter is what's under
+   test and it is strictly increasing.) Post-round: wipe + probe gate +
+   `users.json` reset, then the phase commit.
 
 ## Goal
 
@@ -750,19 +925,41 @@ none I/O-protected, so no `/io_key.bin`. The PIN stretch (ECDH,
 
 - **Lookup:** (rpIdHash, credentialID) from the request; for a
   discoverable "get" with no allowList, enumerate resident matches (≤4).
-  No match → NO_CREDENTIALS.
-- **authData:** rpIdHash ‖ flags(UP|CRED_ID) ‖ counter ‖ credIdLen(1) ‖
-  credId.
-- **Counter increment BEFORE building authData** (read → increment →
+  No match → NO_CREDENTIALS (0x2E), checked BEFORE the UP wait.
+- **authData (identical layout to makeCredential):** rpIdHash ‖
+  flags(UP|AT) ‖ counter(4 BE) ‖ AAGUID(16) ‖ credIdLen(**2** BE) ‖
+  credId ‖ COSE_Key(77). W3C §6.5.1: the credential public key is part
+  of authData on the get side too. (An earlier note here said "1-byte
+  credIdLen" — a misread; corrected.)
+- **Wire format: SD-6** (stable 2.0 request table; INTEGER top-level
+  response keys 1–5; TEXT-keyed inner maps; options `uv`/`rk` → 0x2B;
+  pin semantics; `"up": false` = synchronous preflight; descending-slot
+  serve order).
+- **Counter:** global per authenticator (NOT per RP — each RP compares
+  against its own stored value, so a single monotonic counter satisfies
+  all of them). Increment BEFORE building authData (read → increment →
   build with the new value → sign → send), so the first assertion after
   registration never reads as a "rollback" to an RP that compares
   against the stored registration counter (the demo's fido2-lib does
   exactly this). Increment failure → error, never a stale-counter
-  assertion. (The littlefs backend enforces monotonicity in software;
-  the chip backend is hardware-monotonic.)
-- **RESET:** wipe the littlefs DB (on-chip keys remain; the next
-  MAKE_CREDENTIAL re-binds the slots). littlefs-counter mode also
-  resets the counter to 0 (dev convenience); chip-counter mode does not.
+  assertion. Backends: littlefs `/f2_cnt` 4-byte BE (default; the write
+  goes through `flash_safe_execute` at the stable card-tick point) vs
+  ATECC608 Counter 0 behind `FIDO2_COUNTER_CHIP=ON` (hardware-monotonic,
+  never reset; its `counter_zero` hook is NULL).
+- **get_next_assertion (0x08):** no parameters (stray bytes must form
+  exactly one well-formed CBOR item, else INVALID_CBOR 0x12 — checked
+  before the state); state = the GA enumeration (separate from the
+  pending transaction; an unmount abort clears it); 30 s window between
+  calls (expiry → state discarded + NOT_ALLOWED 0x30, as does
+  exhaustion); response = the GA map minus numberOfCredentials.
+- **RESET (0x07):** no parameters (same CBOR check); the 10 s power-on
+  window is checked FIRST at dispatch (uptime > 10000 ms → NOT_ALLOWED
+  0x30); then the UP wait (30 s → USER_ACTION_TIMEOUT 0x2F); on
+  completion: erase every store record (persist-first, per record),
+  counter → 0 in littlefs mode only, enumeration state cleared; success
+  = the bare 0x00 status byte (no CBOR). On-chip key pairs REMAIN; the
+  next makeCredential GenKey re-binds the slots. The console `wipe`
+  zeroes the counter through the same hook.
 - **Bench:** full register + login cycle in the browser; replug; reflash
   survival (credential works, counter keeps counting); counter strictly
   increasing.

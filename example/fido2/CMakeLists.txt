@@ -28,6 +28,15 @@ target_link_libraries(pico-atecc608-fido2
     pico_multicore   # core 1 runs the tight USB task (makeCredential delivery fix)
 )
 
+# The CTAP sync counter backend: littlefs /f2_cnt (default — survives
+# reflashes and is zeroed by RESET / console 'wipe') or the chip's
+# hardware-monotonic Counter 0 (FIDO2_COUNTER_CHIP=ON — never
+# resettable; use it when the counter must survive a littlefs wipe).
+option(FIDO2_COUNTER_CHIP "Use the ATECC608's Counter 0 for the CTAP sync counter" OFF)
+if (FIDO2_COUNTER_CHIP)
+    target_compile_definitions(pico-atecc608-fido2 PRIVATE FIDO2_COUNTER_CHIP)
+endif ()
+
 # Debug console on UART0 only — the USB interface is the HID key, so no
 # stdio over USB (pico_enable_stdio_usb would clash with our own HID
 # descriptor and add a CDC interface the FIDO layout does not have).

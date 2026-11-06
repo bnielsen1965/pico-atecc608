@@ -139,11 +139,23 @@ enum {
 //   1.0.5  COSE_Key crv fixed: P-256 is crv 1 (RFC 8152 13.1), not -1
 //          (0x20). Firefox's Curve::try_from(-1) = UnknownKeyType, so the
 //          whole makeCredential response was rejected (round C14)
+//   1.0.6  Phase 4 (the login half): GET_ASSERTION +
+//          GET_NEXT_ASSERTION + RESET, the SD-6 wire format (stable 2.0
+//          request table; INTEGER top-level response keys; TEXT-keyed
+//          inner maps); the sync counter moves to littlefs (/f2_cnt,
+//          RESET zeroes it) with the chip Counter 0 behind
+//          FIDO2_COUNTER_CHIP (never reset)
+//   1.0.7  The assertion authData dropped the attested credential data
+//          (AAGUID/credId/COSE, AT bit): WebAuthn L3 §6.3.3 step 10
+//          excludes it from the getAssertion authenticatorData, so the
+//          assertion is now rpIdHash(32) | flags(UP only) |
+//          signCount(4 BE) = 37 bytes (round C20-prep; the old 164-B
+//          layout broke fido2-lib's assertion audit)
 enum {
     FIDO2_PROTO_VERSION    = 2,
     FIDO2_FW_VERSION_MAJOR = 1,
     FIDO2_FW_VERSION_MINOR = 0,
-    FIDO2_FW_VERSION_BUILD = 5,
+    FIDO2_FW_VERSION_BUILD = 7,
 };
 
 // Timing, in ms. A busy (in-flight) message is aborted with
