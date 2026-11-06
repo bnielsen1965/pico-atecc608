@@ -5,6 +5,7 @@
 #include "fido_cbor.h"
 
 #include <stddef.h>
+#include <string.h>
 
 uint32_t fido_cose_encode_es256(const uint8_t pub[64], uint8_t *out,
                                 uint32_t out_max)
@@ -44,4 +45,56 @@ uint32_t fido_cose_encode_es256(const uint8_t pub[64], uint8_t *out,
         return 0;   // cannot happen (out_max was checked); be safe
     }
     return e.len;   // FIDO_COSE_ES256_LEN
+}
+
+// --- ECDSA signature DER encoding (WebAuthn L3 section 6.5.5) ------------
+
+// Minimal DER INTEGER source for one 32-byte big-endian field: strip
+// leading zero octets (DER requires the shortest encoding of the value)
+// and report whether a 0x00 sign-pad octet is needed (high bit set).
+static const uint8_t *der_field(const uint8_t v[32], uint32_t *len,
+                                uint8_t *pad)
+{
+    uint32_t i = 0;
+    while (i < 31 && 0x00 == v[i]) {
+        i++;
+    }
+    *len = 32 - i;
+    *pad = (v[i] & 0x80) ? 1 : 0;
+    return &v[i];
+}
+
+uint32_t fido_ecdsa_der_encode(const uint8_t raw[64], uint8_t *out,
+                               uint32_t out_max)
+{
+    if ((NULL == raw) || (NULL == out)) {
+        return 0;
+    }
+    uint32_t len_r, len_s;
+    uint8_t pad_r, pad_s;
+    const uint8_t *r = der_field(raw, &len_r, &pad_r);
+    const uint8_t *s = der_field(&raw[32], &len_s, &pad_s);
+    const uint32_t body = (2 + pad_r + len_r) + (2 + pad_s + len_s);
+    if (out_max < 2 + body) {
+        return 0;
+    }
+
+    uint32_t o = 0;
+    out[o++] = 0x30;                       // SEQUENCE
+    out[o++] = (uint8_t)body;              // short form: body <= 70
+    out[o++] = 0x02;                       // INTEGER (r)
+    out[o++] = (uint8_t)(pad_r + len_r);
+    if (pad_r) {
+        out[o++] = 0x00;
+    }
+    memcpy(&out[o], r, len_r);
+    o += len_r;
+    out[o++] = 0x02;                       // INTEGER (s)
+    out[o++] = (uint8_t)(pad_s + len_s);
+    if (pad_s) {
+        out[o++] = 0x00;
+    }
+    memcpy(&out[o], s, len_s);
+    o += len_s;
+    return o;
 }

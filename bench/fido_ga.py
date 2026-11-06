@@ -6,7 +6,7 @@ round C20 ("authentication failed: could not verify authentication
 signature") can be pinned down without a browser:
 
   1. `wipe` via the console (clean store + zeroed counter).
-  2. CTAPHID INIT -> CID; expect fw 1.0.7, caps 0x07.
+  2. CTAPHID INIT -> CID; expect fw 1.0.8, caps 0x07.
   3. CTAP2 makeCredential (the exact Firefox C1 request, re-used from
      fido_mc.py) -> capture the attestation authData: the COSE public
      key (the key the browser AND the server store), the counter, and
@@ -51,6 +51,7 @@ from fido_mc import (  # noqa: E402
     _ecdsa_selftest,
     _ecdsa_verify_raw,
     console_cmd,
+    parse_ecdsa_der,
     read_until,
 )
 
@@ -212,8 +213,11 @@ def verify_assertion(label, px_reg, py_reg, authdata, sig):
     print(f'  rpIdHash ok : {rp_id_hash == RP_ID_HASH}')
     print(f'  flags       : {flags:#04x}  (UP={flags & 1}, AT={flags & 0x40})')
     print(f'  counter     : {counter}')
-    r = int.from_bytes(sig[0:32], 'big')
-    s = int.from_bytes(sig[32:64], 'big')
+    # The sig is an ASN.1 DER Ecdsa-Sig-Value (WebAuthn L3 6.5.5,
+    # RFC 3279 2.2.3) — 70-72 bytes, not the raw R||S COSE_Sign form.
+    r, s = parse_ecdsa_der(sig)
+    print(f'  sig         : {len(sig)} B (ASN.1 DER Ecdsa-Sig-Value, '
+          f'WebAuthn L3 6.5.5)')
     digest = hashlib.sha256(authdata + CDH).digest()
     ok_reg = _ecdsa_verify_raw(px_reg, py_reg, r, s, digest)
     print(f'  sig vs REGISTRATION key (what browser+server check): {ok_reg}')
@@ -241,7 +245,7 @@ def main():
         cid = r[15:19]
         print(f'INIT  -> cid={cid.hex()} fw={r[20]}.{r[21]}.{r[22]} '
               f'caps={r[23]:#04x}')
-        assert r[20:23] == bytes([1, 0, 7]), 'firmware must be 1.0.7'
+        assert r[20:23] == bytes([1, 0, 8]), 'firmware must be 1.0.8'
         assert r[23] == 0x07, 'caps must be 0x07'
 
         # --- 2. makeCredential (the exact Firefox C1 request) --------------
@@ -249,8 +253,8 @@ def main():
         print(f'MC_REQ  -> 190 bytes (rp {RP.decode()})')
         time.sleep(2.0)
         print(f'console -> up: {console_cmd("up").strip()!r}')
-        mc_resp, ka = read_until(fd, 0x90, 254)
-        print(f'MC_RESP -> 254 bytes, {ka} keep-alive(s)')
+        mc_resp, ka = read_until(fd, 0x90, (258, 262))
+        print(f'MC_RESP -> {len(mc_resp)} bytes, {ka} keep-alive(s)')
         assert mc_resp[0] == 0x00, f'MC status must be 0x00, {mc_resp[0]:#04x}'
         # authData is at a fixed offset in the packed attestation object
         # (see fido_mc.py): resp[13:13+164].

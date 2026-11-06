@@ -12,7 +12,7 @@ the two numberings; round C13 root cause, see PLAN.md). So this script
 speaks the same protocol directly over /dev/hidraw and drives user
 presence through the UART console, exactly like a browser round:
 
-  1. CTAPHID INIT (broadcast) -> CID; expect fw 1.0.7, caps 0x07.
+  1. CTAPHID INIT (broadcast) -> CID; expect fw 1.0.8, caps 0x07.
   2. CTAP2 GET_INFO -> the 81-byte response (0x00 status + 80-byte
      CBOR map, CTAP 2.1+ key numbers), 2 packets (57+24).
   3. CTAP2 makeCredential with the EXACT 190-byte request Firefox sent
@@ -22,12 +22,13 @@ presence through the UART console, exactly like a browser round:
   4. `up` via the UART console ~2 s in (the agent is the operator for
      this round — the user is not at the console).
   5. Keep-alives (0xBB, BCNT 1, status 0x01 = UP_NEEDED) at ~500 ms
-     until the touch; then the 254-byte success response (0x00 status
-     + CBOR attestation object) over 5 packets (57+59+59+59+18).
+     until the touch; then the 258-262-byte success response (0x00
+     status + CBOR attestation object) over 5 packets (57+59+59+59+
+     24..28 — the ES256 DER sig is 68-72 bytes).
   6. Validate the response: attestation type "packed", authData
      (rpIdHash = SHA-256("xorengineering.com"), flags 0x41, counter,
      AAGUID, 32-byte credId, 77-byte COSE_Key), attStmt {alg:-7,
-     sig:64}.
+     sig: a 70-72-byte ASN.1 DER Ecdsa-Sig-Value (WebAuthn L3 6.5.5)}.
   7. `wipe` via the console so the browser round starts from an empty
      store.
 
@@ -133,6 +134,38 @@ def _ecdsa_selftest():
             and not _ecdsa_verify_raw(Q[0], Q[1], rr, ss, bytes(range(1, 33))))
 
 
+def parse_ecdsa_der(sig):
+    """Parse an ASN.1 DER Ecdsa-Sig-Value (RFC 3279 2.2.3) -> (r, s).
+
+    WebAuthn L3 section 6.5.5 MANDATES this encoding for ES256 "sig"
+    values (assertion AND packed-attestation signatures) — the raw
+    R||S form is the COSE_Sign encoding (RFC 9052), NOT a WebAuthn
+    signature. Each INTEGER is minimally encoded: no leading zero
+    octets, except a single 0x00 sign pad when the next octet's high
+    bit is set. Raises ValueError on malformed input."""
+    if len(sig) < 8 or sig[0] != 0x30 or sig[1] != len(sig) - 2:
+        raise ValueError(f'not a DER SEQUENCE of the right length: '
+                         f'{sig.hex()}')
+    off = 2
+    vals = []
+    for _ in range(2):
+        if sig[off] != 0x02:
+            raise ValueError(f'expected INTEGER tag at {off}, '
+                             f'got {sig[off]:#04x}')
+        ln = sig[off + 1]
+        off += 2
+        v = sig[off:off + ln]
+        if ln != len(v):
+            raise ValueError('truncated INTEGER')
+        if v[0] == 0x00 and (ln < 2 or v[1] < 0x80):
+            raise ValueError('non-minimal INTEGER (spurious 0x00)')
+        vals.append(int.from_bytes(v, 'big'))
+        off += ln
+    if off != len(sig):
+        raise ValueError('trailing bytes after the second INTEGER')
+    return vals[0], vals[1]
+
+
 CONSOLE = '/dev/ttyUSB0'
 READ_TIMEOUT_S = 1.0
 
@@ -203,6 +236,8 @@ def console_cmd(cmd, timeout=4.0):
 def read_until(fd, want_cmd, want_bcnt=None, timeout=35.0):
     """Read IN reports until the response to `want_cmd` arrives.
 
+    `want_bcnt` may be an int (exact length) or a (min, max) tuple —
+    the ES256 DER sig is 68-72 bytes, so the MC response is 258-262.
     Keeps a tally of 0xBB keep-alives (expected at ~500 ms while the
     device waits for the touch). Returns (payload, n_keepalives).
     """
@@ -219,7 +254,11 @@ def read_until(fd, want_cmd, want_bcnt=None, timeout=35.0):
         if r[4] != want_cmd:
             sys.exit(f'unexpected IN report cmd={r[4]:#04x}: {r[:8].hex()}')
         bcnt = int.from_bytes(r[5:7], 'big')
-        if want_bcnt is not None and bcnt != want_bcnt:
+        if isinstance(want_bcnt, tuple):
+            if not want_bcnt[0] <= bcnt <= want_bcnt[1]:
+                sys.exit(f'response BCNT {bcnt} outside expected '
+                         f'{want_bcnt[0]}..{want_bcnt[1]}')
+        elif want_bcnt is not None and bcnt != want_bcnt:
             sys.exit(f'response BCNT {bcnt} != expected {want_bcnt}')
         payload = bytearray(r[7:64])
         seq = 0
@@ -257,8 +296,8 @@ def main():
         cid = r[15:19]
         print(f'INIT  -> cid={cid.hex()} fw={r[20]}.{r[21]}.{r[22]} '
               f'caps={r[23]:#04x}')
-        assert r[20:23] == bytes([1, 0, 7]), \
-            f'firmware must be 1.0.7, got {r[20]}.{r[21]}.{r[22]}'
+        assert r[20:23] == bytes([1, 0, 8]), \
+            f'firmware must be 1.0.8, got {r[20]}.{r[21]}.{r[22]}'
         assert r[23] == 0x07, f'caps must be 0x07, got {r[23]:#04x}'
 
         # --- 2. GET_INFO -------------------------------------------------
@@ -288,10 +327,10 @@ def main():
         reply = console_cmd('up')
         print(f'console -> up: {reply.strip()!r}')
 
-        # --- 5. the 254-byte response -------------------------------------
-        resp, ka = read_until(fd, 0x90, 254)
-        print(f'MC_RESP -> 254 bytes over 5 packets, {ka} keep-alive(s) '
-              f'before the touch')
+        # --- 5. the 258-262-byte response ---------------------------------
+        resp, ka = read_until(fd, 0x90, (258, 262))
+        print(f'MC_RESP -> {len(resp)} bytes over 5 packets, '
+              f'{ka} keep-alive(s) before the touch')
 
         # --- 6. validate the attestation object ---------------------------
         assert resp[0] == 0x00, f'status byte must be 0x00, got {resp[0]:#04x}'
@@ -316,16 +355,23 @@ def main():
         # CTAP2 layout: {1:kty=2, 3:alg=-7, -1:crv=1, -2:x, -3:y}
         assert cose[1:7] == bytes([0x01, 0x02, 0x03, 0x26, 0x20, 0x01]), \
             'COSE_Key must be kty EC2 / alg ES256 / crv P-256 (CTAP2 layout)'
-        # attStmt: 03 | A2 | 63 "alg" | 26 | 63 "sig" | 58 40 | <64 B>
+        # attStmt: 03 | A2 | 63 "alg" | 26 | 63 "sig" | 58 <len> | <DER>.
+        # The ES256 sig is an ASN.1 DER Ecdsa-Sig-Value (WebAuthn L3
+        # section 6.5.5, RFC 3279 section 2.2.3): 68-72 bytes — 70 in
+        # the common case, 72 when r and/or s need the 0x00 sign pad.
         rest = resp[13 + 164:]
         assert rest[0] == 0x03 and rest[1] == 0xA2, 'attStmt must be map(2)'
         assert rest[2:6] == b'\x63alg' and rest[6] == 0x26, \
             'attStmt alg must be -7'
-        assert rest[7:11] == b'\x63sig' and rest[11] == 0x58 \
-            and rest[12] == 0x40, 'attStmt sig must be bytes(64)'
-        assert len(rest) == 13 + 64, f'attStmt size off: {len(rest)}'
+        assert rest[7:11] == b'\x63sig' and rest[11] == 0x58, \
+            'attStmt sig must be a byte string'
+        sig_len = rest[12]
+        assert 0x44 <= sig_len <= 0x48, \
+            f'attStmt DER sig length {sig_len} out of range 68..72'
+        assert len(rest) == 13 + sig_len, f'attStmt size off: {len(rest)}'
+        r, s = parse_ecdsa_der(rest[13:13 + sig_len])
         print(f'attestation  -> packed, flags 0x41, counter {counter}, '
-              f'AAGUID ok, credId 32 B, COSE_Key ok, sig 64 B')
+              f'AAGUID ok, credId 32 B, COSE_Key ok, sig DER {sig_len} B')
 
         # --- 6b. cryptographically verify the packed signature -------------
         # The checks above only looked at lengths. Now verify the signature
@@ -336,8 +382,7 @@ def main():
         print('ecdsa      -> self-test ok (sign/verify round-trip)')
         cdh = MC_REQ[5:37]   # clientDataHash: first map entry of the request
         digest = hashlib.sha256(authdata + cdh).digest()
-        r = int.from_bytes(rest[13:13 + 32], 'big')
-        s = int.from_bytes(rest[13 + 32:13 + 64], 'big')
+        # r and s were parsed from the DER in step 6.
         px = int.from_bytes(cose[10:42], 'big')
         py = int.from_bytes(cose[45:77], 'big')
         assert _ecdsa_verify_raw(px, py, r, s, digest), \

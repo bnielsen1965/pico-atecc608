@@ -151,11 +151,18 @@ enum {
 //          assertion is now rpIdHash(32) | flags(UP only) |
 //          signCount(4 BE) = 37 bytes (round C20-prep; the old 164-B
 //          layout broke fido2-lib's assertion audit)
+//   1.0.8  ES256 signatures are now emitted as ASN.1 DER Ecdsa-Sig-
+//          Value (RFC 3279 §2.2.3) — BOTH the assertion
+//          (getAssertion/get_next_assertion) and the packed attestation
+//          (makeCredential) signatures. WebAuthn L3 §6.5.5 MANDATES DER
+//          for ES256 "sig" values; the raw R||S (COSE_Sign, RFC 9052)
+//          form was a device bug that broke py_webauthn RPs
+//          (webauthn.io: "Could not verify authentication signature")
 enum {
     FIDO2_PROTO_VERSION    = 2,
     FIDO2_FW_VERSION_MAJOR = 1,
     FIDO2_FW_VERSION_MINOR = 0,
-    FIDO2_FW_VERSION_BUILD = 7,
+    FIDO2_FW_VERSION_BUILD = 8,
 };
 
 // Timing, in ms. A busy (in-flight) message is aborted with

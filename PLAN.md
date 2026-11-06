@@ -141,14 +141,15 @@ decisions register, and the git log.)
     version (the probe) + post-reboot HID enumeration (`lsusb` / `findmnt
     -t vfat`), never a volume read-back.
 
-## Current state (2026-11-06) — **Phase 4 CODE DONE + KAT-GREEN + OFFLINE BENCH PASSING: GET_ASSERTION + GET_NEXT_ASSERTION + RESET (the login half) implemented; ctest 9/9 (test_ctap 625 checks incl. byte-pinned offline KATs re-pinned for the 37-byte assertion authData).** Wire format settled as **SD-6** (stable 2.0 GA request table; INTEGER top-level response keys 1–5 with TEXT-keyed inner maps; options `uv`/`rk` → 0x2B; `"up": false` synchronous preflight; descending-slot serve order). Counter split into a littlefs backend (`/f2_cnt`, default; RESET zeroes it) and the chip Counter 0 behind `FIDO2_COUNTER_CHIP` (never reset). Browser REGISTRATION stands on the C18 (webauthn.io) / C19 (xorengineering.com/fido2/) wire. fw **1.0.7** built + flashed + probe FULL PASS (2026-11-06). **SD-7 device fix landed:** the assertion `authData` is now 37 bytes (rpIdHash | UP-only flags | signCount) with NO attested credential data (WebAuthn L3 §6.3.3 step 10) — the old 164-byte AT=1 layout was a device bug that broke fido2-lib's assertion audit. Both fido2-lib harness bugs (DER-only ECDSA verify; TEXT-key attestationObject parse) remain patched in the harness; the device's CTAP 2.3 PS integer keys 1/2/3 and raw R||S signatures are spec-correct. **Offline E2E bench PASSES** (`bench/fido_demo_lib.py` + `fido2lib-verify.mjs`): ATTESTATION OK counter 0 + ASSERTION OK counter 1, GA response 203 B, authData 37 B flags 0x01, sig raw-verified against the registration key. Ground rule 11 enforcement in `console_cmd`. **Browser LOGIN round (C20) PASSES** on the local fido2-demonstration (https://localhost:8888, rpId `localhost`): register → login (counter 0→1) → replug + login (counter →2) → reflash survival + login (counter →3) — strictly increasing counter, credential + counter survive replug AND a full firmware reflash (littlefs `/f2_*` intact). **NEXT: post-round cleanup (wipe + probe gate + `users.json` reset) → phase commit (Phase 4 files + bench scripts incl. `bench/fido_demo_lib.py`; the UF2 is never committed) → Phase 5 (hardening + docs).**
+## Current state (2026-11-06) — **Phase 4 COMPLETE + committed (`d33e7ea`, fw 1.0.7: GA + GNA + RESET; ctest 9/9; C20 browser round PASSED on the local fido2-demonstration).** The webauthn.io login failure was then diagnosed and INVERTED: W3C WebAuthn L3 §6.5.5 MANDATES ASN.1 DER `Ecdsa-Sig-Value` (RFC 3279 §2.2.3) for ES256 `sig` values — assertion AND packed attestation. The device's raw R‖S output was a **device bug** (the raw form is the COSE_Sign encoding, RFC 9052; browsers emit DER, 64–72 VARIABLE bytes). py_webauthn/webauthn.io were spec-correct. Settled as **SD-8** (user-confirmed); the fix is implemented in fw **1.0.8**: DER encoder `fido_ecdsa_der_encode()` in fido_cose.c (minimal INTEGERs: leading-zero strip + 0x00 sign-pad, OpenSSL-identical, 10–72 B), used in `ga_assert()` + `mc_create()`; `FIDO_CTAP_MC_RESP_MAX` 288→296; KATs re-pinned (6 sig arrays → 70-B DER; MC 254→260 B, GA 180→186 / 178→184 B) + new `t_ecdsa_der()` — ctest 9/9, test_ctap **736 checks**; uf2 built (md5 `d7f8e54261ca06b856d8a39aacf89127`) — **NOT YET FLASHED.** The fido2-lib patch's ECDSA-raw-acceptance part was a mistake (bent the harness to a non-compliant device — the inverted ground rule) and is REVERTED; the attestationObject integer-key normalization remains (patch renamed `fido2-lib-3.5.6-attestation-cbor.patch`, 2 files / 4 hunks, round-trip-verified). Bench verifiers now parse/verify DER (`parse_ecdsa_der()` in `bench/fido_mc.py`, strict-minimal check); fw refs re-pinned to 1.0.8. **NEXT: user flashes 1.0.8 (BOOTSEL) → `bench/fido_probe.py` gate → offline bench `bench/fido_demo_lib.py` → webauthn.io browser round (register → login → replug → reflash survival) → wipe + commit → Phase 5 (hardening + docs).**
 
 - **How we got here (the C13–C17 arc — settled):** C13 re-keyed GET_INFO to the CTAP 2.1+ numbering (fw 1.0.4); C14 fixed the COSE `crv` to 1; C16 fixed the COSE layout to the 5-entry CTAP2-wire form (fw 1.0.5 — **SD-5**); the wire was then verified by probe + `fido_mc.py` E2E (real raw-digest ECDSA check). C17, the first browser round after the C16 fix, failed only on **round timing** — `UserActionTimeout`: the 30-s UP window expired before `up` arrived. No further firmware/COSE bug has been found since. Full narrative: the History section.
 - **C18 (webauthn.io) + C19 (xorengineering.com/fido2/): registration SUCCESS on both harnesses** (2026-11-05, fw 1.0.5). The C17 fix was pure protocol: `up` within ~2 s of the Register click (inside the 30-s window). RUST_LOG clean on both (zero `byte array, expected i64`, zero `UserActionTimeout`). Caveat: the webauthn.io page then offers an “authentication test” — getAssertion is Phase 4 (unimplemented; a clean 1-byte `INVALID_COMMAND` today), so do not click it until then.
-**NEXT (Phase 4 code done — remaining: build + bench):**
-1. **Run the offline bench:** `python3 bench/fido_demo_lib.py` (wipe → INIT 1.0.6 gate → MC deferred-UP → GA deferred-UP → case JSON → fido2-lib attestationResult + assertionResult). Expect ATTESTATION OK (counter 0) + ASSERTION OK (counter 1) + VERDICT.
-2. **Browser round (C20)** on https://localhost:8888 (fido2-demonstration), bench-round discipline (agent wipes + probes before, stays off the key during the user round, no console logger, `up` within ~2 s of the click): Register (Allow → touch the Pico) → Login with the same username → replug + Login again → reflash survival (user BOOTSEL + UF2 copy) + one more Login; counter strictly increasing; littlefs `/f2_*` survive the reflash.
-3. Round passes → wipe + `bench/fido_probe.py` gate → **phase commit** (Phase 4 files + bench scripts incl. `bench/fido_demo_lib.py`; the UF2 is never committed); then Phase 5 (hardening + docs). Keep this file's Current state current.
+**NEXT (fw 1.0.8 built — remaining: flash + verify + webauthn.io):**
+1. **Flash:** user holds BOOTSEL + plugs in → copy `build/example/fido2/pico-atecc608-fido2.uf2` (md5 `d7f8e54261ca06b856d8a39aacf89127`) to `/run/media/burnin/RPI-RP2` → reboots as 2e8a:000b.
+2. **Probe gate + offline bench:** `python3 bench/fido_probe.py` (fw 1.0.8 gate), then `python3 bench/fido_demo_lib.py` (wipe → INIT → MC deferred-UP → GA deferred-UP → DER verify + fido2-lib attestationResult + assertionResult). Expect ATTESTATION OK (counter 0) + ASSERTION OK (counter 1) + VERDICT.
+3. **webauthn.io browser round** (bench-round discipline: agent wipes + probes before, stays off the key during the user round, `up` within ~2 s of the click): Register (Allow → touch) → the page's "authentication test" login → replug + login → reflash survival + login. The login is the failure point that started this — it must now pass against the stock py_webauthn DER verify.
+4. Round passes → wipe (0 creds, counter 0) + probe gate + commit (SD-8 + history); then Phase 5 (hardening + docs). Keep this file's Current state current.
 - **Chip identity:** ATECC608C (part 0x60, rev 0x05). **Console routing:** FIDO2 printf → UART0/CP210x (/dev/ttyUSB0), NOT USB HID. **YubiKey 5** (user-provided) is available as a comparison capture if a real 5-entry COSE key from a shipping token is wanted (its own webauthn.io/fido2-demonstration failures are separate, higher-level — NotAllowedError/NotAllowed, not COSE).
 
 ## Settled decisions (do not re-litigate — check here BEFORE re-deriving)
@@ -379,6 +380,56 @@ new primary-source evidence.
   assertion. (The old 164-byte AT=1 assertion was a DEVICE BUG — it broke
   fido2-lib's assertion audit and would have failed the browser login the
   same way.)
+
+### SD-8 — ES256 `sig` values MUST be ASN.1 DER `Ecdsa-Sig-Value` (RFC 3279 §2.2.3) — assertion AND packed attestation (2026-11-06, user-confirmed)
+- **Question:** the device emitted the ATECC608's raw R‖S (64 B) as the
+  ES256 `sig` in getAssertion AND makeCredential (packed attestation).
+  webauthn.io (py_webauthn 3.0.0) rejected the login with "Could not
+  verify authentication signature". Which encoding is spec-correct?
+- **Settled:** **ASN.1 DER** `Ecdsa-Sig-Value` — `SEQUENCE { r INTEGER,
+  s INTEGER }` — for BOTH the assertion `sig` and the packed-attestation
+  `sig`. The raw R‖S form is the COSE_Sign signature encoding (RFC 9052
+  §2.4 / RFC 8152 §3.4), NOT the WebAuthn signature. The device's raw
+  output was a **device bug**; the C19/C20-era "raw is spec-correct"
+  claim is RETRACTED (it confused COSE_Sign with the WebAuthn signature).
+- **Primary-source evidence:**
+  - **WebAuthn L3** (W3C REC 2026-08-25) §6.5.5 signature verification:
+    the ES256 `sig` MUST be an ASN.1 DER encoded `Ecdsa-Sig-Value`
+    (RFC 3279 §2.2.3) — and the section's note: "CTAP2
+    authenticators will also produce signatures values in the same
+    format." Fetched verbatim 2026-11-06; the CTAP 2.3 PS PDF remains
+    the wire spec of record, and it delegates the signature format to
+    [WebAuthn].
+  - **py_webauthn** (duo-labs; the webauthn.io server, pinned
+    `webauthn==3.0.0`): `verify_signature.py` passes the `sig` bytes
+    straight to pyca/cryptography's DER `ECDSA` verifier — no raw
+    conversion; its own EC2 test vectors are DER (`MEUC…`).
+  - **ecdsa.com** (the py_webauthn demo, 3.0.1): fed a raw 64-B sig
+    it reproduces the user's exact webauthn.io error.
+  - Browsers emit DER: real assertion signatures are 64–72 VARIABLE
+    bytes (the INTEGER sign-pad), never a fixed 64.
+- **Fix (fw 1.0.8):** `fido_ecdsa_der_encode()` (fido_cose.c) —
+  minimal DER INTEGER encoding (leading zero octets stripped; a single
+  0x00 sign-pad when the high bit is set — byte-identical to
+  OpenSSL/browser output; 10–72 B, 70 B in the common case). Applied
+  at the CTAP layer in `ga_assert()` and `mc_create()`; the key-backend
+  vtable contract stays raw R‖S 64 B. `FIDO_CTAP_MC_RESP_MAX` 288 →
+  296 (the 72-B DER max); `FIDO_CTAP_GA_RESP_MAX` 424 unchanged
+  (headroom).
+- **Harness correction:** the fido2-lib patch's ECDSA-raw-acceptance
+  part was a MISTAKE — it bent the harness to a non-compliant device
+  (inverting the ground rule that the spec decides, never the harness
+  behaviour). REVERTED: fido2-lib's stock `derToRaw()` + webcrypto
+  verify is correct and now works unmodified. The attestationObject
+  integer-key normalization (a genuine fido2-lib parser bug) REMAINS;
+  patch renamed `fido2-lib-3.5.6-attestation-cbor.patch` (2 files /
+  4 hunks, round-trip-verified). The local fido2-demonstration "pass"
+  of the C20 era was therefore NOT proof of compliance — the
+  webauthn.io round is the compliance check.
+- **Lesson:** when a spec-conformant peer rejects the wire, fetch the
+  spec section VERBATIM before blaming the peer. "RFC 8152 says raw"
+  was true of COSE_Sign and wrong of the WebAuthn `sig` — one section
+  (§6.5.5) decides, and it says DER.
 
 ## Bench environment (facts)
 
@@ -811,6 +862,10 @@ new primary-source evidence.
   11 strengthened (apply before any open, not just after a reflash;
   never toggle DTR/RTS; a silent console is a port-STATE bug —
   `stty -a` first, never hardware diagnostics).
+   **SUPERSEDED (2026-11-06, SD-8):** the "raw R||S is what the
+   WebAuthn spec mandates" claim in this entry is RETRACTED — W3C L3
+   §6.5.5 mandates ASN.1 DER for ES256 `sig` values; the raw-acceptance
+   patch part was reverted (see SD-8 + the SD-8 history entry).
 
  - **C20-prep 2: SD-7 device fix (37-byte assertion authData) + offline
    bench PASS** (2026-11-06): the offline bench's ASSERTION half failed
@@ -850,6 +905,32 @@ new primary-source evidence.
    limitation, not a device issue; the DEVICE counter is what's under
    test and it is strictly increasing.) Post-round: wipe + probe gate +
    `users.json` reset, then the phase commit.
+ - **SD-8: webauthn.io diagnosis INVERTED + DER fix (fw 1.0.8)** (2026-11-06):
+   the webauthn.io login failed ("Could not verify authentication
+   signature") while the local fido2-demonstration passed — fetched W3C
+   WebAuthn L3 §6.5.5 verbatim: ES256 `sig` values MUST be ASN.1 DER
+   `Ecdsa-Sig-Value` (RFC 3279 §2.2.3), for the assertion AND the packed
+   attestation; the raw R‖S form is COSE_Sign (RFC 9052), not a WebAuthn
+   signature. The device was non-compliant; py_webauthn/webauthn.io were
+   spec-correct (verified: `verify_signature.py` is DER-only, its own EC2
+   vectors are DER, ecdsa.com reproduces the exact error). The C19/C20
+   "raw is spec-correct" conclusion is RETRACTED (the superseded history
+   entry above is annotated). The fido2-lib patch's ECDSA-raw part was a
+   mistake (harness bent to the device) → REVERTED; the attestationObject
+   key normalization remains (patch renamed
+   `fido2-lib-3.5.6-attestation-cbor.patch`, 2 files / 4 hunks,
+   round-trip-verified). Fix: `fido_ecdsa_der_encode()` in fido_cose.c
+   (minimal INTEGERs: zero-strip + 0x00 sign-pad, OpenSSL-identical,
+   10–72 B) used in `ga_assert()` + `mc_create()`; backend vtable stays
+   raw; `FIDO_CTAP_MC_RESP_MAX` 288→296; KATs re-pinned (6 sig arrays →
+   70-B DER; responses MC 254→260 B, GA 180→186 / 178→184 B) + new
+   `t_ecdsa_der()` (pad/trim corners); ctest 9/9, test_ctap 736 checks.
+   Bench verifiers parse DER (`parse_ecdsa_der()` in fido_mc.py,
+   strict-minimal check); fw refs 1.0.8; uf2 md5
+   `d7f8e54261ca06b856d8a39aacf89127`. Settled as **SD-8**
+   (user-confirmed). Remaining: flash + probe + offline bench +
+   webauthn.io browser round + commit.
+
 
 ## Goal
 

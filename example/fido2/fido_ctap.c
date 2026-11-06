@@ -1003,6 +1003,18 @@ static int ga_assert(fido_ctap_ctx_t *ctx, const fido_ga_enum_t *en, int idx,
         *resp_len = 1;
         return 1;
     }
+    // WebAuthn L3 section 6.5.5: the ES256 "sig" value MUST be an ASN.1
+    // DER Ecdsa-Sig-Value (RFC 3279 section 2.2.3) — not the raw R||S
+    // the key backend produces (that is the COSE_Sign form, RFC 9052).
+    // The raw form broke every py_webauthn RP (webauthn.io round C20+).
+    uint8_t sig_der[FIDO_ECDSA_DER_SIG_MAX];
+    const uint32_t sig_der_len =
+        fido_ecdsa_der_encode(sig, sig_der, sizeof sig_der);
+    if (0 == sig_der_len) {
+        resp[0]   = FIDO_CTAP2_ERR_OTHER;   // cannot happen: sized for max
+        *resp_len = 1;
+        return 1;
+    }
 
     // Response (SD-6): INTEGER top-level keys; TEXT keys in the nested
     // credential and user maps. numberOfCredentials is present on the
@@ -1021,7 +1033,7 @@ static int ga_assert(fido_ctap_ctx_t *ctx, const fido_ga_enum_t *en, int idx,
     fido_cbor_enc_uint(&e, 2);
     fido_cbor_enc_bytes(&e, authdata, n);
     fido_cbor_enc_uint(&e, 3);
-    fido_cbor_enc_bytes(&e, sig, sizeof sig);
+    fido_cbor_enc_bytes(&e, sig_der, sig_der_len);
     fido_cbor_enc_uint(&e, 4);
     fido_cbor_enc_map(&e, 1);
     fido_cbor_enc_text(&e, "id");
@@ -1127,6 +1139,18 @@ static int mc_create(fido_ctap_ctx_t *ctx, uint8_t *resp, uint32_t resp_max,
         *resp_len = 1;
         return 1;
     }
+    // WebAuthn L3 section 6.5.5: the packed attestation "sig" MUST be
+    // an ASN.1 DER Ecdsa-Sig-Value (RFC 3279 section 2.2.3) — not the
+    // raw R||S the key backend produces (the COSE_Sign form, RFC 9052).
+    uint8_t sig_der[FIDO_ECDSA_DER_SIG_MAX];
+    const uint32_t sig_der_len =
+        fido_ecdsa_der_encode(sig, sig_der, sizeof sig_der);
+    if (0 == sig_der_len) {
+        ctx->pending_active = false;
+        resp[0]   = FIDO_CTAP2_ERR_OTHER;   // cannot happen: sized for max
+        *resp_len = 1;
+        return 1;
+    }
 
     // Record the credential (the store persists through its save hook
     // FIRST — a failed persistence leaves the store unchanged and the
@@ -1170,7 +1194,7 @@ static int mc_create(fido_ctap_ctx_t *ctx, uint8_t *resp, uint32_t resp_max,
     fido_cbor_enc_text(&e, "alg");
     fido_cbor_enc_negint(&e, FIDO_CTAP_ALG_ES256);
     fido_cbor_enc_text(&e, "sig");
-    fido_cbor_enc_bytes(&e, sig, sizeof sig);
+    fido_cbor_enc_bytes(&e, sig_der, sig_der_len);
     if (e.overflow) {
         // Cannot happen with a resp_max of FIDO_CTAP_MC_RESP_MAX; a
         // hostile caller with a tiny buffer gets a status-only answer.

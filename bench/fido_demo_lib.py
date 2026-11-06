@@ -1,21 +1,11 @@
 #!/usr/bin/env python3
 """fido_demo_lib.py — offline replica of the fido2-demonstration round.
 
-The browser round on https://localhost:8888 (fido2-demonstration, fido2-lib
-3.5.6 on Node 24) failed server-side with "packed attestation signature
-verification failed" even though the device's registration and assertion
-crypto are spec-correct (fido_mc.py / fido_ga.py, and webauthn.io /
-py_webauthn in round C19). Root cause: fido2-lib's verifySignature()
-unconditionally derToRaw()'s ECDSA signatures before webcrypto.subtle.
-verify(); Node >= 24 webcrypto wants raw R||S, so the stock library only
-ever accepts DER — but WebAuthn (RFC 8152 §3.4) mandates fixed-size raw
-R||S, which is what this device sends (and what real authenticators send).
+Replays the browser round on https://localhost:8888 (fido2-demonstration,
+fido2-lib 3.5.6 on Node 24) WITHOUT a browser, against the device's REAL
+wire output:
 
-The harness was patched (patches/fido2-lib-3.5.6-raw-ecdsa.patch in the
-fido2-demonstration checkout). This script proves the patched harness
-accepts the device's REAL output end-to-end, without a browser:
-
-  1. wipe, INIT (fw 1.0.7 gate).
+  1. wipe, INIT (fw 1.0.8 gate).
   2. makeCredential the way the demo's Firefox round sends it: rp.id
      "localhost", a 128-byte challenge base64url'd inside a synthetic
      clientDataJSON (type webauthn.create — the browser's spec form;
@@ -34,7 +24,17 @@ accepts the device's REAL output end-to-end, without a browser:
      prevCounter + credentialPublicKeyPem taken from the attestation
      result, as index.js stores and reuses them.
 
-Exit 0 = the patched harness validates both halves of the round.
+Signature encoding: the device emits ASN.1 DER Ecdsa-Sig-Values —
+WebAuthn L3 section 6.5.5 MANDATES DER for ES256 "sig" values (both
+the assertion and the packed attestation signatures) — so fido2-lib's
+STOCK derToRaw() path verifies them with no ECDSA patch. The one
+harness patch that remains is the attestationObject integer-key
+normalization (patches/fido2-lib-3.5.6-attestation-cbor.patch):
+fido2-lib's attestation parser requires TEXT fmt/attStmt/authData
+keys, but every real CTAP2 authenticator emits INTEGER keys (1/2/3
+per the CTAP 2.3 PS makeCredential response table).
+
+Exit 0 = the harness validates both halves of the round.
 
 No third-party dependencies — plain /dev/hidraw + /dev/ttyUSB0.
 """
@@ -60,6 +60,7 @@ from fido_mc import (  # noqa: E402
     _ecdsa_selftest,
     _ecdsa_verify_raw,
     console_cmd,
+    parse_ecdsa_der,
     read_until,
 )
 from fido_ga import (  # noqa: E402
@@ -184,7 +185,7 @@ def main():
         cid = r[15:19]
         print(f'INIT  -> cid={cid.hex()} fw={r[20]}.{r[21]}.{r[22]} '
               f'caps={r[23]:#04x}')
-        assert r[20:23] == bytes([1, 0, 7]), 'firmware must be 1.0.7'
+        assert r[20:23] == bytes([1, 0, 8]), 'firmware must be 1.0.8'
         assert r[23] == 0x07, 'caps must be 0x07'
 
         assert _ecdsa_selftest(), 'ECDSA self-test failed'
@@ -199,8 +200,8 @@ def main():
               f'(deferred UP)')
         time.sleep(2.0)
         print(f'console -> up: {console_cmd("up").strip()!r}')
-        mc_resp, ka1 = read_until(fd, 0x90, 254)
-        print(f'MC resp -> 254 bytes, {ka1} keep-alive(s)')
+        mc_resp, ka1 = read_until(fd, 0x90, (258, 262))
+        print(f'MC resp -> {len(mc_resp)} bytes, {ka1} keep-alive(s)')
         assert mc_resp[0] == 0x00, f'MC status must be 0x00, {mc_resp[0]:#04x}'
         # authData sits at a fixed offset in the packed attestation object
         # (same layout as fido_ga.py): resp[13:13+164].
@@ -243,14 +244,15 @@ def main():
             'GA authData rpIdHash != sha256(rpId)'
         assert ga_flags == 0x01, f'GA flags must be 0x01 (UP only), {ga_flags:#04x}'
         assert ga_ctr == mc_ctr + 1, 'GA counter must be MC counter + 1'
-        # Raw-verify the assertion signature (the device-side sanity check;
-        # the fido2-lib check below is the one that matters for the demo).
-        r_ = int.from_bytes(ga_sig[0:32], 'big')
-        s_ = int.from_bytes(ga_sig[32:64], 'big')
+        # Device-side sanity check: parse the DER (WebAuthn L3 6.5.5)
+        # and verify against the registration key (the fido2-lib check
+        # below is the one that matters for the demo).
+        r_, s_ = parse_ecdsa_der(ga_sig)
         assert _ecdsa_verify_raw(px, py, r_, s_,
                                  hashlib.sha256(ga_auth + cdh2).digest()), \
             'assertion signature does not verify against the registration key'
-        print('  sig raw-verified against the registration key: True')
+        print(f'  sig DER-parsed ({len(ga_sig)} B) and verified against '
+              f'the registration key: True')
 
         # --- 4. the demo's server-side validation (patched fido2-lib) ------
         case = {
@@ -304,9 +306,9 @@ def main():
         assert 'ASSERTION OK' in p.stdout, 'no ASSERTION OK from fido2-lib'
 
         print('\n=== VERDICT ===')
-        print('  the patched fido2-demonstration harness validates BOTH')
-        print('  halves of the round against the device\'s real output')
-        print('  (attestation + deferred-UP assertion, raw R||S sigs).')
+        print('  the fido2-demonstration harness validates BOTH halves of')
+        print('  the round against the device\'s real output (attestation +')
+        print('  deferred-UP assertion, DER sigs per WebAuthn L3 6.5.5).')
         print('  The browser round should now pass end to end.')
     finally:
         os.close(fd)

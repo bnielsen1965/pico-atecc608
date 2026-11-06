@@ -122,13 +122,15 @@ enum {
 // TRNG — browsers accept 32-64).
 #define FIDO_MC_CRED_ID_LEN         32
 // Largest MakeCredential response this firmware builds: map(3)
-// with a 64-byte credential ID and the 77-byte COSE key = 286 bytes
-// (the device mints 32-byte IDs, so real responses are 254).
-#define FIDO_CTAP_MC_RESP_MAX       288
+// with a 64-byte credential ID, the 77-byte COSE key and the 72-byte
+// DER attestation signature = 294 bytes (the device mints 32-byte IDs,
+// so real responses are 260).
+#define FIDO_CTAP_MC_RESP_MAX       296
 // Largest getAssertion / get_next_assertion response this firmware
-// builds: the 5-entry map with a 64-byte credential ID, the 196-byte
-// authData (32+1+4+16+2+64+77) and the 64-byte signature = 419 bytes
-// (300 with the 32-byte IDs the device stores).
+// builds: the 5-entry map with a 64-byte credential ID, the 37-byte
+// assertion authData (32+1+4 — no attested credential data, WebAuthn
+// L3 6.3.3) and the 72-byte DER signature = 278 bytes (246 with the
+// 32-byte IDs the device stores).
 #define FIDO_CTAP_GA_RESP_MAX       424
 // The RESET 10-second power-on window (CTAP v2.3 §6.6, displayless
 // authenticators): a RESET arriving later answers NOT_ALLOWED.

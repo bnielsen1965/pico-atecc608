@@ -26,3 +26,24 @@
 // (FIDO_COSE_ES256_LEN), or 0 when out is too small.
 uint32_t fido_cose_encode_es256(const uint8_t pub[64], uint8_t *out,
                                 uint32_t out_max);
+
+// The maximum encoded length of a P-256 ECDSA signature as an ASN.1 DER
+// Ecdsa-Sig-Value: SEQUENCE(2) + two INTEGERs, each at most 2 (tag +
+// length) + 1 (sign pad) + 32 (value) = 72.
+#define FIDO_ECDSA_DER_SIG_MAX 72
+
+// Encode a raw P-256 ECDSA signature (R(32) || S(32), the ATECC608 Sign
+// output) as the ASN.1 DER Ecdsa-Sig-Value that WebAuthn L3 section 6.5.5
+// MANDATES for ES256 assertion and packed-attestation signatures (RFC 3279
+// section 2.2.3):
+//
+//   SEQUENCE { r INTEGER, s INTEGER }
+//
+// Each INTEGER is minimally encoded (leading zero octets stripped, a 0x00
+// sign-pad octet added when the high bit is set) — byte-identical to what
+// OpenSSL and the browsers emit. (The raw R||S form is the COSE_Sign
+// encoding, RFC 9052 — NOT what a WebAuthn "sig" value carries.) Returns
+// the encoded length (10..FIDO_ECDSA_DER_SIG_MAX), or 0 when out is too
+// small.
+uint32_t fido_ecdsa_der_encode(const uint8_t raw[64], uint8_t *out,
+                               uint32_t out_max);
