@@ -119,7 +119,8 @@ enum {
 #define FIDO2_CAPABILITIES (FIDO2_CAP_WINK | FIDO2_CAP_CBOR | FIDO2_CAP_NMSG)
 
 // Protocol version reported by INIT: CTAPHID protocol 2. The device
-// version is vendor-defined (spec 8.1.9.1.3); report 1.0.2.
+// version is vendor-defined (spec 8.1.9.1.3); the history below is the
+// changelog.
 //
 // The build number doubles as the on-wire FINGERPRINT of what is
 // actually flashed: read the 3-byte version out of any usbmon INIT
@@ -158,11 +159,18 @@ enum {
 //          for ES256 "sig" values; the raw R||S (COSE_Sign, RFC 9052)
 //          form was a device bug that broke py_webauthn RPs
 //          (webauthn.io: "Could not verify authentication signature")
+//   1.0.9  Phase 5 hardening: a structurally truncated / malformed
+//          CBOR request (a map with fewer pairs than its header
+//          declares, a string cut mid-payload, ...) now answers
+//          CTAP2_ERR_INVALID_CBOR (0x12); 0x11
+//          CTAP2_ERR_CBOR_UNEXPECTED_TYPE is reserved for a
+//          well-formed item of the wrong type (CTAP 2.3 §11.2.9.1.3).
+//          Happy-path wire format unchanged.
 enum {
     FIDO2_PROTO_VERSION    = 2,
     FIDO2_FW_VERSION_MAJOR = 1,
     FIDO2_FW_VERSION_MINOR = 0,
-    FIDO2_FW_VERSION_BUILD = 8,
+    FIDO2_FW_VERSION_BUILD = 9,
 };
 
 // Timing, in ms. A busy (in-flight) message is aborted with

@@ -141,14 +141,14 @@ decisions register, and the git log.)
     version (the probe) + post-reboot HID enumeration (`lsusb` / `findmnt
     -t vfat`), never a volume read-back.
 
-## Current state (2026-11-06) — **SD-8 COMPLETE + VERIFIED + committed (`fa4e139`, fw 1.0.8).** The webauthn.io login failure was diagnosed and INVERTED: W3C WebAuthn L3 §6.5.5 MANDATES ASN.1 DER `Ecdsa-Sig-Value` (RFC 3279 §2.2.3) for ES256 `sig` values — assertion AND packed attestation. The device's raw R‖S output was a **device bug** (the raw form is the COSE_Sign encoding, RFC 9052). py_webauthn/webauthn.io were spec-correct. Settled as **SD-8** (user-confirmed); the fix: DER encoder `fido_ecdsa_der_encode()` in fido_cose.c (minimal INTEGERs: leading-zero strip + 0x00 sign-pad, OpenSSL-identical, 10–72 B), used in `ga_assert()` + `mc_create()`; `FIDO_CTAP_MC_RESP_MAX` 288→296; KATs re-pinned (6 sig arrays → 70-B DER; MC 254→260 B, GA 180→186 / 178→184 B) + new `t_ecdsa_der()` — ctest 9/9, test_ctap **736 checks**. The fido2-lib patch's ECDSA-raw-acceptance part was a mistake (bent the harness to a non-compliant device — the inverted ground rule) and is REVERTED; the attestationObject integer-key normalization remains (patch renamed `fido2-lib-3.5.6-attestation-cbor.patch`, 2 files / 4 hunks, round-trip-verified). **ALL VERIFIED (2026-11-06):** fw 1.0.8 flashed; probe gate PASS; offline bench PASS (both a padded 261-B/71-B and an unpadded 260-B/70-B DER attestation seen on the wire — the sign-pad path is live); webauthn.io browser round **PASS** (register → login → replug+login → reflash survival) against stock py_webauthn. Device wiped (0 creds, counter 0). **NEXT: Phase 5 (hardening + docs).**
+## Current state (2026-11-06) — **Phase 5 (hardening + docs): error paths + docs COMPLETE, uncommitted; fw 1.0.9 built, pending the device verification round.** SD-8 (DER signatures) was completed, verified and committed on 1.0.8 (`fa4e139` + `c87b271`; webauthn.io round PASS). Phase 5 audit: the firmware's error paths were already robust — missing params (0x14), type errors (0x11), store-full (0x28), counter-increment failure (0x7F), keep-alive sanity — all KAT-pinned; codec-level CBOR strictness is covered in test_cbor.c. ONE real gap found + fixed: **structurally truncated / malformed CBOR answered 0x11 (CBOR_UNEXPECTED_TYPE) where the spec-correct code is 0x12 INVALID_CBOR** (CTAP 2.3 §11.2.9.1.3) — the 35 conflated decode-failure/type-mismatch sites in parse_make_credential + ga_parse are split (decode fail → 0x12, type mismatch stays 0x11); new `t_dispatch_truncated()` pins 0x12 at EVERY byte cut-point of valid MC/GA requests + a truncated map header — test_ctap 736 → **1189 checks**, ctest 9/9. fw **1.0.9** (happy-path wire format unchanged; uf2 md5 `2df53d9f3700c13bf86fbd92d4a0564f`), bench gates → 1.0.9. Docs: `example/README.md` gained the "FIDO2 example" section (USB device, no console app: demo flow, no-UV/auto-UP-via-console caveat, 4-credential limit, slot map, reflash/counter behavior, the 2.3 PS command table) and the main README the fido2 build outputs, repo layout and the five fido2 host tests. **NEXT: user flashes 1.0.9 → probe gate + offline bench (happy-path regression) → wipe → commit Phase 5.**
 
 - **How we got here (the C13–C17 arc — settled):** C13 re-keyed GET_INFO to the CTAP 2.1+ numbering (fw 1.0.4); C14 fixed the COSE `crv` to 1; C16 fixed the COSE layout to the 5-entry CTAP2-wire form (fw 1.0.5 — **SD-5**); the wire was then verified by probe + `fido_mc.py` E2E (real raw-digest ECDSA check). C17, the first browser round after the C16 fix, failed only on **round timing** — `UserActionTimeout`: the 30-s UP window expired before `up` arrived. No further firmware/COSE bug has been found since. Full narrative: the History section.
 - **C18 (webauthn.io) + C19 (xorengineering.com/fido2/): registration SUCCESS on both harnesses** (2026-11-05, fw 1.0.5). The C17 fix was pure protocol: `up` within ~2 s of the Register click (inside the 30-s window). RUST_LOG clean on both (zero `byte array, expected i64`, zero `UserActionTimeout`). Caveat: the webauthn.io page then offers an “authentication test” — getAssertion is Phase 4 (unimplemented; a clean 1-byte `INVALID_COMMAND` today), so do not click it until then.
-**NEXT (Phase 5 — hardening + docs):**
-1. **Error paths:** CBOR decode failures, missing params, full store, counter increment failure → correct CTAP status codes (no crashes, no hangs, keep-alive stays sane).
-2. **Docs:** `example/README.md` "FIDO2 example" section (it's a USB device, no console app: demo flow, auto-UV caveat, 4-credential limit, slot map, reflash/counter behavior); main README examples list + build outputs.
-3. Commit per phase; keep this file's Current state current.
+**NEXT (Phase 5 — wrap-up):**
+1. **User flashes 1.0.9** (BOOTSEL) → probe gate (fw 1.0.9) + offline bench (the happy-path regression: MC + GA + stock fido2-lib verify).
+2. Wipe (0 creds, counter 0) + probe gate.
+3. Commit Phase 5 (firmware 1.0.9 + the split-error KATs + bench gates + both READMEs + this file).
 - **Chip identity:** ATECC608C (part 0x60, rev 0x05). **Console routing:** FIDO2 printf → UART0/CP210x (/dev/ttyUSB0), NOT USB HID. **YubiKey 5** (user-provided) is available as a comparison capture if a real 5-entry COSE key from a shipping token is wanted (its own webauthn.io/fido2-demonstration failures are separate, higher-level — NotAllowedError/NotAllowed, not COSE).
 
 ## Settled decisions (do not re-litigate — check here BEFORE re-deriving)
@@ -929,6 +929,32 @@ new primary-source evidence.
    `d7f8e54261ca06b856d8a39aacf89127`. Settled as **SD-8**
    (user-confirmed). Remaining: flash + probe + offline bench +
    webauthn.io browser round + commit.
+- **Phase 5 (hardening + docs) — error paths + docs COMPLETE, uncommitted;
+   fw 1.0.9** (2026-11-06): the audit found the firmware's error
+   paths already robust (missing params 0x14, type errors 0x11,
+   store-full 0x28, counter-increment failure 0x7F, keep-alive
+   sanity — all KAT-pinned; codec-level CBOR strictness in
+   test_cbor.c). ONE real gap found and fixed: structurally
+   truncated / malformed CBOR (a map with fewer pairs than its
+   header declares, a string cut mid-payload, a 2-byte-length map
+   header with one length byte) answered 0x11
+   CBOR_UNEXPECTED_TYPE where the spec-correct code is 0x12
+   INVALID_CBOR (CTAP 2.3 §11.2.9.1.3) — the 35 conflated
+   decode-failure/type-mismatch sites in parse_make_credential +
+   ga_parse are split (decode fail → 0x12, type mismatch stays
+   0x11); new `t_dispatch_truncated()` pins 0x12 at EVERY byte
+   cut-point of a valid MC/GA request + the truncated map header,
+   asserting no deferred transaction survives a parse failure —
+   test_ctap 736 → 1189 checks, ctest 9/9. fw 1.0.9 (happy-path
+   wire format unchanged; uf2 md5
+   `2df53d9f3700c13bf86fbd92d4a0564f`), bench gates → 1.0.9.
+   Docs: `example/README.md` gained the "FIDO2 example" section
+   (USB device, no console app; demo flow; no-UV + console-`up`
+   caveat; 4-credential limit; slot map; reflash/counter behavior;
+   the 2.3 PS command table) and the main README the fido2 build
+   outputs, repo layout and the five fido2 host tests. Remaining:
+   flash 1.0.9 + probe + offline bench (happy-path regression) →
+   commit.
 
 
 ## Goal

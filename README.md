@@ -119,21 +119,25 @@ cmake .. -DPICO_SDK_PATH="$HOME/Projects/pico-sdk"
 make -j
 
 # Flash over USB: drag build/example/console/pico-atecc608.uf2 (the
-# console) or build/example/vault/pico-atecc608-vault.uf2 (the vault demo)
-# to the RP2350 drive, or use the `bootrom` command to re-enter BOOTSEL.
+# console), build/example/vault/pico-atecc608-vault.uf2 (the vault
+# demo) or build/example/fido2/pico-atecc608-fido2.uf2 (the FIDO2
+# key) to the RP2350 drive, or use the `bootrom` command to
+# re-enter BOOTSEL.
 ```
 
 The build produces the example images — `build/example/console/`
-(`pico-atecc608.uf2`, the console) and `build/example/vault/`
-(`pico-atecc608-vault.uf2`, the password-store demo), each with `.bin` /
-`.elf` / `.map` — and two static libraries in `build/`:
+(`pico-atecc608.uf2`, the console), `build/example/vault/`
+(`pico-atecc608-vault.uf2`, the password-store demo) and
+`build/example/fido2/` (`pico-atecc608-fido2.uf2`, the FIDO2/passkey
+authenticator), each with `.bin` / `.elf` / `.map` — and two static
+libraries in `build/`:
 **`libatecc608.a`** (the module) and **`libcryptoauth_core.a`** (the
 fetched cryptoauthlib core, compiled for the Pico target).
 
 The examples build by default; to build only the library use
-`-DATECC608_BUILD_EXAMPLES=OFF`. The example commands (diagnostic smoke
-tests, the `prov` provisioning set, and the vault password-store demo) are
-documented in [`example/README.md`](example/README.md).
+`-DATECC608_BUILD_EXAMPLES=OFF`. The examples (diagnostic smoke tests,
+the `prov` provisioning set, the vault password-store demo, and the
+FIDO2 key) are documented in [`example/README.md`](example/README.md).
 
 ---
 
@@ -158,6 +162,23 @@ ctest --test-dir tests/build --output-on-failure
   against the mock's deterministic PRF.
 - `test_vault_gcm` — the vault example's pure-C AES-256-GCM (the exact
   device code) against OpenSSL-verified NIST GCM vectors.
+- `test_sha256` — the FIDO2 example's pure-C SHA-256 (the exact device
+  code) against NIST vectors.
+- `test_cred` — the FIDO2 credential store: record (de)serialization,
+  CRC, alloc/find/insert/erase over the 4-slot array.
+- `test_cbor` — the FIDO2 example's minimal CTAP2 CBOR codec: RFC 8949
+  known-answer vectors, the CTAP2 canonical-form strictness (non-
+  canonical widths rejected), definite-length-only, and the
+  nesting-depth safety rail.
+- `test_ctaphid` — the CTAPHID transport state machine: packet
+  framing/sequencing, channel allocation, INIT/PING/WINK, keep-alive
+  throttling, and the deferred user-presence transaction lifecycle
+  (cancel, timeout, eviction).
+- `test_ctap` — the CTAP2 command dispatch: GET_INFO / MakeCredential /
+  GetAssertion / GET_NEXT_ASSERTION / RESET byte-pinned against a
+  deterministic key-backend fake (the full CTAP2 error table, the
+  error-ordering rules, store-full and backend-failure paths, and a
+  structurally-truncated-CBOR sweep at every cut point).
 
 ---
 
@@ -167,6 +188,7 @@ ctest --test-dir tests/build --output-on-failure
 example/              proof-of-concept examples (NOT part of the library):
                       console/ (provisioning + diagnostic console),
                       vault/ (PIN-gated password-store demo),
+                      fido2/ (CTAP2/FIDO2 passkey authenticator, USB HID),
                       tools/ (dump_devconfig host tool), common/ (shared
                       dev config), submodules pico-command-line/ (console
                       CLI framework) and pico-littlefs/ (Pico-side

@@ -38,6 +38,10 @@ the console and the byte-plan tool always encode the same image.
   app): the chip is the KDF master (slot 7), the Pico does AES-256-GCM
   (pure C, NIST-vector-verified) over flat littlefs entries
   `/v_<name>`. See the "Vault example" section below.
+- **`fido2/`** — CTAP2 (FIDO2 / passkey) authenticator over USB HID (a
+  FIDO token, **not** a console app): the chip is the credential-key
+  vault (slots 3–6), the Pico runs the CTAP protocol + the
+  resident-credential store. See the "FIDO2 example" section below.
 - **`tools/dump_devconfig.c`** — host tool that encodes the agreed dev
   config and prints the exact 128-byte config-zone image + summary CRC
   from the module's real builder (the byte plan).
@@ -166,6 +170,85 @@ ever increment (anti-rollback / CTAP semantics) and cannot be reset.
   is locked, so it is never re-keyed). The demo works with it as-is; a
   real deployment provisions a random master into slot 7 during
   bring-up, before the data-zone lock.
+
+## FIDO2 example
+
+A CTAP2 (FIDO2 / passkey) authenticator: `example/fido2/` builds
+`build/example/fido2/pico-atecc608-fido2.uf2`. Unlike the console and
+the vault, this is a **USB device, not a console app** — the
+application is the USB HID interface (a FIDO token: usage page 0xF1D0,
+VID:PID `2e8a:000b`, 64-byte IN/OUT reports, no report IDs); the
+serial console is only for provisioning and the two admin commands
+below.
+
+**Division of labour:** the chip holds the credential keys — four EC
+P-256 pairs in slots 3–6, generated on-chip (GenKey) at registration;
+the private keys never leave the chip, and the chip signs the
+32-byte digests as-is (external-digest mode — the Pico computes
+SHA-256 in hardware and hands the digest over, the chip never
+hashes). The Pico does the CTAP protocol (CBOR parse/encode, the
+user-presence state machine, keep-alives) and stores the
+resident-credential metadata.
+
+**Storage:** one littlefs file per credential, `/f2_3`…`/f2_6` (a
+CRC-32-checked record: slot, rpIdHash, credId, user handle, names),
+plus `/f2_cnt` (the CTAP sync counter, 4 bytes big-endian). The
+littlefs volume @ 0x80000 **survives uf2 reflashes** — credentials
+and the counter persist across reflashes. **4 slots = 4 discoverable
+credentials total**, across all sites; a full store answers
+`KEY_STORE_FULL` (0x28).
+
+**User presence / user verification:** the key has no touch sensor —
+user presence is driven from the serial console (UART0, 115200 8N1;
+the console also runs on USB CDC): typing `up` records a touch for
+the in-flight transaction (keep-alives flow at ~500 ms while the
+device waits; the LED is solid when provisioned and idle, flickers on
+WINK). There is **no user verification**: the device advertises
+`FIDO_2_0` without `clientPin`, and `uv: true` is answered
+`UNSUPPORTED_OPTION` (0x2C) — relying parties that *require* UV
+cannot use it; browsers run it as a UV-less key. A physical button on
+a free GPIO can feed the same `user_present` flag later without
+touching the CTAP layer.
+
+| Console command | What it does |
+|---|---|
+| `up` | record a user-presence touch for the pending makeCredential / getAssertion |
+| `wipe` | erase the credential store + zero the sync counter (the console twin of CTAP RESET) |
+
+**Commands (the CTAP 2.3 PS table, the protocol spec of record):**
+`authenticatorMakeCredential` (0x01), `authenticatorGetAssertion`
+(0x02), `authenticatorGetInfo` (0x04), `authenticatorReset` (0x07),
+`authenticatorGetNextAssertion` (0x08); `authenticatorClientPIN`
+(0x06) is recognised and answered `INVALID_COMMAND` (0x01), as is
+anything in the vendor range. U2F (CTAP1) commands get the U2F
+"no U2F here" status word. Note the 2.3 table numbers differ from the
+older 2.0–2.2 numbering (where GET_INFO was 0x07, RESET 0x06 and GNA
+0x03) — tools built against the old table will not find the commands.
+
+**The demo flow:** register (the browser's "Add a passkey") → the
+device waits for `up` → GenKey in a free slot → **packed
+self-attestation** (ES256, no x5c; the signature is ASN.1 DER
+`Ecdsa-Sig-Value` per WebAuthn L3 §6.5.5) → the credential is
+stored. Login (getAssertion) → `up` → the chip signs
+SHA-256(authData ‖ clientDataHash) with the credential key → the
+assertion carries the 37-byte authData (rpIdHash ‖ flags(UP) ‖
+signCount — no attested credential data, per WebAuthn L3 §6.3.3) +
+the DER signature, and the sync counter increments per signature.
+Verified end to end against webauthn.io and the FIDO Alliance's
+fido2-demonstration (register → login → replug → reflash survival).
+The AAGUID is `65 F5 10 7F 31 A6 47 85 93 01 67 88 E1 0E C7 76`.
+
+**Startup contract (same as the others):** the chip must already be
+provisioned — config and data zones locked, slots 3–6 GenKey-capable,
+`/io_key.bin` present (I/O protection). Unprovisioned, the LED blinks
+slowly and the device answers no CTAP; provision it with the console
+example first ([`docs/BRINGUP.md`](../docs/BRINGUP.md)).
+
+**Bench:** the `bench/` folder (repo root) drives the key over
+`/dev/hidraw*` + the console — `fido_probe.py` (transport + GET_INFO
+gate), `fido_mc.py` / `fido_ga.py` (byte-pinned registration /
+assertion rounds), `fido_demo_lib.py` (an offline replica of the
+fido2-demonstration browser round, verified with stock fido2-lib).
 
 ## Application scenarios — provisioning guidance
 
@@ -315,6 +398,7 @@ LOCKED, slot 14 locked last) is [`docs/BRINGUP.md`](../docs/BRINGUP.md)
 
 The examples build with the top-level build (see the top-level README):
 `cmake .. && make` in `build/` produces
-`build/example/console/pico-atecc608.uf2` (the console) and
-`build/example/vault/pico-atecc608-vault.uf2` (the vault demo). To build
-only the library: `-DATECC608_BUILD_EXAMPLES=OFF`.
+`build/example/console/pico-atecc608.uf2` (the console),
+`build/example/vault/pico-atecc608-vault.uf2` (the vault demo) and
+`build/example/fido2/pico-atecc608-fido2.uf2` (the FIDO2 key). To
+build only the library: `-DATECC608_BUILD_EXAMPLES=OFF`.

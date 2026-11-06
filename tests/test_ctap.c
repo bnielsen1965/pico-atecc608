@@ -11,9 +11,10 @@
 // table, the error-ordering rules, the deferred user-presence state
 // machine — cancel, timeout, a stale touch, the second-while-pending
 // guard, the umount abort — the excludeList hit, the rk overwrite, the
-// store-full and key-backend failure paths, and the response: the
-// v2.1 layout byte-pinned against a deterministic key-backend fake),
-// and the unimplemented-command answer
+// store-full and key-backend failure paths, structurally truncated
+// requests (malformed CBOR -> CTAP2_ERR_INVALID_CBOR at every cut
+// point), and the response: the v2.1 layout byte-pinned against a
+// deterministic key-backend fake), and the unimplemented-command answer
 // (CTAP1_ERR_INVALID_COMMAND, the spec's MUST for a command code the
 // device does not implement).
 
@@ -2343,6 +2344,55 @@ static void t_ecdsa_der(void)
     CHECK(0 == fido_ecdsa_der_encode(raw, der, 69));
 }
 
+// Phase 5 hardening: structurally truncated requests — the CBOR
+// promises more than the buffer holds (a map with fewer pairs than its
+// header declares, a string cut mid-payload, ...). That is malformed
+// CBOR -> 0x12 INVALID_CBOR at EVERY cut point (0x11 is reserved for a
+// well-formed item of the wrong type). No deferred transaction may
+// survive a parse failure.
+static void t_dispatch_truncated(void)
+{
+    fido_ctap_ctx_t ctx;
+    mc_install(&ctx);
+    mc_reset();
+    uint8_t req[512];
+    uint8_t resp[FIDO_CTAP_GA_RESP_MAX];
+    uint32_t n;
+
+    // makeCredential: a valid request, cut at every byte from the map
+    // header on (a bare command byte is the missing-parameters case,
+    // pinned in t_mc_error_table).
+    n = build_mc(req, sizeof req, &(mc_opts_t){0});
+    CHECK(n >= 10);
+    for (uint32_t cut = 2; cut < n; cut++) {
+        uint32_t len = mc_dispatch(&ctx, req, cut, resp, sizeof resp);
+        CHECK(len == 1);
+        CHECK(resp[0] == FIDO_CTAP2_ERR_INVALID_CBOR);
+        CHECK(!fido_ctap_pending(&ctx));
+    }
+
+    // getAssertion: the same sweep.
+    n = build_ga(req, sizeof req, &(ga_opts_t){0});
+    CHECK(n >= 10);
+    for (uint32_t cut = 2; cut < n; cut++) {
+        uint32_t len = mc_dispatch(&ctx, req, cut, resp, sizeof resp);
+        CHECK(len == 1);
+        CHECK(resp[0] == FIDO_CTAP2_ERR_INVALID_CBOR);
+        CHECK(!fido_ctap_pending(&ctx));
+    }
+
+    // The map header itself truncated: a 2-byte-length map header with
+    // only one of its two length bytes — the header decode fails before
+    // any pair is read.
+    {
+        const uint8_t r[3] = { FIDO_CTAP_INS_MAKE_CREDENTIAL, 0x19, 0x00 };
+        const uint32_t len = mc_dispatch(&ctx, r, sizeof r, resp,
+                                         sizeof resp);
+        CHECK(len == 1 && resp[0] == FIDO_CTAP2_ERR_INVALID_CBOR);
+        CHECK(!fido_ctap_pending(&ctx));
+    }
+}
+
 
 int main(void)
 {
@@ -2409,6 +2459,7 @@ int main(void)
     t_reset_happy();
     t_reset_late();
     t_reset_errors();
+    t_dispatch_truncated();
 
     printf("%s: %d checks, %d failures\n",
            (s_failures == 0) ? "PASS" : "FAIL", s_checks, s_failures);

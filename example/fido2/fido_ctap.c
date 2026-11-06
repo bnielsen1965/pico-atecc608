@@ -262,7 +262,10 @@ static uint8_t parse_make_credential(fido_ctap_ctx_t *ctx,
     memset(&m, 0, sizeof m);
 
     fido_cbor_dec_init(&d, params, params_len);
-    if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL) || FIDO_CBOR_MAP != t) {
+    if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL)) {
+        return FIDO_CTAP2_ERR_INVALID_CBOR;
+    }
+    if (FIDO_CBOR_MAP != t) {
         return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
     }
 
@@ -273,14 +276,18 @@ static uint8_t parse_make_credential(fido_ctap_ctx_t *ctx,
     const uint64_t n_top = u;
     for (uint64_t i = 0; i < n_top; i++) {
         // Top-level keys are integers (CTAP v2.1 §8).
-        if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL) ||
-            FIDO_CBOR_UINT != t) {
+        if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL)) {
+            return FIDO_CTAP2_ERR_INVALID_CBOR;
+        }
+        if (FIDO_CBOR_UINT != t) {
             return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
         }
         switch (u) {
         case 1: {   // clientDataHash
-            if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen) ||
-                FIDO_CBOR_BYTES != t) {
+            if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen)) {
+                return FIDO_CTAP2_ERR_INVALID_CBOR;
+            }
+            if (FIDO_CBOR_BYTES != t) {
                 return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
             }
             if (32 != dlen) {
@@ -291,19 +298,25 @@ static uint8_t parse_make_credential(fido_ctap_ctx_t *ctx,
             break;
         }
         case 2: {   // rp
-            if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL) ||
-                FIDO_CBOR_MAP != t) {
+            if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL)) {
+                return FIDO_CTAP2_ERR_INVALID_CBOR;
+            }
+            if (FIDO_CBOR_MAP != t) {
                 return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
             }
             const uint64_t n_rp = u;
             for (uint64_t j = 0; j < n_rp; j++) {
-                if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen) ||
-                    FIDO_CBOR_TEXT != t) {
+                if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen)) {
+                    return FIDO_CTAP2_ERR_INVALID_CBOR;
+                }
+                if (FIDO_CBOR_TEXT != t) {
                     return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
                 }
                 if (2 == dlen && 0 == memcmp(data, "id", 2)) {
-                    if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen) ||
-                        FIDO_CBOR_TEXT != t) {
+                    if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen)) {
+                        return FIDO_CTAP2_ERR_INVALID_CBOR;
+                    }
+                    if (FIDO_CBOR_TEXT != t) {
                         return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
                     }
                     if (0 == dlen || dlen > sizeof m.rp_id) {
@@ -330,19 +343,25 @@ static uint8_t parse_make_credential(fido_ctap_ctx_t *ctx,
             // entity is storage metadata only: a request without user.id
             // gets a synthesized 32-byte handle (below, with the credId
             // mint); absent name/displayName stay empty.
-            if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL) ||
-                FIDO_CBOR_MAP != t) {
+            if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL)) {
+                return FIDO_CTAP2_ERR_INVALID_CBOR;
+            }
+            if (FIDO_CBOR_MAP != t) {
                 return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
             }
             const uint64_t n_user = u;
             for (uint64_t j = 0; j < n_user; j++) {
-                if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen) ||
-                    FIDO_CBOR_TEXT != t) {
+                if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen)) {
+                    return FIDO_CTAP2_ERR_INVALID_CBOR;
+                }
+                if (FIDO_CBOR_TEXT != t) {
                     return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
                 }
                 if (2 == dlen && 0 == memcmp(data, "id", 2)) {
-                    if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen) ||
-                        FIDO_CBOR_BYTES != t) {
+                    if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen)) {
+                        return FIDO_CTAP2_ERR_INVALID_CBOR;
+                    }
+                    if (FIDO_CBOR_BYTES != t) {
                         return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
                     }
                     if (0 == dlen || dlen > FIDO_CRED_USER_HANDLE_MAX) {
@@ -351,8 +370,10 @@ static uint8_t parse_make_credential(fido_ctap_ctx_t *ctx,
                     m.p.user_handle_len = (uint8_t)dlen;
                     memcpy(m.p.user_handle, data, dlen);
                 } else if (4 == dlen && 0 == memcmp(data, "name", 4)) {
-                    if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen) ||
-                        FIDO_CBOR_TEXT != t) {
+                    if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen)) {
+                        return FIDO_CTAP2_ERR_INVALID_CBOR;
+                    }
+                    if (FIDO_CBOR_TEXT != t) {
                         return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
                     }
                     if (0 == dlen || dlen > FIDO_CRED_NAME_MAX) {
@@ -362,8 +383,10 @@ static uint8_t parse_make_credential(fido_ctap_ctx_t *ctx,
                     memcpy(m.p.name, data, dlen);
                 } else if (11 == dlen &&
                            0 == memcmp(data, "displayName", 11)) {
-                    if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen) ||
-                        FIDO_CBOR_TEXT != t) {
+                    if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen)) {
+                        return FIDO_CTAP2_ERR_INVALID_CBOR;
+                    }
+                    if (FIDO_CBOR_TEXT != t) {
                         return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
                     }
                     if (0 == dlen || dlen > FIDO_CRED_DISPLAY_NAME_MAX) {
@@ -381,8 +404,10 @@ static uint8_t parse_make_credential(fido_ctap_ctx_t *ctx,
             break;
         }
         case 4: {   // pubKeyCredParams
-            if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL) ||
-                FIDO_CBOR_ARRAY != t) {
+            if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL)) {
+                return FIDO_CTAP2_ERR_INVALID_CBOR;
+            }
+            if (FIDO_CBOR_ARRAY != t) {
                 return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
             }
             m.has_pkcp = true;
@@ -392,14 +417,18 @@ static uint8_t parse_make_credential(fido_ctap_ctx_t *ctx,
                 int64_t alg = 0;
                 bool have_type = false;
                 bool type_pk = false;
-                if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL) ||
-                    FIDO_CBOR_MAP != t) {
+                if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL)) {
+                    return FIDO_CTAP2_ERR_INVALID_CBOR;
+                }
+                if (FIDO_CBOR_MAP != t) {
                     return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
                 }
                 const uint64_t n_pk = u;
                 for (uint64_t k = 0; k < n_pk; k++) {
-                    if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen) ||
-                        FIDO_CBOR_TEXT != t) {
+                    if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen)) {
+                        return FIDO_CTAP2_ERR_INVALID_CBOR;
+                    }
+                    if (FIDO_CBOR_TEXT != t) {
                         return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
                     }
                     if (3 == dlen && 0 == memcmp(data, "alg", 3)) {
@@ -416,8 +445,10 @@ static uint8_t parse_make_credential(fido_ctap_ctx_t *ctx,
                         have_alg = true;
                     } else if (4 == dlen &&
                                0 == memcmp(data, "type", 4)) {
-                        if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen) ||
-                            FIDO_CBOR_TEXT != t) {
+                        if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen)) {
+                            return FIDO_CTAP2_ERR_INVALID_CBOR;
+                        }
+                        if (FIDO_CBOR_TEXT != t) {
                             return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
                         }
                         type_pk = (10 == dlen &&
@@ -437,25 +468,33 @@ static uint8_t parse_make_credential(fido_ctap_ctx_t *ctx,
             break;
         }
         case 5: {   // excludeList
-            if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL) ||
-                FIDO_CBOR_ARRAY != t) {
+            if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL)) {
+                return FIDO_CTAP2_ERR_INVALID_CBOR;
+            }
+            if (FIDO_CBOR_ARRAY != t) {
                 return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
             }
             const uint64_t n_excl = u;
             for (uint64_t j = 0; j < n_excl; j++) {
-                if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL) ||
-                    FIDO_CBOR_MAP != t) {
+                if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL)) {
+                    return FIDO_CTAP2_ERR_INVALID_CBOR;
+                }
+                if (FIDO_CBOR_MAP != t) {
                     return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
                 }
                 const uint64_t n_ex = u;
                 for (uint64_t k = 0; k < n_ex; k++) {
-                    if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen) ||
-                        FIDO_CBOR_TEXT != t) {
+                    if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen)) {
+                        return FIDO_CTAP2_ERR_INVALID_CBOR;
+                    }
+                    if (FIDO_CBOR_TEXT != t) {
                         return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
                     }
                     if (2 == dlen && 0 == memcmp(data, "id", 2)) {
-                        if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen) ||
-                            FIDO_CBOR_BYTES != t) {
+                        if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen)) {
+                            return FIDO_CTAP2_ERR_INVALID_CBOR;
+                        }
+                        if (FIDO_CBOR_BYTES != t) {
                             return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
                         }
                         if (m.n_excl < FIDO_MC_EXCLUDE_MAX) {
@@ -510,20 +549,26 @@ static uint8_t parse_make_credential(fido_ctap_ctx_t *ctx,
             break;
         }
         case 7: {   // options
-            if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL) ||
-                FIDO_CBOR_MAP != t) {
+            if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL)) {
+                return FIDO_CTAP2_ERR_INVALID_CBOR;
+            }
+            if (FIDO_CBOR_MAP != t) {
                 return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
             }
             const uint64_t n_opts = u;
             for (uint64_t j = 0; j < n_opts; j++) {
                 bool v;
                 uint64_t bv;
-                if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen) ||
-                    FIDO_CBOR_TEXT != t) {
+                if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen)) {
+                    return FIDO_CTAP2_ERR_INVALID_CBOR;
+                }
+                if (FIDO_CBOR_TEXT != t) {
                     return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
                 }
-                if (!fido_cbor_dec_item(&d, &t, &bv, NULL, NULL) ||
-                    FIDO_CBOR_BOOL != t) {
+                if (!fido_cbor_dec_item(&d, &t, &bv, NULL, NULL)) {
+                    return FIDO_CTAP2_ERR_INVALID_CBOR;
+                }
+                if (FIDO_CBOR_BOOL != t) {
                     return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
                 }
                 v = (1 == bv);
@@ -754,21 +799,27 @@ static uint8_t ga_parse(const uint8_t *params, uint32_t params_len,
     uint32_t dlen = 0;
 
     fido_cbor_dec_init(&d, params, params_len);
-    if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL) ||
-        FIDO_CBOR_MAP != t) {
+    if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL)) {
+        return FIDO_CTAP2_ERR_INVALID_CBOR;
+    }
+    if (FIDO_CBOR_MAP != t) {
         return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
     }
 
     const uint64_t n_top = u;
     for (uint64_t i = 0; i < n_top; i++) {
-        if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL) ||
-            FIDO_CBOR_UINT != t) {
+        if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL)) {
+            return FIDO_CTAP2_ERR_INVALID_CBOR;
+        }
+        if (FIDO_CBOR_UINT != t) {
             return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
         }
         switch (u) {
         case 1: {   // rpId (text)
-            if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen) ||
-                FIDO_CBOR_TEXT != t) {
+            if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen)) {
+                return FIDO_CTAP2_ERR_INVALID_CBOR;
+            }
+            if (FIDO_CBOR_TEXT != t) {
                 return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
             }
             if (0 == dlen || dlen > sizeof out->rp_id) {
@@ -780,8 +831,10 @@ static uint8_t ga_parse(const uint8_t *params, uint32_t params_len,
             break;
         }
         case 2: {   // clientDataHash (bytes(32))
-            if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen) ||
-                FIDO_CBOR_BYTES != t) {
+            if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen)) {
+                return FIDO_CTAP2_ERR_INVALID_CBOR;
+            }
+            if (FIDO_CBOR_BYTES != t) {
                 return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
             }
             if (32 != dlen) {
@@ -792,27 +845,35 @@ static uint8_t ga_parse(const uint8_t *params, uint32_t params_len,
             break;
         }
         case 3: {   // allowList (array of descriptor maps)
-            if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL) ||
-                FIDO_CBOR_ARRAY != t) {
+            if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL)) {
+                return FIDO_CTAP2_ERR_INVALID_CBOR;
+            }
+            if (FIDO_CBOR_ARRAY != t) {
                 return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
             }
             out->has_allow = true;
             const uint64_t n_allow = u;
             for (uint64_t j = 0; j < n_allow; j++) {
-                if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL) ||
-                    FIDO_CBOR_MAP != t) {
+                if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL)) {
+                    return FIDO_CTAP2_ERR_INVALID_CBOR;
+                }
+                if (FIDO_CBOR_MAP != t) {
                     return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
                 }
                 const uint64_t n_ad = u;
                 for (uint64_t k = 0; k < n_ad; k++) {
                     // The descriptor's keys are TEXT ("id", "type").
-                    if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen) ||
-                        FIDO_CBOR_TEXT != t) {
+                    if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen)) {
+                        return FIDO_CTAP2_ERR_INVALID_CBOR;
+                    }
+                    if (FIDO_CBOR_TEXT != t) {
                         return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
                     }
                     if (2 == dlen && 0 == memcmp(data, "id", 2)) {
-                        if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen) ||
-                            FIDO_CBOR_BYTES != t) {
+                        if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen)) {
+                            return FIDO_CTAP2_ERR_INVALID_CBOR;
+                        }
+                        if (FIDO_CBOR_BYTES != t) {
                             return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
                         }
                         if (0 == dlen ||
@@ -843,19 +904,25 @@ static uint8_t ga_parse(const uint8_t *params, uint32_t params_len,
             }
             break;
         case 5: {   // options (map text -> bool)
-            if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL) ||
-                FIDO_CBOR_MAP != t) {
+            if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL)) {
+                return FIDO_CTAP2_ERR_INVALID_CBOR;
+            }
+            if (FIDO_CBOR_MAP != t) {
                 return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
             }
             const uint64_t n_opt = u;
             for (uint64_t j = 0; j < n_opt; j++) {
-                if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen) ||
-                    FIDO_CBOR_TEXT != t) {
+                if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen)) {
+                    return FIDO_CTAP2_ERR_INVALID_CBOR;
+                }
+                if (FIDO_CBOR_TEXT != t) {
                     return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
                 }
                 bool v = false;
-                if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL) ||
-                    FIDO_CBOR_BOOL != t) {
+                if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL)) {
+                    return FIDO_CTAP2_ERR_INVALID_CBOR;
+                }
+                if (FIDO_CBOR_BOOL != t) {
                     return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
                 }
                 v = (0 != u);
@@ -874,8 +941,10 @@ static uint8_t ga_parse(const uint8_t *params, uint32_t params_len,
             break;
         }
         case 6: {   // pinUvAuthParam (bytes)
-            if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen) ||
-                FIDO_CBOR_BYTES != t) {
+            if (!fido_cbor_dec_item(&d, &t, &u, &data, &dlen)) {
+                return FIDO_CTAP2_ERR_INVALID_CBOR;
+            }
+            if (FIDO_CBOR_BYTES != t) {
                 return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
             }
             (void)dlen;
@@ -884,8 +953,10 @@ static uint8_t ga_parse(const uint8_t *params, uint32_t params_len,
         }
         case 7:   // pinUvAuthProtocol (uint) — meaningful only with key
             // 6 (checked after the map, in spec order).
-            if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL) ||
-                FIDO_CBOR_UINT != t) {
+            if (!fido_cbor_dec_item(&d, &t, &u, NULL, NULL)) {
+                return FIDO_CTAP2_ERR_INVALID_CBOR;
+            }
+            if (FIDO_CBOR_UINT != t) {
                 return FIDO_CTAP2_ERR_CBOR_UNEXPECTED_TYPE;
             }
             out->has_pin_proto = true;

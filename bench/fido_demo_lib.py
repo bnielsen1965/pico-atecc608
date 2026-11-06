@@ -5,7 +5,7 @@ Replays the browser round on https://localhost:8888 (fido2-demonstration,
 fido2-lib 3.5.6 on Node 24) WITHOUT a browser, against the device's REAL
 wire output:
 
-  1. wipe, INIT (fw 1.0.8 gate).
+  1. wipe, INIT (fw 1.0.9 gate).
   2. makeCredential the way the demo's Firefox round sends it: rp.id
      "localhost", a 128-byte challenge base64url'd inside a synthetic
      clientDataJSON (type webauthn.create — the browser's spec form;
@@ -185,7 +185,7 @@ def main():
         cid = r[15:19]
         print(f'INIT  -> cid={cid.hex()} fw={r[20]}.{r[21]}.{r[22]} '
               f'caps={r[23]:#04x}')
-        assert r[20:23] == bytes([1, 0, 8]), 'firmware must be 1.0.8'
+        assert r[20:23] == bytes([1, 0, 9]), 'firmware must be 1.0.9'
         assert r[23] == 0x07, 'caps must be 0x07'
 
         assert _ecdsa_selftest(), 'ECDSA self-test failed'
