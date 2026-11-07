@@ -141,13 +141,45 @@ decisions register, and the git log.)
     version (the probe) + post-reboot HID enumeration (`lsusb` / `findmnt
     -t vfat`), never a volume read-back.
 
-## Current state (2026-11-06) — **Phase 5 (hardening + docs) COMPLETE + VERIFIED + committed (`5ca748a`, fw 1.0.9). CORE SCOPE COMPLETE: Phases 0–5 all closed.** SD-8 (DER signatures) was completed, verified and committed on 1.0.8 (`fa4e139` + `c87b271`; webauthn.io round PASS). Phase 5 audit: the firmware's error paths were already robust — missing params (0x14), type errors (0x11), store-full (0x28), counter-increment failure (0x7F), keep-alive sanity — all KAT-pinned; codec-level CBOR strictness is covered in test_cbor.c. ONE real gap found + fixed: **structurally truncated / malformed CBOR answered 0x11 (CBOR_UNEXPECTED_TYPE) where the spec-correct code is 0x12 INVALID_CBOR** (CTAP 2.3 §11.2.9.1.3) — the 35 conflated decode-failure/type-mismatch sites in parse_make_credential + ga_parse are split (decode fail → 0x12, type mismatch stays 0x11); new `t_dispatch_truncated()` pins 0x12 at EVERY byte cut-point of valid MC/GA requests + a truncated map header — test_ctap 736 → **1189 checks**, ctest 9/9. fw **1.0.9** (happy-path wire format unchanged; uf2 md5 `2df53d9f3700c13bf86fbd92d4a0564f`), bench gates → 1.0.9. Docs: `example/README.md` gained the "FIDO2 example" section (USB device, no console app: demo flow, no-UV + console-`up` caveat, 4-credential limit, slot map, reflash/counter behavior, the 2.3 PS command table) and the main README the fido2 build outputs, repo layout and the five fido2 host tests. **VERIFIED (2026-11-06):** fw 1.0.9 flashed; probe gate PASS (fw 1.0.9, caps 0x07, GET_INFO KAT) + offline bench PASS (MC 262 B / GA 209 B, stock fido2-lib ATTESTATION OK + ASSERTION OK); device wiped (0 creds, counter 0) + probe. No browser round needed — the happy path is byte-identical to the 1.0.8 that passed webauthn.io. **Phase 6 (PIN / clientPin) remains DEFERRED (user decision).**
+## Current state (2026-11-06) — **Phase 7 (user-presence button,
+GP10) COMPLETE + VERIFIED. EXAMPLE FEATURE-COMPLETE: Phases 0–5 + 7
+closed (Phase 6 dropped per SD-9).** SD-9 settled (user-confirmed):
+Phase 6 (PIN) is DROPPED — this is a module demo example and the PIN
+protocol surface demonstrates nothing about the ATECC608 (RPs
+requiring UV cannot use the key — accepted, documented limitation).
+Phase 7: optional button GP10 ↔ GND (internal pull-up, pressed =
+LOW); a pure host-tested 30 ms debounce machine (fido_button.c;
+tests/test_button.c 709 checks; ctest 10/10) feeds the SAME
+`user_present` flag as the console `up` (unchanged); `pin` console
+diagnostic; no button wired = behavior unchanged. fw **1.0.10**
+(wire format unchanged), bench gates → 1.0.10, ALL PASS (probe,
+MC, GA, stock fido2-lib — console `up` regression intact); browser
+button round PASS (register + login, button as sole touch source,
+3 clean touches, no bounce). Device at fw 1.0.10, 0 creds, counter
+0. **NEXT: none planned — SD-9 closed the scope; future work only on
+user request.**
+GP10) CODE COMPLETE, uncommitted; fw 1.0.10 built, pending the
+verification round.** SD-9 settled (user-confirmed): Phase 6 (PIN)
+is DROPPED — this is a module demo example and the PIN protocol
+surface demonstrates nothing about the ATECC608 (RPs requiring UV
+cannot use the key — accepted, documented limitation). Phase 7 adds
+the optional button: GP10 ↔ GND, internal pull-up, pressed = LOW;
+a pure host-tested 30 ms debounce machine (fido_button.c;
+tests/test_button.c 709 checks; ctest 10/10) feeds the SAME
+`user_present` flag as the console `up` (unchanged); `pin` console
+diagnostic; no button wired = behavior unchanged. fw **1.0.10**
+(wire format unchanged), bench gates → 1.0.10, READMEs updated.
+Phases 0–5 remain closed (last: `5ca748a` + `d7de78c`, fw 1.0.9,
+webauthn.io + bench verified; device at 0 creds / counter 0).
+**NEXT: user flashes 1.0.10 → probe + offline bench (`up`
+regression) → button round (user presses GP10) → wipe → commit.**
 
 - **How we got here (the C13–C17 arc — settled):** C13 re-keyed GET_INFO to the CTAP 2.1+ numbering (fw 1.0.4); C14 fixed the COSE `crv` to 1; C16 fixed the COSE layout to the 5-entry CTAP2-wire form (fw 1.0.5 — **SD-5**); the wire was then verified by probe + `fido_mc.py` E2E (real raw-digest ECDSA check). C17, the first browser round after the C16 fix, failed only on **round timing** — `UserActionTimeout`: the 30-s UP window expired before `up` arrived. No further firmware/COSE bug has been found since. Full narrative: the History section.
 - **C18 (webauthn.io) + C19 (xorengineering.com/fido2/): registration SUCCESS on both harnesses** (2026-11-05, fw 1.0.5). The C17 fix was pure protocol: `up` within ~2 s of the Register click (inside the 30-s window). RUST_LOG clean on both (zero `byte array, expected i64`, zero `UserActionTimeout`). Caveat: the webauthn.io page then offers an “authentication test” — getAssertion is Phase 4 (unimplemented; a clean 1-byte `INVALID_COMMAND` today), so do not click it until then.
-**NEXT:** Phase 6 (PIN) is DEFERRED — awaiting user direction. Device:
-fw 1.0.9, 0 creds, counter 0. Tree clean at `5ca748a` (+ this PLAN
-commit). ctest 9/9 (test_ctap 1189 checks).
+**NEXT:** none planned — SD-9 closed the scope (PIN dropped; button
+added). The example is feature-complete: Phases 0–5 + 7 closed, ctest
+10/10, device at fw 1.0.10 / 0 creds / counter 0. Future work only on
+user request.
 - **Chip identity:** ATECC608C (part 0x60, rev 0x05). **Console routing:** FIDO2 printf → UART0/CP210x (/dev/ttyUSB0), NOT USB HID. **YubiKey 5** (user-provided) is available as a comparison capture if a real 5-entry COSE key from a shipping token is wanted (its own webauthn.io/fido2-demonstration failures are separate, higher-level — NotAllowedError/NotAllowed, not COSE).
 
 ## Settled decisions (do not re-litigate — check here BEFORE re-deriving)
@@ -428,6 +460,33 @@ new primary-source evidence.
   spec section VERBATIM before blaming the peer. "RFC 8152 says raw"
   was true of COSE_Sign and wrong of the WebAuthn `sig` — one section
   (§6.5.5) decides, and it says DER.
+
+### SD-9 — No PIN (Phase 6 dropped); user presence = button (GP10) + console `up` (2026-11-06, user-confirmed)
+- **Question:** Phase 6 (PIN / clientPin) was DEFERRED. Does the
+  example need PIN support, and if any further development happens,
+  what should it be?
+- **Settled:**
+  1. **Drop the PIN.** This repo is a MODULE DEMO example, not a
+     production authenticator: the PIN protocol (clientPin, ECDH key
+     agreement, AES-CCM token, retries) is a large protocol surface
+     that demonstrates nothing about the ATECC608. RPs that REQUIRE
+     UV cannot use the key — accepted, documented limitation (the
+     device advertises FIDO_2_0 without clientPin).
+  2. **User presence = an optional button on GP10 + the console
+     `up` (kept).** The button is wired GP10 ↔ GND (internal
+     pull-up, pressed = LOW); a debounced state machine
+     (fido_button.c: 30 ms stability window, edge-triggered, one
+     touch per press, host-tested in tests/test_button.c) samples
+     the pin at the 1 ms card tick and feeds the SAME
+     `s_ctap_ctx.user_present` flag as the console `up` command —
+     which is unchanged (proven, and the wiring fallback). No
+     button wired = pin reads released = behavior unchanged. A
+     `pin` console command reports the raw level (wiring
+     diagnostic). fw 1.0.10, wire format unchanged.
+- **Rationale:** the demo friction point is that anyone testing the
+  example must attach to the serial port and type `up` mid-browser-
+  round; a button removes that. The console command stays because it
+  is proven and doubles as the no-button mode.
 
 ## Bench environment (facts)
 
@@ -1082,13 +1141,13 @@ none I/O-protected, so no `/io_key.bin`. The PIN stretch (ECDH,
 
 ## Phase 6 (stretch, after the MVP works) — PIN protocol v1
 
-**Status (2026-11-03): DEFERRED.** The C11 rk/PIN re-diagnosis was
-refuted (no browser rule "resident keys require a PIN" was found; our
-rk advertisement is under 2.3 keys a 2.0–2.2 Firefox cannot even read;
-the demo runs UV "preferred" / rk not required). Enter Phase 6 only if
-(a) a verified-firmware browser round still fails for a
-UV/PIN-related reason, (b) the user wants UV=required support, or (c)
-FIDO certification is targeted.
+**Status (2026-11-06): DROPPED (SD-9, user-confirmed).** This repo
+is a module demo example, not a production authenticator: the PIN
+protocol (clientPin, ECDH, AES-CCM token, retries) is a large
+protocol surface that demonstrates nothing about the ATECC608. An RP
+that REQUIRES UV cannot use the key — accepted, documented
+limitation (the device advertises FIDO_2_0 without clientPin). The
+design notes below are kept for reference only.
 
 Concrete design (the answer to "how do we implement a PIN?"):
 
@@ -1135,6 +1194,49 @@ Concrete design (the answer to "how do we implement a PIN?"):
   it) + host KATs (expected values generated from a reference
   implementation) + the dual-key-numbering interop decision. 1–2 days
   of focused work.
+
+## Phase 7 — user-presence button (GP10)
+
+**Status (2026-11-06): COMPLETE + VERIFIED.** fw 1.0.10
+(uf2 md5 `7e204dfe8e61c1ed194c4e67dcc12cc9`): host KATs 709 checks /
+ctest 10/10; bench gates all PASS (probe, MC 261 B / 71-B DER, GA all
+paths, stock fido2-lib ALL OK — the console `up` regression intact);
+`pin` diagnostic verified on hardware (released/pressed); browser
+button round: register + login both completed with the GP10 button as
+the SOLE touch source (3 clean touches in the console log, no bounce
+duplicates). Device closed at 0 creds / counter 0.
+
+The demo friction point: anyone testing the example must attach to
+the serial port and type `up` mid-browser-round. Fix (SD-9): an
+OPTIONAL button on GP10 (wired GP10 ↔ GND, internal pull-up,
+pressed = LOW). A pure, host-tested 30 ms debounce machine
+(fido_button.c) samples the pin at the 1 ms card tick and feeds the
+same `s_ctap_ctx.user_present` flag as the console `up` (unchanged);
+both sources coexist. No button wired = pin reads released =
+behavior byte-identical to 1.0.9.
+
+- **fido_button.c/.h:** the debounce state machine — a raw run must
+  be stable for 30 ms before an edge counts (any level change
+  restarts the window, so bounce can never fire); edge-triggered
+  (one touch per press; a held button is a single touch); unsigned
+  ms differences (timer wraparound safe).
+- **tests/test_button.c:** the clean press edge exactly at the
+  boundary (not one sample before), the 29/30 ms boundary from both
+  sides, bounce (the edge lands 30 ms after the level SETTLES, not
+  after first contact), release (no edge), double-press (two
+  edges), a 10-s hold (one edge), held at the first sample, and the
+  ms wraparound. 709 checks; ctest 9/9 → 10/10.
+- **Glue (fido_hid.c):** `FIDO2_BUTTON_PIN 10`; `gpio_init` +
+  `gpio_pull_up` at init; one raw sample per `fido_card_tick()`;
+  press edge → `user_present = true` + print; new `pin` console
+  command (raw-level wiring diagnostic).
+- **fw 1.0.10** (additive; wire format unchanged), bench gates →
+  1.0.10; example/README.md FIDO2 section updated (wiring note +
+  `pin` in the command table); main.c banner mentions the button.
+- **Verification:** host KATs → flash 1.0.10 → probe + offline bench
+  (regression: drives `up`, proving the console path is intact) →
+  ONE user round where the GP10 button is pressed instead of typing
+  `up` → wipe (0 creds, counter 0) + probe → commit.
 
 ## Open questions (resolve as we go)
 
