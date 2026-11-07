@@ -43,9 +43,17 @@
 
 #include "fido_ctap.h"
 #include "fido_ctaphid.h"
+#include "fido_button.h"
 
 // On-board LED (GP25): status indicator + WINK.
 #define FIDO2_LED_PIN 25
+
+// User-presence button (GP10): wired GP10 -> GND through the switch,
+// the firmware enables the internal pull-up, so the pin reads 1 at
+// rest and 0 while pressed. OPTIONAL hardware — with no button wired
+// the pin stays high and the machine never fires (the console 'up'
+// command is the other touch source; both feed the same flag).
+#define FIDO2_BUTTON_PIN 10
 
 // --- descriptors -------------------------------------------------------------
 
@@ -140,6 +148,10 @@ static fido2_ctaphid_t  s_ctaphid;
 // task on core 1 exchanges 64-byte reports with core 0 through the
 // lock-free s_outq / s_cmdq queues and never dereferences this state.
 static fido_ctap_ctx_t  s_ctap_ctx;
+// The debounced button state (fido_button.h) — core-0-only, like
+// s_ctap_ctx: sampled once per card tick, a press edge sets
+// s_ctap_ctx.user_present exactly like the console 'up' command.
+static fido_button_t    s_button;
 static bool             s_enabled;
 // USB unmount, raised by the (core 1) tud_umount_cb and consumed by the
 // (core 0) card tick: the channel/CTAP reset touches core-0-only state,
@@ -274,6 +286,18 @@ static void led_init(void)
     gpio_set_dir(FIDO2_LED_PIN, GPIO_OUT);
 }
 
+// --- user-presence button (GP10, optional) ----------------------------------------
+
+static void button_init(void)
+{
+    // gpio_init (SIO function + clean pad) then the internal pull-up:
+    // the switch pulls the pin to GND on press, the pull-up holds it
+    // high at rest. With no button wired the pin simply stays high.
+    gpio_init(FIDO2_BUTTON_PIN);
+    gpio_pull_up(FIDO2_BUTTON_PIN);
+    fido_button_init(&s_button);
+}
+
 static void led_tick(uint32_t now_ms)
 {
     bool on;
@@ -332,9 +356,15 @@ static void console_line_done(void)
                 printf("fido2: counter zero FAILED\n");
             }
             printf("fido2: credential store wiped (%d record(s))\n", n);
+        } else if (0 == strcmp(s_console_line, "pin")) {
+            // Wiring diagnostic for the (optional) GP10 button:
+            // 'released' at rest, 'pressed' while the switch is down.
+            printf("fido2: button pin %d: %s\n", FIDO2_BUTTON_PIN,
+                   (0 == gpio_get(FIDO2_BUTTON_PIN)) ? "pressed"
+                                                     : "released");
         } else {
-            printf("fido2: unknown console command '%s' — try 'up' "
-                   "or 'wipe'\n",
+            printf("fido2: unknown console command '%s' — try 'up', "
+                   "'wipe' or 'pin'\n",
                    s_console_line);
         }
     }
@@ -702,6 +732,7 @@ void fido_hid_init(bool enabled)
 
     s_enabled = enabled;
     led_init();
+    button_init();
     tusb_init();
 }
 
@@ -751,6 +782,14 @@ void fido_card_tick(void)
     // provisioned the device answers no CTAP, but the command still
     // gets its confirmation print.
     console_tick();
+    // The button (optional hardware): one raw sample per 1 ms tick
+    // feeds the debounce machine; a press edge records a touch exactly
+    // like the console 'up' command.
+    if (fido_button_tick(&s_button,
+                         0 == gpio_get(FIDO2_BUTTON_PIN), now_ms)) {
+        s_ctap_ctx.user_present = true;
+        printf("fido2: user presence (button)\n");
+    }
     // Incoming CTAPHID reports, drained in FIFO order from the (core 1)
     // USB task. Always drained (even unprovisioned) so the queue cannot
     // back up; when the chip is not provisioned the reports are dropped

@@ -166,11 +166,16 @@ enum {
 //          CTAP2_ERR_CBOR_UNEXPECTED_TYPE is reserved for a
 //          well-formed item of the wrong type (CTAP 2.3 §11.2.9.1.3).
 //          Happy-path wire format unchanged.
+//   1.0.10 Optional user-presence button (GP10, wired to GND, internal
+//          pull-up): a host-tested debounce machine (fido_button.c)
+//          feeds the same user_present flag as the console 'up'
+//          command; a 'pin' console command reports the raw level. No
+//          button wired = unchanged behavior. Wire format unchanged.
 enum {
     FIDO2_PROTO_VERSION    = 2,
     FIDO2_FW_VERSION_MAJOR = 1,
     FIDO2_FW_VERSION_MINOR = 0,
-    FIDO2_FW_VERSION_BUILD = 9,
+    FIDO2_FW_VERSION_BUILD = 10,
 };
 
 // Timing, in ms. A busy (in-flight) message is aborted with

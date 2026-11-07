@@ -6,7 +6,7 @@ round C20 ("authentication failed: could not verify authentication
 signature") can be pinned down without a browser:
 
   1. `wipe` via the console (clean store + zeroed counter).
-  2. CTAPHID INIT -> CID; expect fw 1.0.9, caps 0x07.
+  2. CTAPHID INIT -> CID; expect fw 1.0.10, caps 0x07.
   3. CTAP2 makeCredential (the exact Firefox C1 request, re-used from
      fido_mc.py) -> capture the attestation authData: the COSE public
      key (the key the browser AND the server store), the counter, and
@@ -245,7 +245,7 @@ def main():
         cid = r[15:19]
         print(f'INIT  -> cid={cid.hex()} fw={r[20]}.{r[21]}.{r[22]} '
               f'caps={r[23]:#04x}')
-        assert r[20:23] == bytes([1, 0, 9]), 'firmware must be 1.0.9'
+        assert r[20:23] == bytes([1, 0, 10]), 'firmware must be 1.0.10'
         assert r[23] == 0x07, 'caps must be 0x07'
 
         # --- 2. makeCredential (the exact Firefox C1 request) --------------

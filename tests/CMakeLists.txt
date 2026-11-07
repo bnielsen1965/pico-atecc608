@@ -209,3 +209,13 @@ add_executable(test_cred test_cred.c ${MOD_ROOT}/example/fido2/fido_cred.c)
 target_include_directories(test_cred PRIVATE ${MOD_ROOT}/example/fido2)
 target_compile_options(test_cred PRIVATE -Wall -Wextra)
 add_test(NAME test_cred COMMAND $<TARGET_FILE:test_cred>)
+
+# The fido2 example's debounced button state machine
+# (example/fido2/fido_button.c) is pure C: the clean press edge (at the
+# debounce boundary, not before), bounce (level changes can never fire
+# on their own), release (no edge), double-press, a held button (one
+# touch), and the ms-timer wraparound.
+add_executable(test_button test_button.c ${MOD_ROOT}/example/fido2/fido_button.c)
+target_include_directories(test_button PRIVATE ${MOD_ROOT}/example/fido2)
+target_compile_options(test_button PRIVATE -Wall -Wextra)
+add_test(NAME test_button COMMAND $<TARGET_FILE:test_button>)

@@ -11,6 +11,7 @@ add_executable(pico-atecc608-fido2
     fido_cose.c
     fido_cbor.c
     fido_sha256.c
+    fido_button.c
 )
 
 # tusb_config.h (this directory) must be reachable as a bare include from

@@ -12,7 +12,7 @@ the two numberings; round C13 root cause, see PLAN.md). So this script
 speaks the same protocol directly over /dev/hidraw and drives user
 presence through the UART console, exactly like a browser round:
 
-  1. CTAPHID INIT (broadcast) -> CID; expect fw 1.0.9, caps 0x07.
+  1. CTAPHID INIT (broadcast) -> CID; expect fw 1.0.10, caps 0x07.
   2. CTAP2 GET_INFO -> the 81-byte response (0x00 status + 80-byte
      CBOR map, CTAP 2.1+ key numbers), 2 packets (57+24).
   3. CTAP2 makeCredential with the EXACT 190-byte request Firefox sent
@@ -296,8 +296,8 @@ def main():
         cid = r[15:19]
         print(f'INIT  -> cid={cid.hex()} fw={r[20]}.{r[21]}.{r[22]} '
               f'caps={r[23]:#04x}')
-        assert r[20:23] == bytes([1, 0, 9]), \
-            f'firmware must be 1.0.9, got {r[20]}.{r[21]}.{r[22]}'
+        assert r[20:23] == bytes([1, 0, 10]), \
+            f'firmware must be 1.0.10, got {r[20]}.{r[21]}.{r[22]}'
         assert r[23] == 0x07, f'caps must be 0x07, got {r[23]:#04x}'
 
         # --- 2. GET_INFO -------------------------------------------------

@@ -4,7 +4,10 @@
 // GP21, ADR to GND (address 0x60). The USB interface is the security
 // key's pure-HID FIDO descriptor (VID/PID 2E8A:000B) and nothing else —
 // there is no CDC, so flash via the BOOTSEL UF2 and read debug prints on
-// UART0 (GPIO 0 TX / GPIO 1 RX).
+// UART0 (GPIO 0 TX / GPIO 1 RX). Optional: a user-presence button
+// between GP10 and GND (internal pull-up; 'pin' on the console shows
+// the raw level) — pressing it records a touch exactly like typing
+// 'up'.
 //
 // Startup contract (house style, deliberately NOT auto-provisioning):
 // probe the chip and require the config zone LOCKED and the identity
@@ -90,8 +93,8 @@ int main(void)
     printf("pico-atecc608-fido2: ATECC608 FIDO2 authenticator "
            "(Phase 4: CTAPHID + CTAP2 GET_INFO + MakeCredential + "
            "GetAssertion + Reset)\n");
-    printf("UART0 console: type 'up' to record a key touch (user "
-           "presence) while a registration or login waits\n");
+    printf("User presence: press the button on GP10, or type 'up' on "
+           "the UART0 console, while a registration or login waits\n");
 
     atecc608_status_t st = atecc608_init(&s_cfg);
     if (ATECC608_OK != st) {

@@ -198,22 +198,27 @@ and the counter persist across reflashes. **4 slots = 4 discoverable
 credentials total**, across all sites; a full store answers
 `KEY_STORE_FULL` (0x28).
 
-**User presence / user verification:** the key has no touch sensor —
-user presence is driven from the serial console (UART0, 115200 8N1;
-the console also runs on USB CDC): typing `up` records a touch for
-the in-flight transaction (keep-alives flow at ~500 ms while the
-device waits; the LED is solid when provisioned and idle, flickers on
-WINK). There is **no user verification**: the device advertises
-`FIDO_2_0` without `clientPin`, and `uv: true` is answered
-`UNSUPPORTED_OPTION` (0x2C) — relying parties that *require* UV
-cannot use it; browsers run it as a UV-less key. A physical button on
-a free GPIO can feed the same `user_present` flag later without
-touching the CTAP layer.
+**User presence / user verification:** user presence is a touch,
+recorded by either of two sources that feed the same flag: an
+**optional button on GP10** (wire it between GP10 and GND — the
+firmware enables the internal pull-up, so pressed = LOW; with no
+button wired the pin reads released and behavior is unchanged), or
+the serial console (UART0, 115200 8N1; the console also runs on USB
+CDC), where typing `up` records a touch. The button sample runs once
+per 1 ms tick through a debounced state machine (30 ms stability
+window, one touch per press — host-tested in `tests/test_button.c`),
+so a held button is a single touch. While a registration or login
+waits, keep-alives flow at ~500 ms (the LED is solid when provisioned
+and idle, flickers on WINK). There is **no user verification**: the
+device advertises `FIDO_2_0` without `clientPin`, and `uv: true` is
+answered `UNSUPPORTED_OPTION` (0x2C) — relying parties that *require*
+UV cannot use it; browsers run it as a UV-less key.
 
 | Console command | What it does |
 |---|---|
 | `up` | record a user-presence touch for the pending makeCredential / getAssertion |
 | `wipe` | erase the credential store + zero the sync counter (the console twin of CTAP RESET) |
+| `pin` | print the raw GP10 button level (wiring diagnostic: `released` at rest, `pressed` while the switch is down) |
 
 **Commands (the CTAP 2.3 PS table, the protocol spec of record):**
 `authenticatorMakeCredential` (0x01), `authenticatorGetAssertion`
