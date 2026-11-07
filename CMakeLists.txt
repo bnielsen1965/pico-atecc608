@@ -1,41 +1,106 @@
 cmake_minimum_required(VERSION 3.13)
 
-# Board: Raspberry Pi Pico 2 (RP2350). Must be set before including the SDK,
-# since the SDK reads it at configure time.
-set(PICO_BOARD pico2)
-
-# Core: defaults to the Cortex-M33 cores (rp2350-arm-s). The RP2350's two
-# cores can each run either Cortex-M33 or Hazard3 RISC-V, and pico_multicore
-# supports both, so this builds and runs on either platform:
-#   -DPICO_PLATFORM=rp2350-arm-s   -> two Cortex-M33 cores  (build/)
-#   -DPICO_PLATFORM=rp2350-riscv   -> two Hazard3 RISC-V cores (build-riscv/)
-# Changing the platform requires a fresh build directory per platform.
-if (NOT PICO_PLATFORM)
-    set(PICO_PLATFORM rp2350-arm-s)
+# ============================================================================
+# Standalone vs embedded
+# ============================================================================
+# This repo can be used two ways:
+#
+#   1. Standalone — `cmake ..` from a build directory in this repo:
+#      builds the module and the example/ proof-of-concept apps
+#      (Pico 2 / RP2350, this repo's own board and platform settings).
+#
+#   2. Embedded — a consuming project adds this repo as a git submodule
+#      and does:
+#          add_subdirectory(path/to/pico-atecc608)
+#          target_link_libraries(your_app PRIVATE atecc608::atecc608)
+#      The consumer must have already done its normal pico-sdk setup
+#      (project() + pico_sdk_init() with its own PICO_BOARD / PICO_PLATFORM /
+#      PICO_SDK_PATH) BEFORE add_subdirectory(). The module then builds for
+#      the CONSUMER's board and pulls in nothing else: no examples, and none
+#      of this repo's submodules (lib/tinyusb, example/pico-command-line,
+#      example/pico-littlefs are example-only, and a plain
+#      `git submodule update --init` in the consumer does not initialize
+#      nested submodules — that needs --recursive).
+# ============================================================================
+get_filename_component(ATECC608_SELF_DIR   "${CMAKE_CURRENT_LIST_DIR}" REALPATH)
+get_filename_component(ATECC608_SOURCE_DIR "${CMAKE_SOURCE_DIR}"       REALPATH)
+if (ATECC608_SELF_DIR STREQUAL ATECC608_SOURCE_DIR)
+    set(ATECC608_IS_TOP_LEVEL ON)
+else()
+    set(ATECC608_IS_TOP_LEVEL OFF)
 endif()
 
-# Location of the Pico SDK. Override with -DPICO_SDK_PATH=... if you move it.
-set(PICO_SDK_PATH "$ENV{HOME}/Projects/pico-sdk" CACHE PATH "Path to the Raspberry Pi Pico SDK")
+# Examples: ON by default for standalone builds of this repo, OFF by default
+# when embedded (a consumer's add_subdirectory() pulls in only the library).
+# option() leaves a consumer-supplied -DATECC608_BUILD_EXAMPLES=... alone, so
+# this only provides the default. It must be resolved BEFORE pico_sdk_init()
+# because the examples' TinyUSB pin (below) has to be in place for the SDK's
+# tinyusb probe.
+option(ATECC608_BUILD_EXAMPLES
+    "Build the example/ proof-of-concept applications (console, ...)"
+    ${ATECC608_IS_TOP_LEVEL})
 
-# TinyUSB is pinned to OUR checkout, not the SDK's: the app depends on
-# TinyUSB 0.21's device HID behavior (interrupt-OUT data routed to
+# TinyUSB is pinned to OUR checkout, not the SDK's: the fido2 example depends
+# on TinyUSB 0.21's device HID behavior (interrupt-OUT data routed to
 # tud_hid_set_report_cb), and the SDK's lib/tinyusb gitlink is a
 # separate pin that can drift under `git submodule update`. The SDK
-# reads PICO_TINYUSB_PATH (a plain variable set before pico_sdk_init
-# wins over its <PICO_SDK_PATH>/lib/tinyusb default), so point it at
-# the submodule we pin at tag 0.21.0.
-set(PICO_TINYUSB_PATH "${CMAKE_CURRENT_SOURCE_DIR}/lib/tinyusb")
+# reads PICO_TINYUSB_PATH during pico_sdk_init() (a plain variable set
+# beforehand wins over its <PICO_SDK_PATH>/lib/tinyusb default), so point it
+# at the submodule we pin at tag 0.21.0. Examples only — a library-only
+# build (the embedded default) never sets it, so the consumer's SDK TinyUSB
+# is left untouched.
+if (ATECC608_BUILD_EXAMPLES)
+    set(PICO_TINYUSB_PATH "${CMAKE_CURRENT_SOURCE_DIR}/lib/tinyusb")
+endif()
 
-include(${PICO_SDK_PATH}/external/pico_sdk_import.cmake)
+if (ATECC608_IS_TOP_LEVEL)
+    # Board: Raspberry Pi Pico 2 (RP2350). Must be set before including the
+    # SDK, since the SDK reads it at configure time.
+    set(PICO_BOARD pico2)
 
-project(pico-atecc608 C CXX ASM)
+    # Core: defaults to the Cortex-M33 cores (rp2350-arm-s). The RP2350's two
+    # cores can each run either Cortex-M33 or Hazard3 RISC-V, and pico_multicore
+    # supports both, so this builds and runs on either platform:
+    #   -DPICO_PLATFORM=rp2350-arm-s   -> two Cortex-M33 cores  (build/)
+    #   -DPICO_PLATFORM=rp2350-riscv   -> two Hazard3 RISC-V cores (build-riscv/)
+    # Changing the platform requires a fresh build directory per platform.
+    if (NOT PICO_PLATFORM)
+        set(PICO_PLATFORM rp2350-arm-s)
+    endif()
+
+    # Location of the Pico SDK. Override with -DPICO_SDK_PATH=... if you move it.
+    set(PICO_SDK_PATH "$ENV{HOME}/Projects/pico-sdk" CACHE PATH "Path to the Raspberry Pi Pico SDK")
+
+    include(${PICO_SDK_PATH}/external/pico_sdk_import.cmake)
+
+    project(pico-atecc608 C CXX ASM)
+
+    pico_sdk_init()
+else()
+    # Embedded: the consumer must have called pico_sdk_init() before
+    # add_subdirectory()-ing us; pico_stdlib is the marker.
+    if (NOT TARGET pico_stdlib)
+        message(FATAL_ERROR
+            "pico-atecc608: embedded use requires the consuming project to "
+            "do its normal pico-sdk setup (project() + pico_sdk_init() with "
+            "PICO_BOARD/PICO_PLATFORM/PICO_SDK_PATH) BEFORE add_subdirectory() "
+            "of this repo.")
+    endif()
+    if (ATECC608_BUILD_EXAMPLES)
+        message(WARNING
+            "pico-atecc608: building the examples from an embedded project "
+            "uses the CONSUMING SDK's TinyUSB, not this repo's 0.21.0 pin "
+            "(the pin must be set before the consumer's pico_sdk_init()). "
+            "For the pinned behavior, build this repo standalone, or set "
+            "PICO_TINYUSB_PATH to <this repo>/lib/tinyusb before your "
+            "pico_sdk_init().")
+    endif()
+endif()
 
 # C11 matters: newer GCCs default to C23, where an empty function prototype `()`
 # means `(void)` and conflicts with the pico-command-line declarations.
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 11)
-
-pico_sdk_init()
 
 # ============================================================================
 # cryptoauthlib — fetched at build time; NEVER vendored in this repo
@@ -180,8 +245,35 @@ add_library(atecc608::atecc608 ALIAS atecc608)
 # ============================================================================
 # Examples (proof of concept — NOT part of the library).
 # ============================================================================
-option(ATECC608_BUILD_EXAMPLES
-    "Build the example/ proof-of-concept applications (console, ...)" ON)
+# ATECC608_BUILD_EXAMPLES was resolved at the top of this file (ON by default
+# only for standalone builds; OFF by default when embedded, so a consumer's
+# add_subdirectory() pulls in nothing but the library). The examples need
+# this repo's three submodules; a plain `git submodule update --init` in a
+# consuming project does not initialize them (nested submodules need
+# --recursive), so fail with an actionable message instead of a cryptic
+# "does not contain a CMakeLists.txt".
 if (ATECC608_BUILD_EXAMPLES)
+    set(ATECC608_EXAMPLE_SUBMODULES
+        "lib/tinyusb"
+        "example/pico-command-line"
+        "example/pico-littlefs")
+    set(ATECC608_EXAMPLE_SUBMODULE_MARKERS
+        "hw/bsp/family_support.cmake"
+        "CMakeLists.txt"
+        "CMakeLists.txt")
+    list(LENGTH ATECC608_EXAMPLE_SUBMODULES _atecc608_submod_count)
+    math(EXPR _atecc608_last "${_atecc608_submod_count} - 1")
+    foreach (_atecc608_i RANGE ${_atecc608_last})
+        list(GET ATECC608_EXAMPLE_SUBMODULES ${_atecc608_i} _atecc608_submod)
+        list(GET ATECC608_EXAMPLE_SUBMODULE_MARKERS ${_atecc608_i} _atecc608_marker)
+        if (NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_atecc608_submod}/${_atecc608_marker}")
+            message(FATAL_ERROR
+                "pico-atecc608: ATECC608_BUILD_EXAMPLES=ON but the "
+                "'${_atecc608_submod}' submodule is not checked out. Run "
+                "`git submodule update --init --recursive` inside the "
+                "pico-atecc608 directory, or build library-only with "
+                "-DATECC608_BUILD_EXAMPLES=OFF.")
+        endif()
+    endforeach()
     add_subdirectory(example)
 endif()

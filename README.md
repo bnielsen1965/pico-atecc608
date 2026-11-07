@@ -13,6 +13,13 @@ an RP2350 I2C HAL and a curated, stable `atecc608_*` API.
 > and the agreed chip configuration they share are documented in
 > [`example/README.md`](example/README.md#application-scenarios--provisioning-guidance).
 
+> **NOTE:** Before utilizing this module you should review the Microchip licensing terms 
+> to ensure your project aligns with those terms. This module relies on the Microchip 
+> cryptoauthlib library but does not redistribute the library, if you include this 
+> module in your project the crtypoauthlib library will be downloaded to your project 
+> at build time. This module was developed without access to the full datasheet 
+> specifications which require signing an NDA. No NDA was signed so no datasheet 
+> access was granted.
 ---
 
 ## Application scenarios
@@ -56,32 +63,43 @@ in [`example/README.md`](example/README.md).
 
 ## Using the module in your own project
 
-The module is a small, self-contained CMake static library: the public
-headers in `include/atecc608/`, the implementation in `src/`, and a
-build-time fetch of Microchip cryptoauthlib. It is designed to be
-**copied into your own Pico project** (a jumpstart), not pulled in as a
-runtime dependency.
+The supported way to use the module is as a **git submodule** wired in with
+CMake `add_subdirectory()`. The module is a small, self-contained CMake
+static library: the public headers in `include/atecc608/`, the
+implementation in `src/`, and a build-time fetch of Microchip cryptoauthlib.
+When embedded it **pulls in nothing else**: no examples, and none of this
+repo's submodules (`lib/tinyusb`, `example/pico-command-line`,
+`example/pico-littlefs` are example-only, and a plain
+`git submodule update --init` in your project does not initialize nested
+submodules — that needs `--recursive`).
 
-**What to copy**
+**1. Add the submodule**
 
-| From this repo | Into your project |
-|---|---|
-| `include/atecc608/` (the 5 public headers) | `include/atecc608/` |
-| `src/` (`atecc608.c`, `atecc608_config.c`, `atecc608_crypto.c`, `atecc608_prov.c`, `atecc608_status.c`, `hal_rp2350.c`/`.h`, `atecc608_int.h`) | `src/` (or a subfolder) |
-| the `cryptoauthlib` fetch + `cryptoauth_core` + `atecc608` targets from the top-level `CMakeLists.txt` | your `CMakeLists.txt` |
+```sh
+git submodule add https://github.com/<owner>/pico-atecc608.git libs/pico-atecc608
+git submodule update --init libs/pico-atecc608
+```
 
-The CMake to copy is the two top-level sections marked
-`# cryptoauthlib — fetched at build time` and
-`# ATECC608 module library`; together they produce the
-`atecc608::atecc608` target. They assume your project already calls
-`pico_sdk_init()` and sets `CMAKE_C_STANDARD 11` (both are pico-sdk
-conventions). Air-gapped: pass `-DCRYPTOAUTHLIB_SOURCE_DIR=/path/to/cryptoauthlib`.
-
-**Link and use**
+**2. Wire it up.** Your project must already do the normal pico-sdk setup —
+`project()` + `pico_sdk_init()` with your own `PICO_BOARD` / `PICO_PLATFORM`
+/ `PICO_SDK_PATH` — *before* adding the module. The module builds for
+**your** board and platform:
 
 ```cmake
+add_subdirectory(libs/pico-atecc608)
+
 target_link_libraries(your_app PRIVATE atecc608::atecc608)
 ```
+
+- **Examples are OFF by default when embedded** — your build gets only the
+  `atecc608::atecc608` target. To also build this repo's example apps, pass
+  `-DATECC608_BUILD_EXAMPLES=ON` and run
+  `git submodule update --init --recursive` inside `libs/pico-atecc608`.
+- **Air-gapped build:** pass
+  `-DCRYPTOAUTHLIB_SOURCE_DIR=/path/to/cryptoauthlib` (cryptoauthlib is
+  fetched at build time and never stored in this repo).
+
+**3. Use the API**
 
 ```c
 #include "atecc608/atecc608.h"
@@ -111,13 +129,22 @@ Every `atecc608_*` call returns an `atecc608_status_t`; on failure,
 provisioning, and the KDF wrapper — is documented in the headers under
 `include/atecc608/`.
 
-> **First-class `add_subdirectory()` embedding:** the top-level
-> `CMakeLists.txt` is structured as a standalone project (it calls
-> `project()`/`pico_sdk_init()` and builds the examples), so the
-> copy-the-files path above is the supported way to embed it today.
-> Splitting the module target into an includable CMake file so the whole
-> repo can be `add_subdirectory()`'d directly is a small, optional
-> restructuring.
+**Alternative: copy the files.** If you'd rather not nest CMake projects,
+copy the module into yours instead:
+
+| From this repo | Into your project |
+|---|---|
+| `include/atecc608/` (the 5 public headers) | `include/atecc608/` |
+| `src/` (`atecc608.c`, `atecc608_config.c`, `atecc608_crypto.c`, `atecc608_prov.c`, `atecc608_status.c`, `hal_rp2350.c`/`.h`, `atecc608_int.h`) | `src/` (or a subfolder) |
+| the `cryptoauthlib` fetch + `cryptoauth_core` + `atecc608` targets from the top-level `CMakeLists.txt` | your `CMakeLists.txt` |
+
+The CMake to copy is the two top-level sections marked
+`# cryptoauthlib — fetched at build time` and
+`# module library`; together they produce the
+`atecc608::atecc608` target. They assume your project already calls
+`pico_sdk_init()` and sets `CMAKE_C_STANDARD 11` (both are pico-sdk
+conventions). Air-gapped: pass
+`-DCRYPTOAUTHLIB_SOURCE_DIR=/path/to/cryptoauthlib`.
 
 ---
 
@@ -166,12 +193,14 @@ supplies its own.
 
 ## Building
 
-Clone with submodules (the examples use `example/pico-command-line` and
-`example/pico-littlefs`; the latter nests LittleFS inside it):
+Clone. The submodules are **examples-only** (`example/pico-command-line`,
+`example/pico-littlefs` — the latter nests LittleFS inside it — and
+`lib/tinyusb`); a library-only build needs none of them:
 
 ```sh
 git clone --recursive <this repo>
 # or, if already cloned: git submodule update --init --recursive
+# library only: skip the submodules and pass -DATECC608_BUILD_EXAMPLES=OFF
 ```
 
 The first `cmake` configure **fetches cryptoauthlib v3.8.0 from GitHub**
@@ -201,10 +230,13 @@ libraries in `build/`:
 **`libatecc608.a`** (the module) and **`libcryptoauth_core.a`** (the
 fetched cryptoauthlib core, compiled for the Pico target).
 
-The examples build by default; to build only the library use
-`-DATECC608_BUILD_EXAMPLES=OFF`. The examples (diagnostic smoke tests,
-the `prov` provisioning set, the vault password-store demo, and the
-FIDO2 key) are documented in [`example/README.md`](example/README.md).
+The examples build by default in standalone builds of this repo; to build
+only the library use `-DATECC608_BUILD_EXAMPLES=OFF` (this is also the
+default when the repo is embedded via `add_subdirectory()` — see
+[Using the module in your own project](#using-the-module-in-your-own-project)).
+The examples (diagnostic smoke tests, the `prov` provisioning set, the
+vault password-store demo, and the FIDO2 key) are documented in
+[`example/README.md`](example/README.md).
 
 ---
 
@@ -270,8 +302,9 @@ src/                  module sources: atecc608.c (core API), hal_rp2350.c/.h
                       atecc608_crypto.c, atecc608_prov.c,
                       atecc608_status.c, atecc608_int.h
 tests/                host unit tests (standalone CMake, mock chip HAL)
-CMakeLists.txt        module build (+ examples by default,
-                      ATECC608_BUILD_EXAMPLES=OFF to skip); fetches
+CMakeLists.txt        module build; standalone builds also build the
+                      examples (embedded add_subdirectory() is library-only
+                      by default; ATECC608_BUILD_EXAMPLES toggles); fetches
                       cryptoauthlib at build time
 PLAN.md               FIDO2 example development plan (the original
                       module plan is in git history)
