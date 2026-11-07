@@ -7,13 +7,13 @@ committed with the repo, unlike `/tmp` scratch).
 Convention (ground rule, 2026-11-03): any new tool script created while
 debugging the FIDO2 application goes in this directory.
 
-## Existing bench harness (lives in `bench/`, not here)
+## Existing bench harness (lives in `../bench/`, not here)
 
-- `bench/fido_probe.py` — CTAPHID probe: INIT / PING / WINK / GET_INFO
+- `../bench/fido_probe.py` — CTAPHID probe: INIT / PING / WINK / GET_INFO
   85-byte KAT. Must FULL PASS at the start of every bench round.
-- `bench/fido_watch.py` — live CTAPHID monitor (decodes the wire, including
+- `../bench/fido_watch.py` — live CTAPHID monitor (decodes the wire, including
   the 0x3B keep-alive with status at offset 7).
-- `bench/fido_desc_probe.c` / `fido_desc_probe` — USB descriptor probe.
+- `../bench/fido_desc_probe.c` / `fido_desc_probe` — USB descriptor probe.
 
 ## Decode note
 

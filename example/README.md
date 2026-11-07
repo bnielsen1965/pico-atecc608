@@ -249,7 +249,7 @@ provisioned — config and data zones locked, slots 3–6 GenKey-capable,
 slowly and the device answers no CTAP; provision it with the console
 example first ([`docs/BRINGUP.md`](../docs/BRINGUP.md)).
 
-**Bench:** the `bench/` folder (repo root) drives the key over
+**Bench:** the `fido2/bench/` folder drives the key over
 `/dev/hidraw*` + the console — `fido_probe.py` (transport + GET_INFO
 gate), `fido_mc.py` / `fido_ga.py` (byte-pinned registration /
 assertion rounds), `fido_demo_lib.py` (an offline replica of the

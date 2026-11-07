@@ -3,8 +3,8 @@ build/
 # firmware build artifact (never committed; flash via BOOTSEL)
 *.uf2
 
-# compiled bench tool (rebuild per bench/README.md)
-bench/fido_desc_probe
+# compiled bench tool (rebuild per example/fido2/bench/README.md)
+example/fido2/bench/fido_desc_probe
 
 # python probe bytecode
 __pycache__/
