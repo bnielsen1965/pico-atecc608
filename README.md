@@ -308,7 +308,6 @@ CMakeLists.txt        module build; standalone builds also build the
                       examples (embedded add_subdirectory() is library-only
                       by default; ATECC608_BUILD_EXAMPLES toggles); fetches
                       cryptoauthlib at build time
-ATECC608C-...-DS40002513.pdf   ATECC608C *summary* data sheet
 ```
 
 ---
@@ -325,8 +324,10 @@ the authority for this project:
 - **`lib/calib/calib_device.h`** — the ATECC608 **config-zone byte layout**
   and all bit-field definitions (SlotConfig, KeyConfig, ChipOptions,
   ChipMode, counters, …).
-- The full **ATECC608C datasheet is under NDA**; only the summary sheet
-  (DS40002513, in the repo) is public. cryptoauthlib + its manual cover the
+- The full **ATECC608C datasheet is under NDA**. A public *summary* sheet
+  (DS40002513) is available from Microchip, as is the full datasheet with an
+  NDA — neither is vendored in this repo (buyers of the part receive the
+  documentation from Microchip). cryptoauthlib + its manual cover the
   configuration and command details the module needs.
 
 ---
