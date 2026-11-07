@@ -308,8 +308,6 @@ CMakeLists.txt        module build; standalone builds also build the
                       examples (embedded add_subdirectory() is library-only
                       by default; ATECC608_BUILD_EXAMPLES toggles); fetches
                       cryptoauthlib at build time
-PLAN.md               FIDO2 example development plan (the original
-                      module plan is in git history)
 ATECC608C-...-DS40002513.pdf   ATECC608C *summary* data sheet
 ```
 
