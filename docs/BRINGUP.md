@@ -16,9 +16,11 @@ Two parts:
 
 **Ground rule:** every chip write in this document is an EXPLICIT console
 command you type. The console never writes on its own, and the irreversible
-steps gate on a typed `CONFIRM`. The project HARD RULE (no chip writes
-without explicit go-ahead) applies to the bench chip — it is already
-provisioned and frozen; do NOT run this checklist against it.
+steps gate on a typed `CONFIRM`. This checklist is for a **fresh,
+unprovisioned chip** — do NOT run the provisioning steps against a chip that
+is already provisioned: the zone/slot locks are irreversible, and re-running
+them against a locked chip will fail (or, worse, against a chip whose
+contents you did not record, make its state unrecoverable).
 
 ---
 
@@ -129,12 +131,12 @@ keys generated, slot 14 locked). Record, per chip:
    region, so every chip's CRC is unique (bench chip: `C904` after full
    lock; `F6DE` was its pre-data-lock value).
 
-The console's `selftest` full mode hard-checks the **bench chip's**
-goldens (the `BENCH_*` table at the top of the Phase 7 section of
-`example/console/main.c` — dev-only, not part of the library). A different
-chip passes `selftest generic` (the invariants) but hard-FAILS the
-goldens (as it should — it is not the bench chip). If a new chip becomes
-the reference bench chip, update that table from its recorded values.
+The console's `selftest` full mode hard-checks the **reference chip's**
+goldens (the `BENCH_*` table in `example/console/main.c` — dev-only, not
+part of the library). A different chip passes `selftest generic` (the
+invariants) but hard-FAILS the goldens (as it should — it is not the
+reference chip). If a different chip becomes the reference, update that
+table from its recorded values.
 
 ## 6. Known failure modes (all seen and root-caused on the bench)
 

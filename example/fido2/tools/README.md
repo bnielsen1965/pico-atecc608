@@ -20,3 +20,19 @@ debugging the FIDO2 application goes in this directory.
 `tshark` is the ground-truth decoder for the usbmon captures
 (`tshark -r <file> -V`, then `-Y frame.number==N -x` for full hex). A
 standalone Python framer is unreliable for this usbmon format.
+
+## Regenerating the getAssertion KAT fixtures
+
+`tests/test_ctap.c` pins the getAssertion / GET_NEXT_ASSERTION responses as
+byte arrays. If you change those test vectors (rp id, counters, credential
+ids, …), regenerate the fixtures offline — independently of the C code — and
+splice them back in. Run both from this directory:
+
+```sh
+python3 gen_ga_kat.py     # writes ga_kat_fixtures.c (gitignored) here
+python3 splice_ga_kat.py  # splices it into tests/test_ctap.c
+```
+
+`gen_ga_kat.py` first sanity-checks that its offline method reproduces the
+original pinned signature, so a drift in the method is caught before it
+corrupts the test. The transient `ga_kat_fixtures.c` is not committed.

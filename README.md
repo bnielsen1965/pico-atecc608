@@ -54,6 +54,73 @@ in [`example/README.md`](example/README.md).
 
 ---
 
+## Using the module in your own project
+
+The module is a small, self-contained CMake static library: the public
+headers in `include/atecc608/`, the implementation in `src/`, and a
+build-time fetch of Microchip cryptoauthlib. It is designed to be
+**copied into your own Pico project** (a jumpstart), not pulled in as a
+runtime dependency.
+
+**What to copy**
+
+| From this repo | Into your project |
+|---|---|
+| `include/atecc608/` (the 5 public headers) | `include/atecc608/` |
+| `src/` (`atecc608.c`, `atecc608_config.c`, `atecc608_crypto.c`, `atecc608_prov.c`, `atecc608_status.c`, `hal_rp2350.c`/`.h`, `atecc608_int.h`) | `src/` (or a subfolder) |
+| the `cryptoauthlib` fetch + `cryptoauth_core` + `atecc608` targets from the top-level `CMakeLists.txt` | your `CMakeLists.txt` |
+
+The CMake to copy is the two top-level sections marked
+`# cryptoauthlib — fetched at build time` and
+`# ATECC608 module library`; together they produce the
+`atecc608::atecc608` target. They assume your project already calls
+`pico_sdk_init()` and sets `CMAKE_C_STANDARD 11` (both are pico-sdk
+conventions). Air-gapped: pass `-DCRYPTOAUTHLIB_SOURCE_DIR=/path/to/cryptoauthlib`.
+
+**Link and use**
+
+```cmake
+target_link_libraries(your_app PRIVATE atecc608::atecc608)
+```
+
+```c
+#include "atecc608/atecc608.h"
+
+atecc608_cfg_t cfg = {
+    .i2c     = i2c0,
+    .sda_pin = 20,
+    .scl_pin = 21,
+    .addr    = ATECC608_ADDR_ADR_LOW,   // 0x60 (ADR to GND)
+    .baud    = ATECC608_FAST_BAUD_HZ,   // 400 kHz
+};
+
+if (atecc608_init(&cfg) != ATECC608_OK) {
+    // atecc608_last_error() carries the raw ATCA_STATUS
+}
+
+atecc608_info_t info;
+atecc608_info(&info);      // info.part == 0x60, info.revision
+uint8_t rnd[16];
+atecc608_random(rnd, 16);  // 16 bytes of chip TRNG
+```
+
+Every `atecc608_*` call returns an `atecc608_status_t`; on failure,
+`atecc608_last_error()` returns the underlying cryptoauthlib
+`ATCA_STATUS` and `atecc608_status_str()` gives short text. The full API
+— lifecycle, diagnostics, zone/slot access, the config builder, guarded
+provisioning, and the KDF wrapper — is documented in the headers under
+`include/atecc608/`.
+
+> **First-class `add_subdirectory()` embedding:** the top-level
+> `CMakeLists.txt` is structured as a standalone project (it calls
+> `project()`/`pico_sdk_init()` and builds the examples), so the
+> copy-the-files path above is the supported way to embed it today.
+> Splitting the module target into an includable CMake file so the whole
+> repo can be `add_subdirectory()`'d directly is a small, optional
+> restructuring.
+
+---
+
 ## Hardware
 
 - **Chip:** ATECC608 family (the target part is an **ATECC608C**). In
@@ -216,8 +283,7 @@ ATECC608C-...-DS40002513.pdf   ATECC608C *summary* data sheet
 ## Reference / source of truth
 
 The protocol and command semantics are taken from **Microchip cryptoauthlib
-v3.8.0** (canonical: `github.com/microchiptech/cryptoauthlib`, tag `v3.8.0`; a
-local clone at `../cryptoauthlib` is a development reference only), which is
+v3.8.0** (`github.com/microchiptech/cryptoauthlib`, tag `v3.8.0`), which is
 the authority for this project:
 
 - **`cryptoauthlib-manual.pdf`** (747 pages, in the cryptoauthlib repo) — full
@@ -234,7 +300,11 @@ the authority for this project:
 
 ## Licensing
 
-This module depends on **Microchip cryptoauthlib**, under Microchip's
+This repository's code — the `atecc608_*` module, the RP2350 I2C HAL, the
+examples, and the tests — is licensed under the **MIT License** (see
+[`LICENSE`](LICENSE)).
+
+It depends on **Microchip cryptoauthlib**, under Microchip's
 **source-available license** — *not* a standard permissive/MIT license.
 
 - cryptoauthlib is **fetched at build time** by CMake
