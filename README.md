@@ -8,9 +8,11 @@ command plumbing. It builds on Microchip's **cryptoauthlib v3.8.0**, adding
 an RP2350 I2C HAL and a curated, stable `atecc608_*` API.
 
 > **Scope.** This repository is the *driver/module*, not an application.
-> Applications (password stores, FIDO2 authenticators, secure firmware
-> updates, …) build on the module's primitives. The application scenarios
-> and the agreed chip configuration they share are documented in
+> Applications (password stores, FIDO2 authenticators, …) build on the
+> module's primitives; this repo's worked examples are the console
+> (provisioner + diagnostics), the password store, and the FIDO2 key.
+> The application scenarios and the agreed chip configuration they share
+> are documented in
 > [`example/README.md`](example/README.md#application-scenarios--provisioning-guidance).
 
 > **NOTE:** Before utilizing this module you should review the Microchip licensing terms 
@@ -29,10 +31,11 @@ RP2350/ATECC608 library in `include/`, `src/`, `tests/`) and the
 **examples** (proof of concept: the chip provisioning flow and
 demonstration applications, in `example/`).
 
-The application scenarios (PIN-gated password store, FIDO2/passkey,
-secure firmware updates, device identity), the agreed 16-slot
-configuration, and the provisioning/locking discipline are documented
-in [`example/README.md`](example/README.md).
+The example applications (PIN-gated password store, FIDO2/passkey), the
+agreed 16-slot chip configuration — which also reserves capacity for
+secure firmware updates and device identity — and the
+provisioning/locking discipline are documented in
+[`example/README.md`](example/README.md).
 
 ---
 
