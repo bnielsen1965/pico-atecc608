@@ -184,8 +184,7 @@ supplies its own.
 
 ## Requirements
 
-- Raspberry Pi Pico 2 (RP2350). *(RP2040 support is not currently planned;
-  the HAL could add it later.)*
+- Raspberry Pi Pico 2 (RP2350)
 - [pico-sdk](https://github.com/raspberrypi/pico-sdk)
 - ATECC608 on the I2C bus
 - Microchip cryptoauthlib v3.8.0 — **fetched at build time** by CMake from
