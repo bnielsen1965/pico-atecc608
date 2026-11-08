@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""fido_probe.py — Phase 1 + Phase 2 bench check for the Pico FIDO2 key.
+"""fido_probe.py — bench check for the Pico FIDO2 key.
 
-Finds the key by VID/PID (2e8a:000b), then runs the transport checks
-that Phase 1 promises and the first CTAP2 command from Phase 2:
+Finds the key by VID/PID (2e8a:000b), then runs the CTAPHID transport
+checks and the first CTAP2 command:
 
   1. CTAPHID INIT (broadcast) -> the exactly-17-byte response with the
      nonce echoed, an allocated CID (first one is 2), protocol 0x02 and
@@ -229,7 +229,7 @@ def main():
         print('           versions, aaguid, options, maxMsgSize,')
         print('           maxCredCount/IdLen, transports, ES256 {alg,type})')
 
-        print('PASS — Phase 1 transport + Phase 2 GET_INFO verified')
+        print('PASS — transport + GET_INFO verified')
         print('       (descriptor-level checks 1 and 2 were done separately:')
         print('       lsusb + report_descriptor)')
     finally:

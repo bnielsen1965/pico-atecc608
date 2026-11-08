@@ -1,4 +1,4 @@
-// Host unit tests for the ATECC608 config-zone builder (Phase 4A).
+// Host unit tests for the ATECC608 config-zone builder.
 //
 // Pure logic: no chip, no HAL. The only cryptoauthlib dependency is atCRC()
 // (the command checksum), used to prove atecc608_config_crc16() is

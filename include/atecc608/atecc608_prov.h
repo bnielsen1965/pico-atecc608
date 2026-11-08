@@ -1,4 +1,4 @@
-// ATECC608 guarded provisioning API (Phase 4A).
+// ATECC608 guarded provisioning API.
 //
 // These functions perform the chip writes that provision the device —
 // config-zone write, zone/slot locks, key generation, counter increment.
@@ -14,9 +14,10 @@
 //     the user type an exact string);
 //   - everything is idempotent / re-runnable while the zone is unlocked.
 //
-// Phase 4A implements and unit-tests these against a mock chip (tests/);
-// they are never exercised on the physical chip without an explicit user
-// go-ahead on the exact byte plan (Phase 4B).
+// These are unit-tested against a mock chip (tests/). On a physical chip
+// they are exercised only through the console's guarded `prov` command
+// set (example/console), which gates every irreversible step on a typed
+// confirmation.
 //
 // Notes / known limitations:
 //   - atecc608_provision_config preserves the chip's I2C address byte
@@ -38,7 +39,7 @@
 //     value the chip already has (read it first).
 //   - UseLock (byte 69): the mock does not model UseLock enforcement.
 //     Keep use_lock_en=false in intents until an authentication flow
-//     exists (Phase 4B verification item).
+//     exists.
 //   - Data-zone access through the library is atcab_read_zone()/
 //     atcab_write_zone(): slots 0 and 3 (key slots) are rejected and the
 //     length must be exactly 32 (16 for the config zone). Secret slots
@@ -109,12 +110,12 @@ atecc608_status_t atecc608_genkey(uint8_t slot, uint8_t pub[ATECC608_PUBKEY_LEN]
 // config; anything else is rejected by the chip (ATECC608_ERR_EXEC).
 atecc608_status_t atecc608_get_pubkey(uint8_t slot, uint8_t pub[ATECC608_PUBKEY_LEN]);
 
-// Write a 32-byte I/O protection key to a plain data slot (Phase 4B).
+// Write a 32-byte I/O protection key to a plain data slot.
 // Preconditions (ATECC608_ERR_CHIP_STATE, no write issued if violated):
 // the config zone is LOCKED (the chip refuses any data-zone write while
-// the config zone is unlocked — verified on the bench 2026-10-23; the
-// approved 4B order is provision_config -> lock_config_zone ->
-// write_iokey), the data zone is unlocked (our flow never locks it; the
+// the config zone is unlocked — the intended order is
+// provision_config -> lock_config_zone -> write_iokey), the data zone is
+// unlocked (our flow never locks it; the
 // guard stays conservative), and the slot accepts a clear Write in the
 // current config (not an ECC private key slot; write_key and
 // write_config both 0 — the config zone is readable even when locked).

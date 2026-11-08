@@ -8,7 +8,7 @@ parse_reply_element in the 1.16.0 source) and our device deliberately
 emits the CTAP 2.1+ wire encoding that the shipping browsers require
 (the CTAP 2.0 spec's key table was never used by shipping hardware —
 dual keys are impossible, every GET_INFO key 0x01-0x0A collides between
-the two numberings; round C13 root cause, see PLAN.md). So this script
+the two numberings). So this script
 speaks the same protocol directly over /dev/hidraw and drives user
 presence through the UART console, exactly like a browser round:
 
@@ -16,11 +16,11 @@ presence through the UART console, exactly like a browser round:
   2. CTAP2 GET_INFO -> the 81-byte response (0x00 status + 80-byte
      CBOR map, CTAP 2.1+ key numbers), 2 packets (57+24).
   3. CTAP2 makeCredential with the EXACT 190-byte request Firefox sent
-     in bench round C1 (pinned in tests/test_ctap.c, s_firefox_c1_req):
+     during bring-up (pinned in tests/test_ctap.c, s_firefox_c1_req):
      rp "xorengineering.com", ES256, the 2.2 `extensions` slot,
      options {rk:false}. 4 OUT packets (57+59+59+15).
-  4. `up` via the UART console ~2 s in (the agent is the operator for
-     this round — the user is not at the console).
+  4. `up` via the UART console ~2 s in (the agent is the operator — the
+     user is not at the console).
   5. Keep-alives (0xBB, BCNT 1, status 0x01 = UP_NEEDED) at ~500 ms
      until the touch; then the 258-262-byte success response (0x00
      status + CBOR attestation object) over 5 packets (57+59+59+59+
@@ -64,8 +64,8 @@ from fido_probe import (  # noqa: E402
 # SHA-256(authData || clientDataHash), so we verify that 32-byte digest
 # directly: e = int(digest) mod n. Do NOT re-hash the digest: the `cryptography`
 # lib's verify(sig, data, ECDSA(SHA256)) hashes `data` first, which would
-# verify SHA-256(digest) -- the wrong value. That double-hash was the C15 false
-# alarm (a valid chip signature read as "invalid").
+# verify SHA-256(digest) -- the wrong value. That double-hash once read a
+# valid chip signature as "invalid".
 _P256_P = 0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff
 _P256_A = _P256_P - 3
 _P256_N = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551
@@ -169,7 +169,7 @@ def parse_ecdsa_der(sig):
 CONSOLE = '/dev/ttyUSB0'
 READ_TIMEOUT_S = 1.0
 
-# The EXACT makeCredential request Firefox sent in bench round C1 (the
+# The EXACT makeCredential request Firefox sent during bring-up (the
 # first real browser request; pinned in tests/test_ctap.c as
 # s_firefox_c1_req). 190 bytes, command byte first: rp
 # "xorengineering.com", user nobody@mail.com, ES256 + RS256 params,
@@ -377,7 +377,7 @@ def main():
         # The checks above only looked at lengths. Now verify the signature
         # for real: it is over SHA-256(authData || clientDataHash), and the
         # ATECC608 signs that 32-byte digest AS-IS (raw-digest verify; do NOT
-        # re-hash it -- see the note above _ecdsa_verify_raw / the C15 note).
+        # re-hash it -- see the note above _ecdsa_verify_raw).
         assert _ecdsa_selftest(), 'ECDSA self-test failed (verifier broken)'
         print('ecdsa      -> self-test ok (sign/verify round-trip)')
         cdh = MC_REQ[5:37]   # clientDataHash: first map entry of the request

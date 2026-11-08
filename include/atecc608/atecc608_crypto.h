@@ -1,25 +1,23 @@
-// ATECC608 crypto pass-through API (Phase 5).
+// ATECC608 crypto pass-through API.
 //
-// Curated wrappers over the chip's crypto commands, added as consumers
-// need them (kdf, sign, verify — sign/verify landed with the FIDO2
-// example, Phase 0 of PLAN.md). Like the provisioning API
-// (atecc608_prov.h), the implementation is HAL-agnostic
-// (it only calls atcab_* / atcah_*), so it compiles in the host unit-test
-// build and is exercised against the mock chip (tests/).
+// Curated wrappers over the chip's crypto commands (kdf, sign, verify).
+// Like the provisioning API (atecc608_prov.h), the implementation is
+// HAL-agnostic (it only calls atcab_* / atcah_*), so it compiles in the
+// host unit-test build and is exercised against the mock chip (tests/).
 //
-// I/O protection (bench-verified 2026-10-25): this chip runs with
-// kdf_prot=1, which ENFORCES I/O protection on KDF — every target=output
-// KDF returns its data ENCRYPTED, plus a 32-byte response nonce.
+// I/O protection: a chip configured with kdf_prot=1 ENFORCES I/O
+// protection on KDF — every target=output KDF returns its data ENCRYPTED,
+// plus a 32-byte response nonce.
 // atecc608_kdf_prf() detects the nonce and decrypts in place
 // (atcah_io_decrypt) with the caller's I/O key, so the caller always
 // receives the clear derived value; with a chip that does not enforce
 // I/O protection the response carries no nonce, the data is already
 // clear, and the key is unused.
 //
-// Data-zone gate (bench-verified 2026-10-24/25): the chip refuses a KDF
-// with target=output (ATCA_EXECUTION_ERROR) while the data zone is
-// UNLOCKED. The provisioned device's data zone is locked, so the gate
-// never triggers there; the mock models it.
+// Data-zone gate: the chip refuses a KDF with target=output
+// (ATCA_EXECUTION_ERROR) while the data zone is UNLOCKED. A provisioned
+// device's data zone is locked, so the gate never triggers there; the
+// mock models it.
 
 #pragma once
 
@@ -97,7 +95,7 @@ atecc608_status_t atecc608_sign(uint8_t slot,
 // means the command could not run at all (the slot is not a key slot
 // in the current config, holds no key, ...).
 //
-// Purpose: host-side cross-checks and bench debugging (the FIDO2 example
+// Purpose: host-side cross-checks and debugging (the FIDO2 example
 // verifies a signature before trusting it; the console can check one on
 // demand). Read-only and cheap; it completes the sign pair.
 atecc608_status_t atecc608_verify(uint8_t slot,

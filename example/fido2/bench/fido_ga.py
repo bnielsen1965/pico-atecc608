@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """fido_ga.py — E2E getAssertion rehearsal over the wire.
 
-Reproduces the browser's *login half* deterministically so a failed
-round C20 ("authentication failed: could not verify authentication
-signature") can be pinned down without a browser:
+Reproduces the browser's *login half* deterministically so a failure
+("authentication failed: could not verify authentication signature")
+can be pinned down without a browser:
 
   1. `wipe` via the console (clean store + zeroed counter).
   2. CTAPHID INIT -> CID; expect fw 1.0.10, caps 0x07.
-  3. CTAP2 makeCredential (the exact Firefox C1 request, re-used from
+  3. CTAP2 makeCredential (the exact Firefox request, re-used from
      fido_mc.py) -> capture the attestation authData: the COSE public
      key (the key the browser AND the server store), the counter, and
      the 32-byte credId. Verify the attestation signature (sanity).
@@ -23,8 +23,8 @@ signature") can be pinned down without a browser:
      py_webauthn server both hold.
 
   The verdict:
-    * authData 37 B + sig VALID  -> the device crypto is correct; any
-      C20 failure is in the browser / Conditional-UI / server layer.
+    * authData 37 B + sig VALID  -> the device crypto is correct; a
+      login failure is in the browser / Conditional-UI / server layer.
     * authData != 37 B           -> the assertion carries attested
       credential data (AT bit) — spec violation, the device bug.
     * sig INVALID                -> signature over the wrong data or a
@@ -305,7 +305,7 @@ def main():
         # (c) allowList + up:true — THE REAL BROWSER PATH. libwebauthn
         #     always serializes up:true for a non-preflight getAssertion,
         #     so the device MUST defer: emit keep-alives, wait for UP, then
-        #     sign. This is the path the failed C20 login actually took.
+        #     sign. This is the path the failing browser login took.
         send_msg(fd, cid, build_ga(cred_id_reg, with_allow=True, up=True))
         # Let the deferral start and a couple of keep-alives flow so we can
         # confirm the device is WAITING (not answering synchronously).

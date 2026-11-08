@@ -1,6 +1,6 @@
 # Bench console example (example/console): probe/diagnostic commands over
-# the serial console (pico-command-line), and — as of Phase 4B — the
-# provisioning command set (prov status/randtest/iokey/config/lock).
+# the serial console (pico-command-line), and the provisioning command set
+# (prov status/randtest/iokey/config/lock).
 # Proof of concept for the module; not part of the library.
 add_executable(pico-atecc608
     main.c

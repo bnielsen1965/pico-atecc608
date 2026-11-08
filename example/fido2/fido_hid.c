@@ -140,8 +140,7 @@ static char s_serial[17];
 // --- state ---------------------------------------------------------------------
 
 static fido2_ctaphid_t  s_ctaphid;
-// The CTAP2 dispatch context (fido_ctap.h) — Phase 2 is read-only
-// identity data (AAGUID + capabilities); later phases extend it.
+// The CTAP2 dispatch context (fido_ctap.h).
 //
 // Dual-core ownership (see the report-queue section below): s_ctaphid
 // and s_ctap_ctx are touched ONLY by core 0 (the card task). The USB
@@ -174,7 +173,7 @@ static void led_wink_cb(void *ctx)
 // drained back-to-back: the host tight re-polls the IN endpoint ~10-90 us
 // after each packet, and if the next report is not armed by then it reads
 // a zero-length report, which Firefox treats as end-of-message, stranding
-// the rest of the response (bench rounds C2-C5). The re-arm must therefore
+// the rest of the response. The re-arm must therefore
 // land the instant the host ACKs the previous packet.
 //
 // On one core the re-arm ran in the main loop, which also carried the slow
@@ -279,7 +278,7 @@ static void led_init(void)
     // gpio_init, NOT just gpio_set_dir: after reset the pin's function
     // select is GPIO_FUNC_NULL (31) — the pad is not routed to the SIO
     // output at all, so set_dir alone leaves a pin whose latch works but
-    // whose wire never moves (the WINK-LED bug, bench-verified 2026-10-30:
+    // whose wire never moves (a WINK-LED bug traced to exactly this:
     // latch=1 dir=1 func=31 pad=0). gpio_init sets function SIO (the GPIO
     // function on RP2350) + input direction + a clean pad config.
     gpio_init(FIDO2_LED_PIN);
@@ -316,8 +315,8 @@ static void led_tick(uint32_t now_ms)
 // --- user-presence console (UART0) ---------------------------------------------------
 // The key has no physical touch button yet, so user presence is driven
 // from the UART0 console (115200 8N1): typing 'up' records a touch for
-// the CTAP layer to consume (Phase 3 MakeCredential; GetAssertion in a
-// later phase). A physical button on a free GPIO can feed the same flag
+// the CTAP layer to consume (MakeCredential and GetAssertion). A
+// physical button on a free GPIO can feed the same flag
 // later without touching the CTAP layer.
 //
 // Non-blocking by construction: stdio_getchar_timeout_us(0) yields at
@@ -724,9 +723,9 @@ void fido_hid_init(bool enabled)
     fido2_ctaphid_init(&s_ctaphid);
     report_q_flush(&s_outq);
     report_q_flush(&s_cmdq);
-    // The real CTAP2 dispatch (Phase 3: GET_INFO + MakeCredential —
-    // the latter defers its response until user presence; unimplemented
-    // command codes answer CTAP1_ERR_INVALID_COMMAND per the spec's MUST).
+    // The real CTAP2 dispatch (the commands that need user presence
+    // defer their response until the touch; unimplemented command codes
+    // answer CTAP1_ERR_INVALID_COMMAND per the spec's MUST).
     fido2_ctaphid_set_cbor(&s_ctaphid, fido_ctap_dispatch, &s_ctap_ctx);
     fido2_ctaphid_set_wink(&s_ctaphid, led_wink_cb, NULL);
 

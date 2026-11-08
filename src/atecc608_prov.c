@@ -1,4 +1,4 @@
-// ATECC608 guarded provisioning (Phase 4A). See
+// ATECC608 guarded provisioning. See
 // include/atecc608/atecc608_prov.h for the guarantees each function makes.
 //
 // This file talks to cryptoauthlib's atcab_* layer directly (it is
@@ -56,7 +56,7 @@ atecc608_status_t atecc608_provision_config(const atecc608_config_intent_t *cfg)
     intent[16] = current[16];
     //
     // Bytes 88..89 (SlotLocked): Lock-command-managed; the factory ships
-    // 0xFFFF (verified on the bench chip). Whether the Write command takes
+    // 0xFFFF. Whether the Write command takes
     // effect on them is not documented, so preserve the chip's value either
     // way: if the chip honors the write, we write back exactly what it holds
     // (a no-op); if it ignores the write, the read-back verify below still
@@ -238,10 +238,10 @@ atecc608_status_t atecc608_write_iokey(uint8_t slot,
     }
     if (!locked) {
         // The chip refuses any data-zone write while the config zone is
-        // unlocked (verified on the bench: a 32-byte Write to a plain
-        // factory slot returns ATCA_EXECUTION_ERROR; all of Microchip's
-        // data-write conformance tests run with the config zone locked).
-        // The approved 4B order is config -> lock -> iokey.
+        // unlocked (a 32-byte Write to a plain factory slot returns
+        // ATCA_EXECUTION_ERROR; all of Microchip's data-write conformance
+        // tests run with the config zone locked). The intended order is
+        // config -> lock -> iokey.
         return ATECC608_ERR_CHIP_STATE;
     }
 

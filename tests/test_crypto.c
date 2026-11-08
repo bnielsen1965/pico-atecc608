@@ -1,21 +1,19 @@
-// Host unit tests for the ATECC608 crypto pass-through API (Phase 5: KDF
-// PRF; Phase 0 of the FIDO2 example: Sign / Verify over an external
-// digest), driven through the real cryptoauthlib atcab_*/calib layers
-// against the mock chip (tests/mock_chip.c) — no Pico, no physical
-// device.
+// Host unit tests for the ATECC608 crypto pass-through API (KDF PRF,
+// Sign / Verify over an external digest), driven through the real
+// cryptoauthlib atcab_*/calib layers against the mock chip
+// (tests/mock_chip.c) — no Pico, no physical device.
 //
 // The mock's KDF is a fake, deterministic PRF (documented in mock_chip.c:
 // out[i] = key[i%32] ^ nonce[i%32] ^ msg[i%msg_len] ^ i). The tests check
 // the module's plumbing — TempKey nonce loading, parameter encoding,
 // response parsing, and the enforced I/O-protection decrypt path — by
 // comparing against values computed with the same formula, plus the
-// mock's I/O-protection model (kdf_prot=1, as bench-verified on the real
-// chip).
+// mock's I/O-protection model (kdf_prot=1, as on the real chip).
 //
 // The mock's Sign is a fake, deterministic signature (sig[i] =
 // priv[i%32] ^ digest[i%32] ^ i/32) and its Verify recomputes it — no
-// P-256 math (the mock's house style; the real-curve cross-check happens
-// on the bench, where openssl verifies a chip signature). The tests
+// P-256 math (the mock's house style; the real-curve cross-check uses
+// openssl to verify a chip signature). The tests
 // check the plumbing: the digest load into the Message Digest Buffer
 // (Nonce pass-through), the Sign mode/key_id encoding, the 64-byte
 // signature parsing, the chip gates (private key slot, EXT_SIG bit, key
@@ -125,8 +123,8 @@ static void t_kdf_gate(void)
     }
 
     // A KDF with target=output is refused while the data zone is
-    // UNLOCKED (bench-verified: ATCA_EXECUTION_ERROR, "clear KDF failed:
-    // -12" on 2026-10-24) — even with the config zone locked.
+    // UNLOCKED (ATCA_EXECUTION_ERROR, "clear KDF failed: -12") — even
+    // with the config zone locked.
     atecc608_config_default(&cfg);
     CHECK(ATECC608_OK == atecc608_provision_config(&cfg));
     CHECK(ATECC608_OK == atecc608_lock_config_zone(&cfg, confirm_hook, NULL));
@@ -282,7 +280,7 @@ static void t_kdf_params(void)
     CHECK(ATECC608_ERR_BAD_PARAM == atecc608_kdf_prf(16, NULL, msg, 1, NULL, out));
 }
 
-// --- sign / verify (external digest, Phase 0) -------------------------------------------
+// --- sign / verify (external digest) ----------------------------------------------------
 
 // The mock's fake "private key" (see mock_chip.c): what GenKey
 // "generates" into slot `slot`.

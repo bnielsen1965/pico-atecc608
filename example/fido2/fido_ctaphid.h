@@ -81,7 +81,7 @@ enum {
 };
 
 // The CTAP2 status codes the transport itself needs (CTAP v2.1 §8.2;
-// 0x01 is shared with U2FHID); the CTAP layer (Phase 2) uses the full
+// 0x01 is shared with U2FHID); the CTAP layer uses the full
 // code set in its responses.
 enum {
     FIDO2_CTAP_ERR_OK              = 0x00,
@@ -104,8 +104,8 @@ enum {
 // from. Every shipping client — Firefox, Chrome, libfido2 1.16 (which
 // printed "nocbor" for our 0x0D) — still parses the 2.0-2.2 positions,
 // where 0x0D reads as WINK|NMSG with CBOR CLEAR: the device was
-// classified U2F-only and never received a makeCredential (rounds
-// C11/C12, 2026-11-03). Emit 0x07 (WINK|CBOR|NMSG), the value real
+// classified U2F-only and never received a makeCredential. Emit 0x07
+// (WINK|CBOR|NMSG), the value real
 // CTAP2 keys such as YubiKey advertise. A future 2.3 client reading
 // 0x07 sees WINK|CBOR (2.3 positions) without NMSG and may probe
 // CTAPHID_MSG; we answer 0x6986 and it falls back to CTAP2 — harmless.
@@ -125,33 +125,32 @@ enum {
 // The build number doubles as the on-wire FINGERPRINT of what is
 // actually flashed: read the 3-byte version out of any usbmon INIT
 // response to verify a flash before benching. History:
-//   1.0.0  pre-C11 build (the C11 capture proved the flashed UF2 was
-//          stale — a 1.0.0 INIT with behaviors no current source
-//          produces)
-//   1.0.1  C10 CBOR status-byte fix (bare CBOR responses)
+//   1.0.0  the first build (a capture of its INIT response proved a
+//          stale UF2 had been flashed — a 1.0.0 INIT with behaviors no
+//          current source produces)
+//   1.0.1  CBOR status-byte fix (bare CBOR responses)
 //   1.0.2  2.0-2.2 wire encoding: INIT caps 0x07 (CBOR bit where
 //          shipping clients look) + GET_INFO with the 2.0-2.2 key
-//          numbers (rounds C11/C12: Firefox classified the 2.3-encoded
-//          device as U2F-only and never sent makeCredential)
+//          numbers (Firefox classified the 2.3-encoded device as
+//          U2F-only and never sent makeCredential)
 //   1.0.3  GET_INFO re-keyed to the CTAP 2.1+ table (Firefox's
-//          AuthenticatorInfo deserializer; round C13)
-//   1.0.4  = 1.0.3 on the wire (the C13 fix); C14 found the makeCredential
-//          response rejected by Firefox
+//          AuthenticatorInfo deserializer)
+//   1.0.4  = 1.0.3 on the wire (the re-keying fix); the makeCredential
+//          response was still rejected by Firefox
 //   1.0.5  COSE_Key crv fixed: P-256 is crv 1 (RFC 8152 13.1), not -1
 //          (0x20). Firefox's Curve::try_from(-1) = UnknownKeyType, so the
-//          whole makeCredential response was rejected (round C14)
-//   1.0.6  Phase 4 (the login half): GET_ASSERTION +
-//          GET_NEXT_ASSERTION + RESET, the SD-6 wire format (stable 2.0
-//          request table; INTEGER top-level response keys; TEXT-keyed
-//          inner maps); the sync counter moves to littlefs (/f2_cnt,
-//          RESET zeroes it) with the chip Counter 0 behind
-//          FIDO2_COUNTER_CHIP (never reset)
+//          whole makeCredential response was rejected
+//   1.0.6  the login half: GET_ASSERTION + GET_NEXT_ASSERTION + RESET,
+//          the agreed wire format (stable 2.0 request table; INTEGER
+//          top-level response keys; TEXT-keyed inner maps); the sync
+//          counter moves to littlefs (/f2_cnt, RESET zeroes it) with
+//          the chip Counter 0 behind FIDO2_COUNTER_CHIP (never reset)
 //   1.0.7  The assertion authData dropped the attested credential data
 //          (AAGUID/credId/COSE, AT bit): WebAuthn L3 §6.3.3 step 10
 //          excludes it from the getAssertion authenticatorData, so the
 //          assertion is now rpIdHash(32) | flags(UP only) |
-//          signCount(4 BE) = 37 bytes (round C20-prep; the old 164-B
-//          layout broke fido2-lib's assertion audit)
+//          signCount(4 BE) = 37 bytes (the old 164-B layout broke
+//          fido2-lib's assertion audit)
 //   1.0.8  ES256 signatures are now emitted as ASN.1 DER Ecdsa-Sig-
 //          Value (RFC 3279 §2.2.3) — BOTH the assertion
 //          (getAssertion/get_next_assertion) and the packed attestation
@@ -159,12 +158,11 @@ enum {
 //          for ES256 "sig" values; the raw R||S (COSE_Sign, RFC 9052)
 //          form was a device bug that broke py_webauthn RPs
 //          (webauthn.io: "Could not verify authentication signature")
-//   1.0.9  Phase 5 hardening: a structurally truncated / malformed
-//          CBOR request (a map with fewer pairs than its header
-//          declares, a string cut mid-payload, ...) now answers
-//          CTAP2_ERR_INVALID_CBOR (0x12); 0x11
-//          CTAP2_ERR_CBOR_UNEXPECTED_TYPE is reserved for a
-//          well-formed item of the wrong type (CTAP 2.3 §11.2.9.1.3).
+//   1.0.9  hardening: a structurally truncated / malformed CBOR request
+//          (a map with fewer pairs than its header declares, a string
+//          cut mid-payload, ...) now answers CTAP2_ERR_INVALID_CBOR
+//          (0x12); 0x11 CTAP2_ERR_CBOR_UNEXPECTED_TYPE is reserved for
+//          a well-formed item of the wrong type (CTAP 2.3 §11.2.9.1.3).
 //          Happy-path wire format unchanged.
 //   1.0.10 Optional user-presence button (GP10, wired to GND, internal
 //          pull-up): a host-tested debounce machine (fido_button.c)
@@ -296,8 +294,8 @@ void fido2_ctaphid_tick(fido2_ctaphid_t *s, uint32_t now_ms,
 // Emit a keep-alive on the current transaction's channel, throttled to
 // one per FIDO2_KEEPALIVE_PERIOD_MS; a no-op when no transaction is
 // active (synchronous or deferred). The app's main loop calls this
-// while a deferred transaction waits (Phase 3: status
-// FIDO2_KEEPALIVE_UP_NEEDED during the user-presence wait).
+// while a deferred transaction waits (status FIDO2_KEEPALIVE_UP_NEEDED
+// during the user-presence wait).
 void fido2_ctaphid_keepalive(fido2_ctaphid_t *s, uint32_t now_ms,
                              uint8_t status,
                              fido2_sink_t sink, void *sink_ctx);

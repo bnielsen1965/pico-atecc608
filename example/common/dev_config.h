@@ -1,6 +1,5 @@
-// The agreed development config for the on-bench ATECC608
-// (scenario discussion 2026-10-22; see example/README.md for the full
-// rationale).
+// The development config for the on-bench ATECC608 (see example/README.md
+// for the full rationale).
 //
 // Shared by the two consumers that must always encode the SAME image:
 //   - example/console/main.c       (prov status/config/lock on the Pico)
@@ -55,7 +54,7 @@ static void dev_config(atecc608_config_intent_t *c)
     // Non-ECC unreadable secret slots (key_type NON_ECC is the default):
     // is_secret = no clear reads at all; KDF/sign stay internal.
     //   7-10 = password-store master + spare compartments, lockable
-    //   14   = I/O protection key, LOCKABLE (user decision 2026-10-22):
+    //   14   = I/O protection key, LOCKABLE:
     //          contents stay re-writable in development (lost copy =
     //          re-key); production hardening slot-locks it after the
     //          recorded copy is verified, closing the bus-attacker

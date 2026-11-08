@@ -9,9 +9,9 @@
 #include "fido_cose.h"
 #include "fido_sha256.h"
 
-// The claimed AAGUID — fixed per firmware (recorded in PLAN.md; a
-// demo value, not FIDO-registered). 16 bytes, as transmitted in
-// MakeCredential AuthenticatorData.
+// The claimed AAGUID — fixed per firmware (a demo value, not
+// FIDO-registered). 16 bytes, as transmitted in MakeCredential
+// AuthenticatorData.
 static const uint8_t s_aaguid[16] = {
     0x65, 0xF5, 0x10, 0x7F, 0x31, 0xA6, 0x47, 0x85,
     0x93, 0x01, 0x67, 0x88, 0xE1, 0x0E, 0xC7, 0x76,
@@ -28,25 +28,25 @@ void fido_ctap_ctx_init(fido_ctap_ctx_t *ctx)
 // numeric and emitted in ascending order (the CTAP2 canonical form
 // requires sorted map keys).
 //
-// KEY NUMBERING — the compatibility-critical detail (rounds C12/C13,
-// 2026-11-03/04): the CTAP 2.0 spec's table (aaguid 0x01, versions
-// 0x02, options 0x03, ...) was NEVER used by shipping hardware. CTAP
-// 2.1 renumbered the table (versions 0x01, extensions 0x02, aaguid
-// 0x03, options 0x04, maxMsgSize 0x05, pinUvAuthProtocols 0x06,
+// KEY NUMBERING — the compatibility-critical detail: the CTAP 2.0
+// spec's table (aaguid 0x01, versions 0x02, options 0x03, ...) was
+// NEVER used by shipping hardware. CTAP 2.1 renumbered the table
+// (versions 0x01, extensions 0x02, aaguid 0x03, options 0x04,
+// maxMsgSize 0x05, pinUvAuthProtocols 0x06,
 // maxCredentialCountInList 0x07, maxCredentialIdLength 0x08,
 // transports 0x09, algorithms 0x0A); 2.2 and 2.3 kept it, and every
 // real device (the YubiKey vector in Firefox's own test suite) and
-// every shipping client parse THAT numbering. Verified 2026-11-04
-// against Firefox's AuthenticatorInfo deserializer (dom/webauthn/
+// every shipping client parse THAT numbering. Verified against
+// Firefox's AuthenticatorInfo deserializer (dom/webauthn/
 // authenticator/src/ctap2/commands/get_info.rs): 0x01 => versions
 // (array of text), 0x03 => aaguid (bytes(16)), ...; unknown keys are
-// warned and skipped. The 1.0.2-1.0.3 2.0-numbered map put the AAGUID
-// bytes under 0x01, which Firefox tried to parse as `versions` ->
-// type error -> the whole GetInfo rejected -> U2F fallback (version
-// check -> 69 86) -> no makeCredential — the C13 dialog timeout. We
-// therefore emit the 2.1+ keys. firmwareVersion is a 2.1+ UINT key
-// (0x0E), not an array, so it stays OUT of this map — the firmware
-// version is carried by the INIT response instead:
+// warned and skipped. A 2.0-numbered map puts the AAGUID bytes under
+// 0x01, which Firefox tries to parse as `versions` -> type error ->
+// the whole GetInfo rejected -> U2F fallback (version check -> 69 86)
+// -> no makeCredential. We therefore emit the 2.1+ keys.
+// firmwareVersion is a 2.1+ UINT key (0x0E), not an array, so it
+// stays OUT of this map — the firmware version is carried by the INIT
+// response instead:
 //
 //   1   versions        ["FIDO_2_0"]            (required)
 //   3   aaguid          <16 bytes>              (required)
@@ -59,7 +59,7 @@ void fido_ctap_ctx_init(fido_ctap_ctx_t *ctx)
 //
 // No "clientPin"/"uv" option and no pinUvAuthProtocols (key 6): this
 // device has no PIN and no built-in biometrics — user presence is the
-// touch of the board (Phase 4 wires the button).
+// touch of the board (the GP10 button).
 static void handle_get_info(const fido_ctap_ctx_t *ctx,
                             uint8_t *resp, uint32_t resp_max,
                             uint32_t *resp_len)
@@ -179,12 +179,12 @@ static void handle_get_info(const fido_ctap_ctx_t *ctx,
 //
 // NOTE: the v2.0 spec's table has authData under 0x01 and fmt under
 // 0x02 (attStmt a bytestring), but current browsers parse ONLY the
-// v2.1 shape unconditionally. Verified 2026-11-04 against Firefox's
+// v2.1 shape unconditionally. Verified against Firefox's
 // `MakeCredentialsResult` deserializer (make_credentials.rs: 0x01 must
 // be a string, 0x02 a bytestring = authData, 0x03 a map = attStmt) and
 // its own test vector MAKE_CREDENTIALS_SAMPLE_RESPONSE_CTAP2, which is
-// exactly this layout — round C14 proved the framing is NOT what
-// Firefox rejects (the C14 defect was the COSE_Key crv value, see
+// exactly this layout — the framing is NOT what Firefox rejects (an
+// earlier build was rejected over the COSE_Key crv value, see
 // fido_cose.c). So the v2.1 layout is emitted even while advertising
 // versions=["FIDO_2_0"]. attStmt carries no x5c — self-attestation
 // (WebAuthn §8.2; Firefox's Packed statement takes x5c as
@@ -202,7 +202,7 @@ static void handle_get_info(const fido_ctap_ctx_t *ctx,
 // that always follows; L3 layout is UP=0x01 UV=0x04 BE=0x08 BS=0x10
 // AT=0x40 ED=0x80 (matching the FIDO-certified pico-fido2 reference).
 // rpIdHash = SHA-256(rp.id). signCount = the
-// ATECC608's counter 0, READ (Phase 4 increments it per signature).
+// ATECC608's counter 0, READ (the login path increments it per signature).
 // The "packed" signature is over SHA-256(authData ‖ clientDataHash),
 // made by the freshly generated credential key.
 
@@ -339,7 +339,7 @@ static uint8_t parse_make_credential(fido_ctap_ctx_t *ctx,
             // tool) sends user = {"name": "dummy"} — no user.id, no
             // displayName — and the spec-strict
             // CTAP2_ERR_MISSING_PARAMETER failed Chrome registration
-            // there (bench round 1). This device has no UV, so the user
+            // there. This device has no UV, so the user
             // entity is storage metadata only: a request without user.id
             // gets a synthesized 32-byte handle (below, with the credId
             // mint); absent name/displayName stay empty.
@@ -519,9 +519,9 @@ static uint8_t parse_make_credential(fido_ctap_ctx_t *ctx,
             // CTAP v2.0/v2.1, 0x06 is pinUvAuthToken (a byte string);
             // in CTAP v2.2 the table is renumbered and 0x06 is
             // `extensions` (a map of extension id -> input), which
-            // modern browsers send unconditionally (bench round C1:
-            // Firefox 2026 sent {"hmac-secret": false} to this FIDO_2_0
-            // device, and the blanket PIN_AUTH_INVALID failed the
+            // modern browsers send unconditionally (Firefox 2026 sent
+            // {"hmac-secret": false} to this FIDO_2_0 device, and the blanket
+            // PIN_AUTH_INVALID failed the
             // registration — Firefox surfaces any CTAP error there as
             // NotAllowedError). A v2.0 authenticator ignores
             // parameters it does not understand (v2.0 §8), so the map
@@ -701,8 +701,7 @@ static uint8_t parse_make_credential(fido_ctap_ctx_t *ctx,
 // Request (the table is STABLE across CTAP 2.0 -> 2.3 — unlike
 // makeCredential it was never renumbered; verified against the 2.0 PS
 // §5.2, the 2.3 spec of record §6.2, Chrome's
-// ctap_get_assertion_request.cc and Firefox's GetAssertion::serialize —
-// SD-6):
+// ctap_get_assertion_request.cc and Firefox's GetAssertion::serialize):
 //
 //   1   rpId              text          required
 //   2   clientDataHash    bytes(32)     required
@@ -720,7 +719,7 @@ static uint8_t parse_make_credential(fido_ctap_ctx_t *ctx,
 //
 // The allowList descriptors use TEXT keys ("id"/"type") — the CTAP 2.0
 // PS's own EXAMPLE 5 and Firefox's PublicKeyCredentialDescriptor
-// serializer (SD-6).
+// serializer.
 //
 // Options (spec order, 2.3 §6.2.2 step 4): "uv": true ->
 // UNSUPPORTED_OPTION (no built-in UV; this device advertises FIDO_2_0,
@@ -735,7 +734,7 @@ static uint8_t parse_make_credential(fido_ctap_ctx_t *ctx,
 // recent first = reverse slot order (a documented approximation — the
 // record carries no creation timestamp).
 //
-// Response (stable 2.0 -> 2.3; SD-6 — INTEGER top-level keys, TEXT keys
+// Response (stable 2.0 -> 2.3 — INTEGER top-level keys, TEXT keys
 // in the nested credential and user maps):
 //
 //   1: credential { "id": bytes, "type": "public-key" }
@@ -1077,7 +1076,7 @@ static int ga_assert(fido_ctap_ctx_t *ctx, const fido_ga_enum_t *en, int idx,
     // WebAuthn L3 section 6.5.5: the ES256 "sig" value MUST be an ASN.1
     // DER Ecdsa-Sig-Value (RFC 3279 section 2.2.3) — not the raw R||S
     // the key backend produces (that is the COSE_Sign form, RFC 9052).
-    // The raw form broke every py_webauthn RP (webauthn.io round C20+).
+    // The raw form broke every py_webauthn RP (webauthn.io).
     uint8_t sig_der[FIDO_ECDSA_DER_SIG_MAX];
     const uint32_t sig_der_len =
         fido_ecdsa_der_encode(sig, sig_der, sizeof sig_der);
@@ -1087,7 +1086,7 @@ static int ga_assert(fido_ctap_ctx_t *ctx, const fido_ga_enum_t *en, int idx,
         return 1;
     }
 
-    // Response (SD-6): INTEGER top-level keys; TEXT keys in the nested
+    // Response: INTEGER top-level keys; TEXT keys in the nested
     // credential and user maps. numberOfCredentials is present on the
     // first response of a resident enumeration only — deleted for an
     // allowList assertion and for every get_next_assertion.

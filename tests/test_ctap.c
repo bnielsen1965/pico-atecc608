@@ -907,7 +907,7 @@ static void t_mc_happy(void)
                                       FIDO_CRED_FILE_SIZE - 4));
 }
 
-// The lenient user sub-fields (bench round 1 fix): the
+// The lenient user sub-fields: the
 // fido2-demonstration harness sends user = {"name": …} — no user.id,
 // no displayName (and pkcp entries WITH "type": "public-key"). The
 // sub-fields are optional on this device; a missing user.id is
@@ -980,8 +980,8 @@ static void t_mc_lenient_user(void)
     }
 }
 
-// Bench round C1: the EXACT makeCredential Firefox 2026 sent (the
-// console DBG MSG capture; 190 bytes — the first real browser request,
+// The EXACT makeCredential Firefox 2026 sent (captured on the console;
+// 190 bytes — the first real browser request,
 // reassembled from four CTAPHID packets). It uses the renumbered CTAP
 // v2.2 parameter table: key 6 is the `extensions` map
 // ({"hmac-secret": false}), NOT the v2.0 pinUvAuthToken byte string —
@@ -1411,7 +1411,7 @@ static void t_mc_tiny_buffer(void)
 //   response  = 0x00 | { 1: {"id": credId, "type": "public-key"},
 //                          2: authData, 3: sig, 4: {"id": userHandle}
 //                          [5: numberOfCredentials] }
-//               (SD-6: INTEGER top-level keys, TEXT keys in the nested
+//               (INTEGER top-level keys, TEXT keys in the nested
 //               maps — Firefox's deserializer rejects unknown fields,
 //               so exactly these fields and no others)
 static uint8_t s_cred_a[32];   // 0x5A+i — the "older" credential
@@ -2246,7 +2246,7 @@ static void t_reset_errors(void)
 
 // --- context ---------------------------------------------------------------------
 
-// The user-presence flag (Phase 3) is app-written, handler-consumed
+// The user-presence flag is app-written, handler-consumed
 // state: a fresh context must start with no touch pending, and re-init
 // must clear a stale one.
 static void t_ctx_init(void)
@@ -2344,7 +2344,7 @@ static void t_ecdsa_der(void)
     CHECK(0 == fido_ecdsa_der_encode(raw, der, 69));
 }
 
-// Phase 5 hardening: structurally truncated requests — the CBOR
+// Hardening: structurally truncated requests — the CBOR
 // promises more than the buffer holds (a map with fewer pairs than its
 // header declares, a string cut mid-payload, ...). That is malformed
 // CBOR -> 0x12 INVALID_CBOR at EVERY cut point (0x11 is reserved for a

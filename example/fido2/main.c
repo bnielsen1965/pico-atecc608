@@ -91,7 +91,7 @@ int main(void)
     stdio_init_all();
 
     printf("pico-atecc608-fido2: ATECC608 FIDO2 authenticator "
-           "(Phase 4: CTAPHID + CTAP2 GET_INFO + MakeCredential + "
+           "(CTAPHID + CTAP2 GET_INFO + MakeCredential + "
            "GetAssertion + Reset)\n");
     printf("User presence: press the button on GP10, or type 'up' on "
            "the UART0 console, while a registration or login waits\n");

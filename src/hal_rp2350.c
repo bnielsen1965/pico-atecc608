@@ -1,9 +1,8 @@
 // RP2350 I2C HAL for Microchip cryptoauthlib v3.8.0 (modern, non-legacy
 // ATCAHAL_t interface).
 //
-// Wire protocol (verified against the standalone Phase 1 driver on
-// hardware): the I/O token is the FIRST DATA BYTE of each write
-// transaction, not part of the address:
+// Wire protocol (verified on hardware): the I/O token is the FIRST DATA
+// BYTE of each write transaction, not part of the address:
 //
 //   command:  S [addr|W] 03 count opcode param1 param2 data crc_lo crc_hi P
 //   read tok: S [addr|W] 00 P          (chip NACKs while a command runs)
@@ -12,8 +11,8 @@
 //   sleep:    S [addr|W] 01 P
 //   wake:     S 00 NACK P  (I2C general call at 100 kHz, then read 4 bytes)
 //
-// Wake design (settled 2026-10-18): the library's non-legacy I2C wake path
-// (calib_wakeup_i2c) first asks the HAL for ATCA_HAL_CHANGE_BAUD; when the
+// Wake design: the library's non-legacy I2C wake path (calib_wakeup_i2c)
+// first asks the HAL for ATCA_HAL_CHANGE_BAUD; when the
 // HAL returns ATCA_UNIMPLEMENTED, the library routes the whole handshake
 // through hal_i2c_control(ATCA_HAL_CONTROL_WAKE). That is where our wake
 // lives: 100 kHz general-call pulse, cfg->wake_delay wait, 4-byte response
@@ -55,7 +54,7 @@ static const uint8_t s_general_call_dummy = 0x00;
 
 
 // ---------------------------------------------------------------------------
-// Stuck-bus recovery (moved from the Phase 1 console app)
+// Stuck-bus recovery
 // ---------------------------------------------------------------------------
 
 void hal_rp2350_bus_recover(const hal_rp2350_ctx_t *ctx)

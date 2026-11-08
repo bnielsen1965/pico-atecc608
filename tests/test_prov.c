@@ -1,4 +1,4 @@
-// Host unit tests for the ATECC608 guarded provisioning API (Phase 4A),
+// Host unit tests for the ATECC608 guarded provisioning API,
 // driven through the real cryptoauthlib atcab_*/calib layers against the
 // mock chip (tests/mock_chip.c) — no Pico, no physical device.
 
@@ -392,7 +392,7 @@ static void t_iokey(void)
     printf("t_iokey\n");
     setup();
 
-    // Real chip behavior (verified on the bench; Microchip's own
+    // Real chip behavior (Microchip's own
     // conformance test atca_tests_read.c asserts it): data slots cannot
     // be read while the data zone is unlocked. A read-back verify of the
     // I/O key write is therefore impossible at any point in the flow;
@@ -400,8 +400,8 @@ static void t_iokey(void)
     CHECK(ATCA_EXECUTION_ERROR ==
           atcab_read_zone(ATCA_ZONE_DATA, 14, 0, 0, readback, ATECC608_DATA_SLOT_LEN));
 
-    // Real chip behavior (verified on the bench 2026-10-23: a 32-byte
-    // Write to a plain factory slot returns ATCA_EXECUTION_ERROR): the
+    // Real chip behavior (a 32-byte Write to a plain factory slot
+    // returns ATCA_EXECUTION_ERROR): the
     // data zone cannot be WRITTEN until the config zone is locked — all
     // of Microchip's data-write conformance tests run with the config
     // zone locked. The prov layer refuses before reaching the chip; the
@@ -413,7 +413,7 @@ static void t_iokey(void)
     CHECK(ATCA_EXECUTION_ERROR ==
           atcab_write_zone(ATCA_ZONE_DATA, 14, 0, 0, key, ATECC608_DATA_SLOT_LEN));
 
-    // The approved 4B order: provision the config zone, lock it
+    // The intended order: provision the config zone, lock it
     // (irreversible), THEN write the I/O key.
     atecc608_config_default(&cfg);
     cfg.slot[14].is_secret = true;   // the dev intent marks slot 14 secret

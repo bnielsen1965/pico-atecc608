@@ -110,7 +110,7 @@ set(CMAKE_CXX_STANDARD 11)
 # CMake picks its HAL by *build host* (it force-adds the Linux host HAL on any
 # UNIX machine), which is wrong for a bare-metal cross-target. Building the
 # core directly lets us (a) drop the host-only files and (b) supply our own
-# RP2350 I2C HAL (Phase 2). Nothing from cryptoauthlib is stored in this repo.
+# RP2350 I2C HAL. Nothing from cryptoauthlib is stored in this repo.
 #
 # Air-gapped build: -DCRYPTOAUTHLIB_SOURCE_DIR=<path to a local clone> (still
 # not committed to this repo).
@@ -148,8 +148,8 @@ set(ATCA_ATECC108A_SUPPORT ON)
 set(ATCA_ATSHA206A_SUPPORT ON)   # legacy, pulls in app/api_206a
 set(ATCA_CA_SUPPORT        ON)
 set(ATCA_CHECK_PARAMS_EN   ON)
-# Phase 2: the module supplies the RP2350 I2C HAL (src/hal_rp2350.c), and
-# the atcab_* basic API layer is compiled for the demo console.
+# The module supplies the RP2350 I2C HAL (src/hal_rp2350.c), and the
+# atcab_* basic API layer is compiled for the demo console.
 set(ATCA_HAL_I2C           ON)
 set(ATCA_USE_ATCAB_FUNCTIONS ON)
 # newlib (the Pico C library) provides these. (strcasestr is a GNU extension
@@ -212,15 +212,14 @@ target_include_directories(cryptoauth_core PUBLIC
 # ============================================================================
 # module library
 # ============================================================================
-# Phase 3: the module exposes the curated atecc608_* core API (public
-# header in include/atecc608/, implementation in src/atecc608.c) over
-# cryptoauthlib; the RP2350 I2C HAL (src/hal_rp2350.*) is module-internal
-# and lives in the cryptoauth_core target (see above).
-# Phase 4A adds the pure-logic config-zone builder (atecc608_config.c) and
-# the guarded provisioning API (atecc608_prov.c); Phase 5 adds the crypto
-# pass-through API (atecc608_crypto.c, KDF PRF with the enforced I/O-
-# protection decrypt path). All three are HAL-agnostic and are
-# unit-tested on the host in tests/ (mock chip, no Pico).
+# The module exposes the curated atecc608_* core API (public header in
+# include/atecc608/, implementation in src/atecc608.c) over cryptoauthlib;
+# the RP2350 I2C HAL (src/hal_rp2350.*) is module-internal and lives in the
+# cryptoauth_core target (see above). The pure-logic config-zone builder
+# (atecc608_config.c), the guarded provisioning API (atecc608_prov.c) and
+# the crypto pass-through API (atecc608_crypto.c, KDF PRF with the enforced
+# I/O-protection decrypt path) are HAL-agnostic and unit-tested on the host
+# in tests/ (mock chip, no Pico).
 add_library(atecc608 STATIC
     src/atecc608.c
     src/atecc608_config.c

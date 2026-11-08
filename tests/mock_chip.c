@@ -57,9 +57,9 @@
 //               (source slot in the low byte), payload = 4 details bytes
 //               (LE; message length in the top byte) + the message.
 //               Only the PRF / source-slot / target-output combination is
-//               modeled. Gates: the data zone must be LOCKED (bench
-//               finding 2026-10-24/25) and the source slot must be a key
-//               slot. Fake PRF: out[i] = key[i%32] ^ nonce[i%32]
+//               modeled. Gates: the data zone must be LOCKED, and the
+//               source slot must be a key slot. Fake PRF: out[i] =
+//               key[i%32] ^ nonce[i%32]
 //               ^ msg[i%msg_len] ^ i. With the I/O protection model on,
 //               the output is encrypted (atcah_io_decrypt — symmetric
 //               XOR) and a deterministic 32-byte nonce is appended.
@@ -306,10 +306,9 @@ static void mock_handle_write(mock_chip_t *chip, uint8_t param1, uint16_t param2
 
         if (!mock_cfg_locked(chip)) {
             // The data zone cannot be written until the config zone is
-            // locked (verified on the bench 2026-10-23: a 32-byte Write
-            // to a plain factory slot returns an execution error; all of
-            // Microchip's data-write conformance tests run with the
-            // config zone locked).
+            // locked (a 32-byte Write to a plain factory slot returns an
+            // execution error; all of Microchip's data-write conformance
+            // tests run with the config zone locked).
             mock_resp_exec(chip);
         } else if (!block_write && !mock_data_locked(chip)) {
             // Unlocked data zone: only 32-byte slot writes are allowed
@@ -527,8 +526,8 @@ static void mock_handle_genkey(mock_chip_t *chip, uint8_t param1, uint16_t param
 
 // NONCE 0x16: pass-through (mode bits 0x03, 32-byte input) into the
 // TempKey (target 0x00) or the Message Digest Buffer (target 0x40).
-// The payload's CONTENTS become the target's contents — bench-verified
-// 2026-10-25: atcab_nonce is a nonce-LOAD, not random generation.
+// The payload's CONTENTS become the target's contents: atcab_nonce is a
+// nonce-LOAD, not random generation.
 static void mock_handle_nonce(mock_chip_t *chip, uint8_t param1, uint16_t param2,
                               const uint8_t *payload, uint16_t payload_len)
 {
@@ -576,8 +575,8 @@ static void mock_handle_kdf(mock_chip_t *chip, uint8_t param1, uint16_t param2,
         mock_resp_exec(chip); // any other mode combination: not modeled
         return;
     }
-    // The data-zone gate (bench-verified 2026-10-24/25): a KDF with
-    // target=output is refused while the data zone is unlocked.
+    // The data-zone gate: a KDF with target=output is refused while the
+    // data zone is unlocked.
     if (!mock_data_locked(chip)) {
         mock_resp_exec(chip);
         return;
@@ -601,7 +600,7 @@ static void mock_handle_kdf(mock_chip_t *chip, uint8_t param1, uint16_t param2,
                            ^ (uint8_t)i);
     }
     if (chip->kdf_io_prot) {
-        // kdf_prot=1 (bench-verified on this chip): the output arrives
+        // kdf_prot=1: the output arrives
         // ENCRYPTED with a 32-byte response nonce appended. atcah_io_
         // decrypt is a symmetric XOR keystream, so it doubles as the
         // encryption. The response nonce is deterministic (and never
@@ -813,8 +812,8 @@ void mock_chip_reset(mock_chip_t *chip)
     chip->config[86] = 0x55; // LockValue  (data zone, unlocked)
     chip->config[87] = 0x55; // LockConfig (config zone, unlocked)
 
-    // SlotLocked: the factory ships 0xFFFF (verified on the bench chip
-    // 2026-10-23). Lock-command-managed; the prov path preserves it, so the
+    // SlotLocked: the factory ships 0xFFFF. Lock-command-managed; the
+    // prov path preserves it, so the
     // mock's write path never has to decide what it does with the field.
     chip->config[88] = 0xFF;
     chip->config[89] = 0xFF;

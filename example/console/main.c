@@ -18,17 +18,17 @@
 //   serial   - atecc608_serial: 9-byte factory serial
 //   lock     - atecc608_is_locked: config/data zone lock status
 //   diag     - raw I2C bus diagnostics (levels, general call, wake read)
-//   config   - Phase 6 demo: decoded config-zone read-back
+//   config   - decoded config-zone read-back
 //              (atecc608_read_config_zone + atecc608_config_parse);
 //              read-only
-//   selftest - Phase 7: read-only on-hardware validation suite — the
+//   selftest - read-only on-hardware validation suite — the
 //              generic invariants of the agreed (fully locked) config +
-//              the bench chip's golden values (regression gate);
+//              the reference chip's golden values (regression gate);
 //              `selftest generic` = invariants only (fresh chip);
 //              [PASS]/[FAIL] per check + a final verdict
-//   prov ... - Phase 4B provisioning command set (see below)
+//   prov ... - the provisioning command set (see below)
 //
-// Phase 4B provisioning commands (the agreed config is
+// Provisioning commands (the agreed config is
 // example/common/dev_config.h; scenarios in example/README.md):
 //   prov status    - read-only: chip state + config-zone dump + diff vs
 //                    the planned image + /io_key.bin littlefs persistence
@@ -47,7 +47,7 @@
 //                    KDF). Safe any time after `prov iokey`; it writes
 //                    nothing and locks nothing.
 //   prov kdf <slot> - READ-ONLY: 32-B KDF (PRF, source = data slot) via
-//                    the Phase 5 wrapper (atecc608_kdf_prf); fixed nonce
+//                    the module wrapper (atecc608_kdf_prf); fixed nonce
 //                    and message, so two runs print the SAME value — the
 //                    on-hardware KDF round-trip. I/O key from /io_key.bin.
 //   prov iokeyshow - DEV-ONLY (do not ship in a production application):
@@ -77,7 +77,7 @@
 //                    `prov counter <n> CONFIRM` increments counter n
 //                    (ONE WAY — the typed CONFIRM is the confirm)
 //
-// The agreed Phase 5+ bench order: prov genkey 1; prov genkey 3..6;
+// The agreed provisioning order: prov genkey 1; prov genkey 3..6;
 // prov genkey 12 (RECORD every printed public key) -> prov lockdata
 // CONFIRM -> prov iokeytest (must PASS) -> prov lockslot 14 CONFIRM.
 //
@@ -179,10 +179,9 @@ static bool load_io_key_file(uint8_t key[IOKEY_FILE_KEY_LEN])
     return true;
 }
 
-// The planned config image for this bench chip: the agreed intent, with the
-// bytes the prov path preserves from the chip patched in the same way (the
-// builder does not model them). Returns false if the intent is rejected by
-// validation.
+// The planned config image: the agreed intent, with the bytes the prov
+// path preserves from the chip patched in the same way (the builder does
+// not model them). Returns false if the intent is rejected by validation.
 static bool planned_image(const uint8_t chip[ATECC608_CONFIG_ZONE_LEN],
                           uint8_t img[ATECC608_CONFIG_ZONE_LEN])
 {
@@ -225,9 +224,9 @@ static void commandHelp(char *cmdLine)
     printf("info    - atecc608_info (part id + silicon revision)\n");
     printf("serial  - atecc608_serial (9-byte factory serial)\n");
     printf("lock    - atecc608_is_locked (config / data zone)\n");
-    printf("config  - decoded config-zone read-back (Phase 6 demo, read-only)\n");
-    printf("selftest [generic]- read-only on-hardware validation suite (Phase 7;\n");
-    printf("                    generic = invariants only, no bench goldens)\n");
+    printf("config  - decoded config-zone read-back (read-only)\n");
+    printf("selftest [generic]- read-only on-hardware validation suite;\n");
+    printf("                    generic = invariants only, no reference goldens)\n");
     printf("prov status   - chip state + config zone + diff + /io_key.bin persistence\n");
     printf("prov randtest - chip RNG x2 (0xFFFF0000 pattern while unlocked)\n");
     printf("prov iokey    - Pico TRNG -> slot 14 (after prov lock) -> print -> save\n");
@@ -241,7 +240,7 @@ static void commandHelp(char *cmdLine)
     printf("prov pubkey <slot>  - public key of the slot's private key (read-only; works locked)\n");
     printf("prov lockdata [CONFIRM]    - LOCK the data zone (IRREVERSIBLE)\n");
     printf("prov lockslot <slot> [CONFIRM] - LOCK one data slot (IRREVERSIBLE)\n");
-    printf("prov kdf <slot> - 32-B KDF PRF from the slot (read-only; bench: run twice)\n");
+    printf("prov kdf <slot> - 32-B KDF PRF from the slot (read-only; run twice)\n");
     printf("prov counter [<0|1> [CONFIRM]] - read the monotonic counters; CONFIRM increments (one way)\n");
 }
 
@@ -359,7 +358,7 @@ static void commandDiag(char *cmdLine)
     }
 }
 
-// --- Phase 6: config read-back demo (see the top-of-file list) --------------
+// --- config read-back demo (see the top-of-file list) -------------------------
 
 // Append " flag" to the row text (or "flag" when it is still empty).
 static void add_flag(char *buf, size_t size, size_t *n, const char *flag)
@@ -422,12 +421,12 @@ static void print_slot_row(int n, const uint8_t zone[ATECC608_CONFIG_ZONE_LEN],
     printf("%4d  0x%04X  0x%04X  %-42s | %s\n", n, sw, kw, slotpol, keypol);
 }
 
-// config — Phase 6 demo: decoded read-back of the config zone. Reads the
-// zone with the module API (atecc608_read_config_zone) and decodes it with
-// the Phase 4A config builder (atecc608_config_parse), printing every
-// field in human form — including the per-slot policy table. READ-ONLY; a
-// demo of the module API, not a provisioning tool (`prov status` keeps the
-// raw byte dump, the planned-image diff and the littlefs persistence state).
+// config — decoded read-back of the config zone. Reads the zone with the
+// module API (atecc608_read_config_zone) and decodes it with the config
+// builder (atecc608_config_parse), printing every field in human form —
+// including the per-slot policy table. READ-ONLY; a demo of the module
+// API, not a provisioning tool (`prov status` keeps the raw byte dump,
+// the planned-image diff and the littlefs persistence state).
 static void commandConfig(char *cmdLine)
 {
     (void)cmdLine;
@@ -512,7 +511,7 @@ static void commandConfig(char *cmdLine)
     }
 }
 
-// --- Phase 4B: the prov command set ------------------------------------------
+// --- the prov command set -----------------------------------------------------
 
 // Print a 128-byte config zone, 16 bytes per row.
 static void print_zone(const char *label, const uint8_t *zone)
@@ -696,14 +695,14 @@ static void provRandtest(void)
 // prov iokey — WRITE (dev flow; re-running re-keys): Pico TRNG -> Write
 // slot 14 -> print the key -> save /io_key.bin in littlefs.
 // Runs AFTER `prov lock CONFIRM`: the chip refuses data-zone writes until
-// the config zone is locked (verified on the bench 2026-10-23). I/O
-// protection (io_prot_en) protects the I/O of ECDH/KDF/Verify/SecureBoot,
-// not the transport — the chip stays reachable with plain commands after
-// the lock. The write is verified by the chip's write ACK only: a
-// read-back verify is impossible on the ATECC608 — data slots cannot be
-// read while the data zone is unlocked (Microchip's own conformance test
-// asserts this), and `prov config` marks slot 14 is_secret. The key is
-// verified functionally by an I/O-protected transaction (Phase 7).
+// the config zone is locked. I/O protection (io_prot_en) protects the I/O
+// of ECDH/KDF/Verify/SecureBoot, not the transport — the chip stays
+// reachable with plain commands after the lock. The write is verified by
+// the chip's write ACK only: a read-back verify is impossible on the
+// ATECC608 — data slots cannot be read while the data zone is unlocked
+// (Microchip's own conformance test asserts this), and `prov config`
+// marks slot 14 is_secret. The key is verified functionally by an
+// I/O-protected transaction (prov iokeytest).
 static void provIokey(void)
 {
     uint8_t key[IOKEY_FILE_KEY_LEN];
@@ -713,9 +712,9 @@ static void provIokey(void)
     atecc608_status_t st;
 
     // Gate: only while the config zone is LOCKED — the chip refuses any
-    // data-zone write until it is (verified on the bench 2026-10-23).
-    // The approved order is `prov config` -> `prov lock CONFIRM` ->
-    // `prov iokey`. I/O protection protects command I/O, not the
+    // data-zone write until it is. The intended order is `prov config` ->
+    // `prov lock CONFIRM` -> `prov iokey`. I/O protection protects command
+    // I/O, not the
     // transport, so the chip stays reachable after the lock.
     st = atecc608_is_locked(ATECC608_ZONE_CONFIG, &locked);
     if (ATECC608_OK != st) {
@@ -776,7 +775,7 @@ static void provIokey(void)
     printf("NOTE: no read-back verify is possible — data slots are not readable\n"
            "while the data zone is unlocked, and `prov config` marks the slot\n"
            "is_secret. The key is verified functionally by an I/O-protected\n"
-           "transaction (Phase 7).\n");
+           "transaction (prov iokeytest).\n");
     printf("RECORD THIS — it is the durable backup. A normal uf2 reflash PRESERVES\n"
            "the littlefs volume (it writes only the app region, not flash 0x80000+);\n"
            "only a full-flash erase loses it. Run `prov status` to confirm it survived:\n");
@@ -818,7 +817,7 @@ static void provIokey(void)
 // kdf_prf_output_encrypted, but the key comes from littlefs instead of a
 // hard-coded global.
 //
-// Bench findings (2026-10-25, after the data-zone lock):
+// Findings from the reference chip (after the data-zone lock):
 // (1) atcab_nonce is a PASS-THROUGH nonce-LOAD, not random generation — it
 //     loads the buffer's CONTENTS into tempkey. This test therefore fills
 //     the buffer from the Pico TRNG and loads the SAME buffer before BOTH
@@ -832,7 +831,7 @@ static void provIokey(void)
 //     SHA256(io_key || 16-B nonce half) XOR per 32-B block) and verified
 //     both responses decrypt with the recorded durable key: the I/O key in
 //     slot 14 is FUNCTIONALLY VERIFIED (chip key == file key == record).
-//     CONSEQUENCE FOR PHASE 7: every KDF with target=output from this chip
+//     CONSEQUENCE: every KDF with target=output from this chip
 //     must be atcah_io_decrypt'ed with the I/O key before use.
 // (3) Diagnostic prints kept (tempkey nonce, clear + its resp nonce, raw
 //     enc output, enc resp nonce, and on failure the file key) so any
@@ -887,8 +886,8 @@ static bool iokey_roundtrip(bool verbose, char *detail, size_t detail_size)
     const uint8_t mode = KDF_MODE_ALG_PRF | KDF_MODE_SOURCE_TEMPKEY;
     ATCA_STATUS atca;
 
-    // Fresh random tempkey input from the Pico TRNG. NOTE (bench 2026-10-25):
-    // atcab_nonce is a PASS-THROUGH nonce-LOAD, not random generation — it
+    // Fresh random tempkey input from the Pico TRNG. NOTE: atcab_nonce is
+    // a PASS-THROUGH nonce-LOAD, not random generation — it
     // loads the buffer's CONTENTS into tempkey. The SAME buffer is loaded
     // before BOTH KDF calls, so the PRF input is identical for both.
     for (int i = 0; i < (int)sizeof(nonce) / 4; i++) {
@@ -976,8 +975,8 @@ static bool iokey_roundtrip(bool verbose, char *detail, size_t detail_size)
     }
 
     // 5. Compare the clear result with the decrypted encrypted result.
-    // Bench finding (2026-10-25, host-verified against the printed
-    // keystreams): with kdf_prot=1 this chip ENFORCES I/O protection —
+    // Finding (host-verified against the printed keystreams): with
+    // kdf_prot=1 this chip ENFORCES I/O protection —
     // the clear call's output is encrypted too, and its response carries
     // the nonce (clear_had_nonce). Decrypt a copy of the clear output
     // with the SAME saved key before comparing. With an opt-in config
@@ -1013,7 +1012,7 @@ static bool iokey_roundtrip(bool verbose, char *detail, size_t detail_size)
                    "I/O protection). The printed values let the host side\n"
                    "recompute the exact keystreams (SHA256(io_key || 16-B nonce\n"
                    "half) XOR per 32-B block) and identify which key the chip and\n"
-                   "the file each hold — the 2026-10-25 iokeytest recipe.\n"
+                   "the file each hold — the iokeytest recipe.\n"
                    "Do NOT re-key slot 14 before that verdict.\n");
             printf("decrypted KDF (64 B):  ");
             atecc608_print_hex(out_enc, sizeof(out_enc));
@@ -1190,7 +1189,7 @@ static void provLock(const char *rest)
     }
 }
 
-// --- Phase 5+: the on-chip ECC key lifecycle (see the top-of-file list) ----
+// --- the on-chip ECC key lifecycle (see the top-of-file list) ----------------
 
 // Parse a slot number (0..15) from the whole argument string; report on
 // failure. (A manual parse: the argument is at most two digits.)
@@ -1631,37 +1630,37 @@ static void provCounter(const char *rest)
     }
 }
 
-// --- Phase 7: selftest — the read-only on-hardware validation suite -------
+// --- selftest — the read-only on-hardware validation suite -------------------
 //
 // Runs the GENERIC invariants of a chip carrying the agreed config
 // (example/common/dev_config.h, fully locked: config zone + data zone +
 // slot 14) and prints one [PASS]/[FAIL] line per check plus a final
-// verdict. In full mode it then checks the bench-chip goldens (serial,
+// verdict. In full mode it then checks the reference-chip goldens (serial,
 // the six public keys, the slot-7 KDF value, the config-zone CRC — the
 // regression gate); `selftest generic` skips those (a fresh chip during
 // bring-up). Strictly READ-ONLY — no chip writes — so it is safe at any
 // time, including on production hardware (HARD RULE).
 
-// --- bench-chip goldens (sub-step 7.2; dev-only, console example only) --
+// --- reference-chip goldens (dev-only, console example only) ----------------
 //
-// Values recorded from the bench chip (serial 01 23 06 40 AE B6 B9 B7
-// EE), recorded from the bench chip. The generic invariants
-// above prove a chip carries the AGREED config; the goldens prove it is
-// THE recorded bench chip, and `selftest` (full mode) hard-FAILS on a
-// mismatch: the regression gate. NOT part of the library.
-#define BENCH_CRC16 0xC904u // config zone, fully locked (00 00 / FF BF)
-static const uint8_t BENCH_SERIAL[ATECC608_SERIAL_LEN] = {
+// Values recorded from the reference chip (serial 01 23 06 40 AE B6 B9 B7
+// EE). The generic invariants above prove a chip carries the AGREED config;
+// the goldens prove it is THE recorded reference chip, and `selftest` (full
+// mode) hard-FAILS on a mismatch: the regression gate. NOT part of the
+// library.
+#define GOLDEN_CRC16 0xC904u // config zone, fully locked (00 00 / FF BF)
+static const uint8_t GOLDEN_SERIAL[ATECC608_SERIAL_LEN] = {
     0x01, 0x23, 0x06, 0x40, 0xAE, 0xB6, 0xB9, 0xB7, 0xEE,
 };
 // kdf_prf(slot 7, zero nonce, msg 00..0F) — the vault master derivation.
-static const uint8_t BENCH_KDF[ATECC608_KDF_OUT_LEN] = {
+static const uint8_t GOLDEN_KDF[ATECC608_KDF_OUT_LEN] = {
     0x6F, 0xFF, 0x7D, 0xD6, 0x41, 0x75, 0x60, 0x3F, 0x83, 0x05, 0xCE, 0xA6, 0x20,
     0xF0, 0xB9, 0x32, 0x57, 0x29, 0x50, 0x26, 0xD9, 0xB4, 0xDF, 0x6B, 0xCC,
     0x8D, 0x6C, 0x9D, 0xC1, 0x31, 0x4C, 0x65,
 };
 // The six ECC public keys (slots 1, 3, 4, 5, 6, 12), X || Y big-endian,
 // as printed by `prov genkey` / `prov pubkey` (GenKey mode 0x00).
-static const uint8_t BENCH_PUBKEYS[6][ATECC608_PUBKEY_LEN] = {
+static const uint8_t GOLDEN_PUBKEYS[6][ATECC608_PUBKEY_LEN] = {
     { /* slot 1 — device identity */
       0x1E, 0xE5, 0x07, 0xEC, 0xFC, 0x0D, 0xB2, 0x10, 0x35, 0x54, 0x32, 0xBC,
       0x2E, 0x63, 0xAB, 0x84, 0x36, 0xC3, 0x04, 0xF8, 0xC9, 0x54, 0x73, 0x95,
@@ -1759,9 +1758,9 @@ static size_t st_addf(char *d, size_t size, size_t n, const char *fmt, ...)
     return n;
 }
 
-// selftest — run the read-only on-hardware validation suite (Phase 7).
+// selftest — run the read-only on-hardware validation suite.
 // Full mode (the default) runs the generic invariants and then the
-// bench-chip goldens (the regression gate); `selftest generic` runs the
+// reference-chip goldens (the regression gate); `selftest generic` runs the
 // invariants only (a fresh chip during bring-up — see docs/BRINGUP.md).
 static void commandSelftest(char *cmdLine)
 {
@@ -1906,7 +1905,7 @@ static void commandSelftest(char *cmdLine)
     // (5) the six ECC private keys (agreed layout): readable via
     // get_pubkey (mode 0x00 works after the data-zone lock), 64 B,
     // non-zero, pairwise distinct. (The golden section below compares
-    // them against the bench chip's recorded keys.)
+    // them against the reference chip's recorded keys.)
     {
         bool ok = true;
         for (int i = 0; i < 6 && ok; i++) {
@@ -1943,7 +1942,8 @@ static void commandSelftest(char *cmdLine)
 
     // (6) KDF determinism: two PRF derivations from slot 7 (the vault
     // master in the agreed layout) with the fixed zero nonce and the
-    // fixed 00..0F message must be identical. (7.2 adds the bench value.)
+    // fixed 00..0F message must be identical. (The goldens section checks
+    // the reference value.)
     uint8_t io_key[IOKEY_FILE_KEY_LEN];
     bool have_io_key = iokey_file_valid(io_key, d, sizeof(d));
     uint8_t msg[16];
@@ -1992,23 +1992,23 @@ static void commandSelftest(char *cmdLine)
                       : "volume survived the last reflash, /io_key.bin valid");
     }
 
-    // --- bench-chip goldens (full mode only) ------------------------------
+    // --- reference-chip goldens (full mode only) ---------------------------
     // The checks above prove the chip carries the AGREED config; the
-    // goldens prove it is THE recorded bench chip. A mismatch hard-FAILs:
+    // goldens prove it is THE recorded reference chip. A mismatch hard-FAILs:
     // this is the regression gate.
     if (!generic) {
         // G1 — the recorded factory serial.
         uint8_t sn[ATECC608_SERIAL_LEN];
         if (ATECC608_OK != atecc608_serial(sn)) {
-            st_report(&st, "golden: serial (bench)", false, "serial read failed");
-        } else if (0 != memcmp(sn, BENCH_SERIAL, sizeof(sn))) {
-            st_addf(d, sizeof(d), 0, "serial %02X %02X %02X %02X … (bench %02X %02X %02X %02X …)",
+            st_report(&st, "golden: serial", false, "serial read failed");
+        } else if (0 != memcmp(sn, GOLDEN_SERIAL, sizeof(sn))) {
+            st_addf(d, sizeof(d), 0, "serial %02X %02X %02X %02X … (recorded %02X %02X %02X %02X …)",
                     sn[0], sn[1], sn[2], sn[3],
-                    BENCH_SERIAL[0], BENCH_SERIAL[1], BENCH_SERIAL[2], BENCH_SERIAL[3]);
-            st_report(&st, "golden: serial (bench)", false, d);
+                    GOLDEN_SERIAL[0], GOLDEN_SERIAL[1], GOLDEN_SERIAL[2], GOLDEN_SERIAL[3]);
+            st_report(&st, "golden: serial", false, d);
         } else {
-            st_report(&st, "golden: serial (bench)", true,
-                      "matches the bench record (01 23 06 40 …)");
+            st_report(&st, "golden: serial", true,
+                      "matches the recorded value (01 23 06 40 …)");
         }
 
         // G2 — the six recorded ECC public keys (a failed generic read
@@ -2016,45 +2016,45 @@ static void commandSelftest(char *cmdLine)
         bool ok = true;
         size_t n = 0;
         for (int i = 0; i < 6; i++) {
-            if (0 != memcmp(pubs[i], BENCH_PUBKEYS[i], ATECC608_PUBKEY_LEN)) {
+            if (0 != memcmp(pubs[i], GOLDEN_PUBKEYS[i], ATECC608_PUBKEY_LEN)) {
                 ok = false;
                 n = st_addf(d, sizeof(d), n, "%s%u", 0 == n ? "" : ", ",
                             (unsigned)ecc_slots[i]);
             }
         }
-        st_report(&st, "golden: ecc pubkeys (bench)", ok,
-                  ok ? "all six match the bench record" : d);
+        st_report(&st, "golden: ecc pubkeys", ok,
+                  ok ? "all six match the recorded values" : d);
 
         // G3 — the recorded slot-7 KDF derivation value.
         if (!have_k1) {
-            st_report(&st, "golden: kdf value (bench)", false,
+            st_report(&st, "golden: kdf value", false,
                       have_io_key ? "derivation failed (see above)" : d);
-        } else if (0 != memcmp(k1, BENCH_KDF, sizeof(k1))) {
+        } else if (0 != memcmp(k1, GOLDEN_KDF, sizeof(k1))) {
             int first = 0;
-            while (first < ATECC608_KDF_OUT_LEN && k1[first] == BENCH_KDF[first]) {
+            while (first < ATECC608_KDF_OUT_LEN && k1[first] == GOLDEN_KDF[first]) {
                 first++;
             }
             st_addf(d, sizeof(d), 0,
-                    "differs from the bench value (first diff at byte %d)", first);
-            st_report(&st, "golden: kdf value (bench)", false, d);
+                    "differs from the recorded value (first diff at byte %d)", first);
+            st_report(&st, "golden: kdf value", false, d);
         } else {
-            st_report(&st, "golden: kdf value (bench)", true,
-                      "matches the bench value (6F FF 7D D6 …)");
+            st_report(&st, "golden: kdf value", true,
+                      "matches the recorded value (6F FF 7D D6 …)");
         }
 
         // G4 — the recorded config-zone CRC (the fully-locked zone).
         if (!have_zone) {
-            st_report(&st, "golden: config CRC (bench)", false,
+            st_report(&st, "golden: config CRC", false,
                       "zone read failed (see above)");
         } else {
             uint16_t crc = atecc608_config_crc16(zone);
-            if (BENCH_CRC16 != crc) {
-                st_addf(d, sizeof(d), 0, "CRC %04X (bench %04X)",
-                        (unsigned)crc, (unsigned)BENCH_CRC16);
-                st_report(&st, "golden: config CRC (bench)", false, d);
+            if (GOLDEN_CRC16 != crc) {
+                st_addf(d, sizeof(d), 0, "CRC %04X (recorded %04X)",
+                        (unsigned)crc, (unsigned)GOLDEN_CRC16);
+                st_report(&st, "golden: config CRC", false, d);
             } else {
-                st_report(&st, "golden: config CRC (bench)", true,
-                          "C904 — matches the bench record");
+                st_report(&st, "golden: config CRC", true,
+                          "C904 — matches the recorded value");
             }
         }
     }
@@ -2062,7 +2062,7 @@ static void commandSelftest(char *cmdLine)
     const int total = st.passed + st.failed;
     if (0 == st.failed) {
         printf("SELFTEST: %d/%d checks PASSED%s\n", total, total,
-               generic ? " (generic mode — bench goldens not run)" : "");
+               generic ? " (generic mode — reference goldens not run)" : "");
     } else {
         printf("SELFTEST: %d of %d checks FAILED (see the [FAIL] lines)\n",
                st.failed, total);

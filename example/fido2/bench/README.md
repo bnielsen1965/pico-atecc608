@@ -1,6 +1,6 @@
 # bench/
 
-Bench tools for the Pico ATECC608 FIDO2 key (Phase 1). Both target the
+Bench tools for the Pico ATECC608 FIDO2 key. Both target the
 key's USB/HID interface on the Linux bench machine (Fedora, kernel 7.2).
 
 ## fido_desc_probe (C, libusb-1.0)
@@ -21,7 +21,7 @@ reattaches it on exit.
     # run (root: detaches the kernel driver + opens the device)
     sudo ./fido_desc_probe
 
-Expected (Phase 1, provisioned or not): `GET_DESC(REPORT) len=34` → the
+Expected (provisioned or not): `GET_DESC(REPORT) len=34` → the
 34-byte FIDO U2F report descriptor, `GET_DESC(HID) len=9` →
 `09 21 11 01 00 01 22 22 00`.
 

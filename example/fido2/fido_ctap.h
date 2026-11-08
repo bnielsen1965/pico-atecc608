@@ -21,9 +21,9 @@
 // the fido2_cbor_cb_t contract the transport hands the handler (see
 // fido_ctaphid.h).
 //
-// Phase 2 implemented GET_INFO (0x04). Phase 3 adds MAKE_CREDENTIAL
-// (0x01); Phase 4 adds GET_ASSERTION (0x02), GET_NEXT_ASSERTION (0x08)
-// and RESET (0x07). A request whose answer needs user presence is
+// The dispatch implements GET_INFO (0x04), MAKE_CREDENTIAL (0x01),
+// GET_ASSERTION (0x02), GET_NEXT_ASSERTION (0x08) and RESET (0x07).
+// A request whose answer needs user presence is
 // parsed synchronously (errors answered at once), then the handler
 // returns with *resp_len == 0 and the transport keeps the channel
 // active (keep-alives with status UP_NEEDED, CANCEL recorded) until
@@ -96,7 +96,7 @@ enum {
 //
 // maxMsgSize 256: the transport's message buffer is 7609 bytes, but the
 // declared value bounds what clients may send; 256 is the common
-// real-world value (SoloKey) and covers every Phase 2-4 request shape
+// real-world value (SoloKey) and covers every request shape
 // (a makeCredential with a 64-byte credential ID is well under).
 #define FIDO_CTAP_MAX_MSG_SIZE      256
 // allow-list cap for GET_ASSERTION (spec: > 0 if present). 128 entries
@@ -139,8 +139,8 @@ enum {
 // a gap longer than this discards the enumeration state.
 #define FIDO_CTAP_GA_ENUM_TIMEOUT_MS 30000
 
-// The key backend the CTAP layer signs with (Phase 3: the ATECC608 on
-// the Pico; deterministic fakes in the host tests). Every hook is
+// The key backend the CTAP layer signs with (the ATECC608 on the Pico;
+// deterministic fakes in the host tests). Every hook is
 // optional (NULL = the operation is impossible, which the command
 // answers CTAP2_ERR_OTHER), but a working registration needs
 // genkey/sign/rand/clock and a working login needs get_pubkey and
@@ -230,10 +230,9 @@ typedef enum {
     FIDO_CTAP_OP_RESETTING,
 } fido_ctap_op_t;
 
-// The dispatch context. Phase 2 was read-only identity data; Phase 3
-// adds the key backend, the credential store and the pending
-// transaction; Phase 4 widens the pending transaction to the three
-// UP-waiting operations and adds the get_next_assertion state.
+// The dispatch context: the identity (AAGUID), the key backend, the
+// credential store, the pending transaction (the three UP-waiting
+// operations) and the get_next_assertion state.
 typedef struct {
     uint8_t aaguid[16];   // the claimed AAGUID (fixed per firmware)
     // User presence: the app records a "touch" here — today the UART0
@@ -255,8 +254,8 @@ typedef struct {
 } fido_ctap_ctx_t;
 
 // Fill the context with this firmware's identity (the fixed AAGUID) and
-// zero the Phase 3 state (the app installs the key ops and the
-// credential persistence hooks afterwards).
+// zero the rest (the app installs the key ops and the credential
+// persistence hooks afterwards).
 void fido_ctap_ctx_init(fido_ctap_ctx_t *ctx);
 
 // The CTAP2 dispatch — implements fido2_cbor_cb_t, so it installs

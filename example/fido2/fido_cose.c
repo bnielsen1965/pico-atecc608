@@ -24,8 +24,8 @@ uint32_t fido_cose_encode_es256(const uint8_t pub[64], uint8_t *out,
     // RFC 8152 §13.1 label set (kty=1, crv=3, x=-1, y=-2): that 4-entry
     // form is what Firefox rejects with "invalid type: byte array,
     // expected i64" (it reads our -1/x byte string where it wants the
-    // curve int) — round C16. (The C6 "5-entry was rejected by Chromium"
-    // note referred to a MALFORMED 5-entry key with crv/x/y on the wrong
+    // curve int). (An earlier "5-entry was rejected by Chromium" note
+    // referred to a MALFORMED 5-entry key with crv/x/y on the wrong
     // labels, not this one.)
     fido_cbor_enc_map(&e, 5);
     // Keys in ascending encoded-byte order (RFC 8949 canonical form):

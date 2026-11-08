@@ -1,4 +1,4 @@
-# Host unit tests for the ATECC608 module (Phase 4A).
+# Host unit tests for the ATECC608 module.
 #
 # Standalone host build: no pico-sdk, no chip. The cryptoauthlib core is
 # compiled exactly as in the top-level build, except the RP2350 I2C HAL is
@@ -104,7 +104,7 @@ target_include_directories(mock_chip PUBLIC
 target_link_libraries(mock_chip PUBLIC ca_host)
 target_compile_options(mock_chip PRIVATE -Wall -Wextra)
 
-# The module under test: the HAL-agnostic Phase 4A/5 sources only.
+# The module under test: the HAL-agnostic sources only.
 # (src/atecc608.c is excluded — it needs the RP2350 HAL / pico-sdk.)
 add_library(atecc608_host STATIC
     ${MOD_ROOT}/src/atecc608_config.c

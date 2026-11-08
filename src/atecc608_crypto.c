@@ -1,5 +1,5 @@
-// ATECC608 crypto pass-through API (Phase 5): KDF (PRF mode) over the
-// real cryptoauthlib atcab_* / atcah_* layers. HAL-agnostic — see
+// ATECC608 crypto pass-through API: KDF (PRF mode), sign, and verify over
+// the real cryptoauthlib atcab_* / atcah_* layers. HAL-agnostic — see
 // include/atecc608/atecc608_crypto.h for the contract.
 
 #include "atecc608/atecc608_crypto.h"
@@ -30,8 +30,8 @@ atecc608_status_t atecc608_kdf_prf(uint8_t slot,
     }
 
     // Load the TempKey nonce (pass-through: the buffer's CONTENTS become
-    // the chip's TempKey — bench-verified 2026-10-25). NULL = a fixed
-    // zero nonce, for a deterministic output.
+    // the chip's TempKey). NULL = a fixed zero nonce, for a deterministic
+    // output.
     atca = atcab_nonce((NULL != nonce) ? nonce : zero_nonce);
     if (ATCA_SUCCESS != atca) {
         return atecc608_map_status(atca);
@@ -51,8 +51,8 @@ atecc608_status_t atecc608_kdf_prf(uint8_t slot,
         return atecc608_map_status(atca);
     }
 
-    // Enforced I/O protection (kdf_prot=1, bench-verified 2026-10-25):
-    // the response carries a 32-byte nonce and out is ENCRYPTED. The
+    // Enforced I/O protection (kdf_prot=1): the response carries a
+    // 32-byte nonce and out is ENCRYPTED. The
     // library leaves resp_nonce untouched when the response carried no
     // nonce, so any non-zero byte marks the encrypted case (a random
     // 32-byte nonce is all-zero with probability 2^-256).

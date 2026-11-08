@@ -46,7 +46,7 @@
  * missing, this app says what is missing and where to get it; it does
  * NOT provision the chip itself — the console example is the provisioner.
  *
- * Bench note: the bench chip's slot 7 holds all-zero factory content
+ * Note: the reference chip's slot 7 holds all-zero factory content
  * (the data zone is locked, so it never gets re-keyed). The demo works
  * with it as-is; a real deployment provisions a random master into slot 7
  * during bring-up, before the data-zone lock.
@@ -106,7 +106,7 @@ static atecc608_cfg_t s_cfg = {
 
 // --- vault geometry ----------------------------------------------------------
 
-// KDF master: data slot 7 (secret; never leaves the chip). The bench
+// KDF master: data slot 7 (secret; never leaves the chip). The reference
 // chip's slot 7 is all-zero factory content — see the header note.
 #define VAULT_MASTER_SLOT 7
 

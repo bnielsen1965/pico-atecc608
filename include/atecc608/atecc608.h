@@ -10,10 +10,10 @@
 // atecc608_last_error() returns the raw ATCA_STATUS code from
 // cryptoauthlib for diagnostics.
 //
-// Phase 3 scope: lifecycle, diagnostics, zone/slot read-write, lock status.
-// Phase 4A adds the config builder (atecc608_config.h) and the guarded
-// provisioning API (atecc608_prov.h); crypto pass-through (kdf/sign/verify)
-// arrives in Phase 5.
+// This header covers lifecycle, diagnostics, and zone/slot read-write.
+// The rest of the API family: the config-zone builder
+// (atecc608_config.h), the guarded provisioning API (atecc608_prov.h),
+// and the crypto pass-through (atecc608_crypto.h).
 
 #pragma once
 

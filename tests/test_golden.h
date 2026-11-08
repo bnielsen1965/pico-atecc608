@@ -1,4 +1,4 @@
-// Shared "golden" config intent for the Phase 4A unit tests.
+// Shared "golden" config intent for the unit tests.
 //
 // A hand-computed provisioning intent that exercises the encoding of nearly
 // every builder field: ECC private key slots, an authorized public key slot

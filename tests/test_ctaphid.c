@@ -9,7 +9,7 @@
 // (unknown CIDs auto-accepted, one in-flight message at a time, LRU
 // eviction so broadcast INIT can never fail), the 750 ms busy timeout
 // (and its reset by continuation packets), and keep-alive throttling —
-// plus the deferred-transaction contract (Phase 3): a CBOR handler that
+// plus the deferred-transaction contract: a CBOR handler that
 // defers (resp_len 0) holds its channel with no immediate response,
 // UP-wait keep-alives flow at the 500 ms throttle, a CANCEL (or a
 // channel-sync INIT) on that channel records a cancel, the busy rules
@@ -848,7 +848,7 @@ static void t_channel_eviction(void)
     CHECK(verify_ping_resp(s_nreports - 1, 2, data, 3) == 1);
 }
 
-// --- deferred transactions (Phase 3) ------------------------------------------------------
+// --- deferred transactions ----------------------------------------------------------------
 
 // True when `cid` has a slot in the channel table (the struct is fully
 // exposed; the tests already reach into its state).
