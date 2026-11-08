@@ -24,6 +24,15 @@ an RP2350 I2C HAL and a curated, stable `atecc608_*` API.
 > access was granted.
 ---
 
+## AI Transparency
+
+This library was developed using AI.
+
+I am using an AMD Radeon AI Pro R9700 32GB GPU, a quantized Qwen3.8 27B model, a custom 
+build of llama.cpp, and the OpenCode coding agent.
+
+---
+
 ## Application scenarios
 
 This repo contains two projects: the **module** (the product: the
